@@ -1,8 +1,10 @@
 pub mod cache;
 pub mod cache_policy;
+pub mod service;
 
 pub use cache::PolicyCache;
 pub use cache_policy::CachePolicy;
+pub use service::CachedService;
 use std::{
     collections::HashMap,
     future::Future,
