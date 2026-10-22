@@ -262,4 +262,92 @@ mod tests {
             "cancelled operation left a stale entry"
         );
     }
+    #[tokio::test]
+    async fn remaining_caller_retries_after_initializer_is_cancelled() {
+        let coalescer =
+            Arc::new(TaskCoalescer::<String, usize, String>::new());
+
+        let started = Arc::new(tokio::sync::Notify::new());
+        let executions = Arc::new(AtomicUsize::new(0));
+
+        // Первый вызов запускает долгую операцию.
+        let first_coalescer = Arc::clone(&coalescer);
+        let first_started = Arc::clone(&started);
+        let first_executions = Arc::clone(&executions);
+
+        let first_task = tokio::spawn(async move {
+            first_coalescer
+                .run("shared-key".to_owned(), || async move {
+                    first_executions.fetch_add(1, Ordering::SeqCst);
+                    first_started.notify_one();
+
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    Ok(1)
+                })
+                .await
+        });
+
+        // Ждём начала первой операции.
+        started.notified().await;
+
+        // Второй вызов использует тот же ключ.
+        let second_coalescer = Arc::clone(&coalescer);
+        let second_executions = Arc::clone(&executions);
+
+        let second_task = tokio::spawn(async move {
+            second_coalescer
+                .run("shared-key".to_owned(), || async move {
+                    second_executions.fetch_add(1, Ordering::SeqCst);
+                    Ok(42)
+                })
+                .await
+        });
+
+        // Убеждаемся, что оба вызова зарегистрированы.
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let caller_count = {
+                    let tasks = coalescer.tasks.lock().unwrap();
+
+                    tasks
+                        .get("shared-key")
+                        .map(|entry| entry.callers.load(Ordering::SeqCst))
+                        .unwrap_or(0)
+                };
+
+                if caller_count == 2 {
+                    break;
+                }
+
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("second caller did not join the shared operation");
+
+        // Отменяем первый вызов.
+        first_task.abort();
+        let _ = first_task.await;
+
+        // Второй вызов должен завершиться успешно.
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            second_task,
+        )
+        .await
+        .expect("remaining caller did not finish")
+        .expect("remaining caller task panicked")
+        .expect("remaining caller returned an error");
+
+        assert_eq!(*result, 42);
+        assert_eq!(executions.load(Ordering::SeqCst), 2);
+
+        // После завершения не должно остаться старой записи.
+        let tasks = coalescer.tasks.lock().unwrap();
+
+        assert!(
+            !tasks.contains_key("shared-key"),
+            "completed operation left a stale entry"
+        );
+    }
 }
