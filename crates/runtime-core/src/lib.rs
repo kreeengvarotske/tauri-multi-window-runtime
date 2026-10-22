@@ -1,21 +1,51 @@
-
 use std::{
     collections::HashMap,
     future::Future,
     hash::Hash,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
 };
 
-use tokio::sync::{Mutex, OnceCell};
+use tokio::sync::OnceCell;
 
-/// Координирует одинаковые параллельные операции.
-///
-/// Для одного ключа операция выполняется один раз,
-/// а остальные вызывающие получают тот же результат.
-///
-/// Это пока не кэш: после завершения операции запись удаляется.
+/// Одна операция и количество вызовов, которые используют её.
+struct TaskEntry<V, E> {
+    cell: OnceCell<Result<Arc<V>, Arc<E>>>,
+    callers: AtomicUsize,
+}
+
+/// Удаляет запись при завершении или отмене вызывающего вызова.
+struct CallerGuard<'a, K: Eq + Hash, V, E> {
+    tasks: &'a Mutex<HashMap<K, Arc<TaskEntry<V, E>>>>,
+    key: K,
+    entry: Arc<TaskEntry<V, E>>,
+}
+
+impl<K, V, E> Drop for CallerGuard<'_, K, V, E>
+where
+    K: Eq + Hash,
+{
+    fn drop(&mut self) {
+        let mut tasks = self.tasks.lock().unwrap_or_else(|p| p.into_inner());
+
+        let previous = self.entry.callers.fetch_sub(1, Ordering::Relaxed);
+
+        if previous == 1
+            && tasks
+                .get(&self.key)
+                .is_some_and(|current| Arc::ptr_eq(current, &self.entry))
+        {
+            tasks.remove(&self.key);
+        }
+    }
+}
+
+/// Объединяет одинаковые параллельные операции.
+/// Результаты не кэшируются после завершения всех вызовов.
 pub struct TaskCoalescer<K, V, E> {
-    tasks: Mutex<HashMap<K, Arc<OnceCell<Result<Arc<V>, Arc<E>>>>>>,
+    tasks: Mutex<HashMap<K, Arc<TaskEntry<V, E>>>>,
 }
 
 impl<K, V, E> Default for TaskCoalescer<K, V, E>
@@ -42,40 +72,34 @@ where
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<V, E>>,
     {
-        let cell = {
-            let mut tasks = self.tasks.lock().await;
+        let entry = {
+            let mut tasks = self.tasks.lock().unwrap_or_else(|p| p.into_inner());
 
-            tasks
+            let entry = tasks
                 .entry(key.clone())
-                .or_insert_with(|| Arc::new(OnceCell::new()))
-                .clone()
+                .or_insert_with(|| {
+                    Arc::new(TaskEntry {
+                        cell: OnceCell::new(),
+                        callers: AtomicUsize::new(0),
+                    })
+                })
+                .clone();
+
+            entry.callers.fetch_add(1, Ordering::Relaxed);
+            entry
         };
 
-        // Mutex<HashMap> уже освобождён.
-        // Ожидание операции не блокирует другие ключи.
-        let result = cell
-            .get_or_init(|| async move {
-                operation()
-                    .await
-                    .map(Arc::new)
-                    .map_err(Arc::new)
-            })
+        let _guard = CallerGuard {
+            tasks: &self.tasks,
+            key,
+            entry: Arc::clone(&entry),
+        };
+
+        entry
+            .cell
+            .get_or_init(|| async move { operation().await.map(Arc::new).map_err(Arc::new) })
             .await
-            .clone();
-
-        // Удаляем только завершённую запись, которой больше
-        // не пользуются другие ожидающие вызовы.
-        if Arc::strong_count(&cell) == 2 {
-            let mut tasks = self.tasks.lock().await;
-
-            if let Some(current) = tasks.get(&key) {
-                if Arc::ptr_eq(current, &cell) && Arc::strong_count(current) == 2 {
-                    tasks.remove(&key);
-                }
-            }
-        }
-
-        result
+            .clone()
     }
 }
 
@@ -84,8 +108,8 @@ mod tests {
     use super::TaskCoalescer;
     use std::{
         sync::{
-            Arc,
             atomic::{AtomicUsize, Ordering},
+            Arc,
         },
         time::Duration,
     };
@@ -151,12 +175,91 @@ mod tests {
                 })
                 .await;
 
-            assert_eq!(
-                result.unwrap_err().as_str(),
-                "temporary failure"
-            );
+            assert_eq!(result.unwrap_err().as_str(), "temporary failure");
         }
 
         assert_eq!(executions.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn retries_operation_after_initializer_is_cancelled() {
+        let coalescer = Arc::new(TaskCoalescer::<String, usize, String>::new());
+        let started = Arc::new(tokio::sync::Notify::new());
+
+        let first_coalescer = Arc::clone(&coalescer);
+        let first_started = Arc::clone(&started);
+
+        let first_task = tokio::spawn(async move {
+            first_coalescer
+                .run("cancel-test".to_owned(), || async move {
+                    first_started.notify_one();
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    Ok(1)
+                })
+                .await
+        });
+
+        // Ждём, пока первая операция действительно начнётся.
+        started.notified().await;
+
+        // Отменяем задачу, выполнявшую первую операцию.
+        first_task.abort();
+        let _ = first_task.await;
+
+        // Следующий вызов должен суметь выполнить операцию.
+        let result = coalescer
+            .run("cancel-test".to_owned(), || async { Ok(42) })
+            .await
+            .unwrap();
+
+        assert_eq!(*result, 42);
+    }
+
+    #[tokio::test]
+    async fn completed_tasks_can_be_run_again() {
+        let coalescer = TaskCoalescer::<String, usize, String>::new();
+
+        let first = coalescer
+            .run("repeat".to_owned(), || async { Ok(10) })
+            .await
+            .unwrap();
+
+        let second = coalescer
+            .run("repeat".to_owned(), || async { Ok(20) })
+            .await
+            .unwrap();
+
+        assert_eq!(*first, 10);
+        assert_eq!(*second, 20);
+    }
+
+    #[tokio::test]
+    async fn cancelled_last_caller_does_not_leave_stale_entry() {
+        let coalescer = Arc::new(TaskCoalescer::<String, usize, String>::new());
+        let started = Arc::new(tokio::sync::Notify::new());
+
+        let task_coalescer = Arc::clone(&coalescer);
+        let task_started = Arc::clone(&started);
+
+        let task = tokio::spawn(async move {
+            task_coalescer
+                .run("abandoned-key".to_owned(), || async move {
+                    task_started.notify_one();
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    Ok(1)
+                })
+                .await
+        });
+
+        started.notified().await;
+
+        task.abort();
+        let _ = task.await;
+
+        let tasks = coalescer.tasks.lock().unwrap();
+        assert!(
+            !tasks.contains_key("abandoned-key"),
+            "cancelled operation left a stale entry"
+        );
     }
 }
