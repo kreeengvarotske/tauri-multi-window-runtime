@@ -4,18 +4,24 @@ pub mod service;
 
 pub use cache::PolicyCache;
 pub use cache_policy::CachePolicy;
-pub use service::CachedService;
+pub use service::{CachedService, ServiceRunKind, ServiceRunOutcome};
 use std::{
     collections::HashMap,
     future::Future,
     hash::Hash,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
 };
 
 use tokio::sync::OnceCell;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CoalescerRunKind {
+    Executed,
+    Coalesced,
+}
 
 /// Одна операция и количество вызовов, которые используют её.
 struct TaskEntry<V, E> {
@@ -74,40 +80,70 @@ where
         Self::default()
     }
 
-    pub async fn run<F, Fut>(&self, key: K, operation: F) -> Result<Arc<V>, Arc<E>>
-    where
-        F: FnOnce() -> Fut,
-        Fut: Future<Output = Result<V, E>>,
-    {
-        let entry = {
-            let mut tasks = self.tasks.lock().unwrap_or_else(|p| p.into_inner());
+    pub async fn run<F, Fut>(
+    &self,
+    key: K,
+    operation: F,
+) -> Result<Arc<V>, Arc<E>>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<V, E>>,
+{
+    self.run_with_kind(key, operation).await.0
+}
 
-            let entry = tasks
-                .entry(key.clone())
-                .or_insert_with(|| {
-                    Arc::new(TaskEntry {
-                        cell: OnceCell::new(),
-                        callers: AtomicUsize::new(0),
-                    })
+pub(crate) async fn run_with_kind<F, Fut>(
+    &self,
+    key: K,
+    operation: F,
+) -> (Result<Arc<V>, Arc<E>>, CoalescerRunKind)
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<V, E>>,
+{
+    let entry = {
+        let mut tasks = self.tasks.lock().unwrap_or_else(|p| p.into_inner());
+
+        let entry = tasks
+            .entry(key.clone())
+            .or_insert_with(|| {
+                Arc::new(TaskEntry {
+                    cell: OnceCell::new(),
+                    callers: AtomicUsize::new(0),
                 })
-                .clone();
+            })
+            .clone();
 
-            entry.callers.fetch_add(1, Ordering::Relaxed);
-            entry
-        };
-
-        let _guard = CallerGuard {
-            tasks: &self.tasks,
-            key,
-            entry: Arc::clone(&entry),
-        };
-
+        entry.callers.fetch_add(1, Ordering::Relaxed);
         entry
-            .cell
-            .get_or_init(|| async move { operation().await.map(Arc::new).map_err(Arc::new) })
-            .await
-            .clone()
-    }
+    };
+
+    let _guard = CallerGuard {
+        tasks: &self.tasks,
+        key,
+        entry: Arc::clone(&entry),
+    };
+
+    let initialized_by_this_call = Arc::new(AtomicBool::new(false));
+    let initializer_flag = Arc::clone(&initialized_by_this_call);
+
+    let result = entry
+        .cell
+        .get_or_init(|| async move {
+            initializer_flag.store(true, Ordering::Relaxed);
+            operation().await.map(Arc::new).map_err(Arc::new)
+        })
+        .await
+        .clone();
+
+    let kind = if initialized_by_this_call.load(Ordering::Relaxed) {
+        CoalescerRunKind::Executed
+    } else {
+        CoalescerRunKind::Coalesced
+    };
+
+    (result, kind)
+}
 }
 
 #[cfg(test)]

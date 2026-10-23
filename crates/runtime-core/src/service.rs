@@ -1,19 +1,44 @@
-use crate::{cache::PolicyCache, cache_policy::CachePolicy, TaskCoalescer};
+
+use crate::{
+    cache::PolicyCache,
+    cache_policy::CachePolicy,
+    CoalescerRunKind,
+    TaskCoalescer,
+};
 use std::{
     future::Future,
     hash::Hash,
     sync::{Arc, Mutex},
 };
 
-/// Internal wrapper: lets the coalescer share an `Arc<V>` while it stores
-/// and returns its own `Arc<CachedValue<V>>`.
+/// Describes how a service call obtained its result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceRunKind {
+    /// The result was read from the cache.
+    CacheHit,
+    /// The call shared an operation started by another caller.
+    Coalesced,
+    /// This call initialized and executed the operation.
+    Executed,
+}
+
+/// The result of a service call, including execution metadata.
+#[derive(Debug)]
+pub struct ServiceRunOutcome<V, E> {
+    /// The successful value or the shared operation error.
+    pub result: Result<Arc<V>, Arc<E>>,
+    /// How this call obtained its result.
+    pub kind: ServiceRunKind,
+}
+
+/// Internal wrapper that allows sharing a value through the coalescer.
 struct CachedValue<V>(Arc<V>);
 
-/// Combines cache lookup, concurrent request coalescing, and successful-result caching.
+/// Combines cache lookup, concurrent request coalescing,
+/// and successful-result caching.
 ///
-/// The cache policy applies to every key handled by this service instance.
-/// Errors are never cached. Calls started after `invalidate` or `clear` use a
-/// new generation, so they do not join an older in-flight operation.
+/// Errors are never cached. Calls started after `invalidate` or `clear`
+/// use a new generation, so they do not join older in-flight work.
 pub struct CachedService<K, V, E> {
     cache: PolicyCache<K, V>,
     coalescer: TaskCoalescer<(K, u64), CachedValue<V>, E>,
@@ -35,15 +60,39 @@ where
         }
     }
 
-    /// Returns a cached value, or computes it once for concurrent calls with
-    /// the same key and current generation.
-    pub async fn run<F, Fut>(&self, key: K, operation: F) -> Result<Arc<V>, Arc<E>>
+    /// Returns a value or error using the original API.
+    ///
+    /// This method remains compatible with existing callers.
+    pub async fn run<F, Fut>(
+        &self,
+        key: K,
+        operation: F,
+    ) -> Result<Arc<V>, Arc<E>>
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<V, E>>,
     {
-        // Read the generation and cache under the same gate used by invalidation.
-        // This gives invalidation and cache publication a consistent order.
+        self.run_with_metadata(key, operation).await.result
+    }
+
+    /// Like `run`, but also reports how the result was obtained.
+    ///
+    /// `CacheHit` means the value was found in the cache.
+    /// `Coalesced` means another caller initialized the shared operation.
+    /// `Executed` means this caller initialized the shared operation.
+    ///
+    /// Errors are returned in `outcome.result` and are not cached.
+    pub async fn run_with_metadata<F, Fut>(
+        &self,
+        key: K,
+        operation: F,
+    ) -> ServiceRunOutcome<V, E>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<V, E>>,
+    {
+        // Read the generation and cache under the same gate used by
+        // invalidation. This keeps cache publication and invalidation ordered.
         let generation = {
             let generation = self
                 .generation
@@ -51,7 +100,10 @@ where
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
 
             if let Some(value) = self.cache.get(&key) {
-                return Ok(value);
+                return ServiceRunOutcome {
+                    result: Ok(value),
+                    kind: ServiceRunKind::CacheHit,
+                };
             }
 
             *generation
@@ -62,13 +114,13 @@ where
         let policy = self.policy;
         let cache_key = key.clone();
 
-        self.coalescer
-            .run((key, generation), || async move {
+        let (result, coalescer_kind) = self
+            .coalescer
+            .run_with_kind((key, generation), || async move {
                 let value = operation().await?;
                 let value = Arc::new(value);
 
-                // Publish the value before the shared operation completes. An
-                // invalidation that occurred meanwhile prevents stale insertion.
+                // An invalidation during the operation prevents stale insertion.
                 let current_generation = generation_gate
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -79,32 +131,43 @@ where
 
                 Ok(CachedValue(value))
             })
-            .await
-            .map(|shared| Arc::clone(&shared.0))
+            .await;
+
+        let result = result.map(|shared| Arc::clone(&shared.0));
+
+        let kind = match coalescer_kind {
+            CoalescerRunKind::Executed => ServiceRunKind::Executed,
+            CoalescerRunKind::Coalesced => ServiceRunKind::Coalesced,
+        };
+
+        ServiceRunOutcome { result, kind }
     }
 
     /// Invalidates a key and separates future calls from older in-flight work.
     ///
-    /// This bumps the service-wide generation: operations already in flight for
-    /// any key will still return to their existing callers, but will not populate
+    /// This bumps the service-wide generation: operations already in flight
+    /// for any key still return to existing callers, but cannot populate
     /// the cache. Returns `true` if a cached entry existed.
     pub fn invalidate(&self, key: &K) -> bool {
         let mut generation = self
             .generation
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+
         *generation = generation.wrapping_add(1);
         self.cache.invalidate(key)
     }
 
-    /// Clears all cached values and separates future calls from older in-flight work.
-    /// Operations already in flight still return to their callers but cannot
-    /// repopulate the cache after this call.
+    /// Clears all cached values and separates future calls from older work.
+    ///
+    /// Existing callers may still receive their results, but those results
+    /// cannot repopulate the cache after this call.
     pub fn clear(&self) {
         let mut generation = self
             .generation
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+
         *generation = generation.wrapping_add(1);
         self.cache.clear();
     }
@@ -122,7 +185,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::CachedService;
+    use super::{CachedService, ServiceRunKind};
     use crate::cache_policy::CachePolicy;
     use std::{
         sync::{
@@ -174,6 +237,7 @@ mod tests {
             })
             .await
             .unwrap();
+
         let second = service
             .run(key, || async {
                 executions.fetch_add(1, Ordering::SeqCst);
@@ -253,8 +317,8 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(*first, 1);
 
+        assert_eq!(*first, 1);
         assert!(service.invalidate(&key));
         assert!(!service.invalidate(&key));
 
@@ -311,6 +375,7 @@ mod tests {
 
         let first_service = Arc::clone(&service);
         let first_started = Arc::clone(&started);
+
         let first_task = tokio::spawn(async move {
             first_service
                 .run("resource".to_owned(), || async move {
@@ -329,9 +394,10 @@ mod tests {
             .run("resource".to_owned(), || async { Ok(2) })
             .await
             .unwrap();
+
         assert_eq!(*fresh, 2);
 
-        // The earlier caller still receives its result, but must not overwrite the cache.
+        // The earlier caller still receives its result, but cannot overwrite the cache.
         let old = first_task.await.unwrap().unwrap();
         assert_eq!(*old, 1);
 
@@ -339,6 +405,89 @@ mod tests {
             .run("resource".to_owned(), || async { Ok(3) })
             .await
             .unwrap();
+
         assert_eq!(*cached, 2);
+    }
+
+    #[tokio::test]
+    async fn reports_executed_then_cache_hit() {
+        let service = CachedService::<String, usize, String>::new(CachePolicy::Forever);
+
+        let first = service
+            .run_with_metadata("settings".to_owned(), || async { Ok(42) })
+            .await;
+
+        assert_eq!(first.kind, ServiceRunKind::Executed);
+        assert_eq!(*first.result.unwrap(), 42);
+
+        let second = service
+            .run_with_metadata("settings".to_owned(), || async { Ok(100) })
+            .await;
+
+        assert_eq!(second.kind, ServiceRunKind::CacheHit);
+        assert_eq!(*second.result.unwrap(), 42);
+    }
+
+    #[tokio::test]
+    async fn reports_coalesced_for_concurrent_request() {
+        let service = Arc::new(CachedService::<String, usize, String>::new(
+            CachePolicy::Forever,
+        ));
+
+        let first_started = Arc::new(tokio::sync::Notify::new());
+        let first_service = Arc::clone(&service);
+        let first_signal = Arc::clone(&first_started);
+
+        let first_task = tokio::spawn(async move {
+            first_service
+                .run_with_metadata("shared".to_owned(), || async move {
+                    first_signal.notify_one();
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    Ok(42)
+                })
+                .await
+        });
+
+        first_started.notified().await;
+
+        let second_entered = Arc::new(tokio::sync::Notify::new());
+        let second_service = Arc::clone(&service);
+        let second_signal = Arc::clone(&second_entered);
+
+        let second_task = tokio::spawn(async move {
+            second_signal.notify_one();
+
+            second_service
+                .run_with_metadata("shared".to_owned(), || async { Ok(99) })
+                .await
+        });
+
+        second_entered.notified().await;
+
+        let first = first_task.await.unwrap();
+        let second = second_task.await.unwrap();
+
+        assert_eq!(first.kind, ServiceRunKind::Executed);
+        assert_eq!(second.kind, ServiceRunKind::Coalesced);
+        assert_eq!(*first.result.unwrap(), 42);
+        assert_eq!(*second.result.unwrap(), 42);
+    }
+
+    #[tokio::test]
+    async fn reports_execution_kind_when_operation_fails() {
+        let service = CachedService::<String, usize, String>::new(CachePolicy::Forever);
+
+        let outcome = service
+            .run_with_metadata("failing".to_owned(), || async {
+                Err::<usize, String>("expected failure".to_owned())
+            })
+            .await;
+
+        assert_eq!(outcome.kind, ServiceRunKind::Executed);
+        assert_eq!(
+            outcome.result.unwrap_err().as_str(),
+            "expected failure"
+        );
+        assert_eq!(service.cached_entries(), 0);
     }
 }
