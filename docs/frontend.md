@@ -4,14 +4,14 @@
 
 Стек: Tauri v2, Vite, TypeScript без UI-фреймворка, vitest + jsdom для тестов.
 
-**Статус интеграции.** Rust-команд пока нет. Фронтенд полностью работает в режиме MOCK; режим TAURI собирается и запускается, но любой запрос к ядру закончится `COMMAND_NOT_FOUND`. Операции, которые нужны от ядра, описаны в [frontend-backend-contract.md](frontend-backend-contract.md) (предложение).
+**Статус интеграции.** Режим TAURI подключён к четырём Rust-командам: метаданные, статистика Core, инвалидация проекта и очистка кэша. Управление кэшем доступно только из главного TAURI-окна; после операции интерфейс обновляет статистику. В режиме MOCK реальные счётчики и административные операции намеренно недоступны. Контракт описан в [frontend-backend-contract.md](frontend-backend-contract.md).
 
 ## Команды
 
 ```bash
 npm install
 npm run dev:mock     # браузер, MOCK-режим, без Rust
-npm run tauri dev    # Tauri-окна, режим TAURI (нужны команды Core)
+npm run tauri dev    # Tauri-окна с реальными командами Rust Core
 npm test             # vitest: адаптер, ошибки, UI-сценарии, граница UI/backend
 npm run typecheck    # tsc --noEmit
 npm run build        # tsc + vite build (TAURI)
@@ -42,13 +42,15 @@ src/
     stats.ts                    инвариант счётчиков, описание политики кэша
   components/                   DOM-компоненты, получают RuntimeClient аргументом
   test/fakes.ts                 тестовые транспорты
-src-tauri/                      пустая оболочка Tauri: окна, CSP, capabilities, без команд
+src-tauri/                      команды Tauri, capabilities и проверка прав окон
 ```
 
 ## Граница UI и backend
 
 - Компоненты получают `RuntimeClient` аргументом и импортируют только `lib/runtime` (index). `src/boundary.test.ts` падает, если UI импортирует `@tauri-apps/*` или внутренности `lib/runtime`.
-- Замена mock на реальные команды: зарегистрировать команды в Rust и запустить в режиме `tauri`. UI менять не нужно; если меняется форма данных, правится `contract.ts`, и `tsc` покажет все места.
+- Режим `tauri` вызывает реальные Rust-команды. Все вызовы идут через `RuntimeClient`; UI не импортирует транспорт напрямую.
+- `cache.invalidateProject({ projectId })` и `cache.clear()` доступны в главном TAURI-окне и автоматически обновляют статистику после операции.
+- SDK валидирует `projectId` до IPC; длина измеряется в Unicode scalar values, так же, как в Rust.
 - В SDK нет дедупликации, кэша и ретраев. Окно не передаёт свою метку или права, контекст определяет ядро.
 
 ## Mock
