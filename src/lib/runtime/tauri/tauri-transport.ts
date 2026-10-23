@@ -2,8 +2,11 @@
 // Error normalization is done by the client, not here.
 
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   RUNTIME_COMMANDS,
+  RUNTIME_EVENTS,
+  type CacheInvalidatedEvent,
   type GetMetadataParams,
   type InvalidateProjectResult,
   type ProjectMetadata,
@@ -21,6 +24,11 @@ export function createTauriTransport(): RuntimeTransport {
     invalidateProject: ({ projectId }: GetMetadataParams) =>
       call<InvalidateProjectResult>(RUNTIME_COMMANDS.invalidateProject, { projectId }),
     clearCache: () => call<void>(RUNTIME_COMMANDS.clearCache),
+    // Outside Tauri there is nobody to broadcast, so the subscription is a no-op.
+    onCacheInvalidated: async (handler) => {
+      if (!isTauri()) return () => {};
+      return listen<CacheInvalidatedEvent>(RUNTIME_EVENTS.cacheInvalidated, (event) => handler(event.payload));
+    },
   };
 }
 

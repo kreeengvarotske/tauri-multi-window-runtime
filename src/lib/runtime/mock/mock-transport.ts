@@ -82,6 +82,11 @@ export function createMockTransport(options: MockTransportOptions = {}): MockTra
     async clearCache(): Promise<void> {
       throw cacheAdminUnavailableInMock();
     },
+
+    // Cache administration is unavailable in mock, so nothing is ever invalidated.
+    async onCacheInvalidated() {
+      return () => {};
+    },
   };
   return transport;
 }

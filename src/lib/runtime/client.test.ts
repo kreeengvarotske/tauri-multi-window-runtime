@@ -73,6 +73,7 @@ describe("createRuntimeClient", () => {
       getDebugStats: () => Promise.reject("Command runtime_get_debug_stats not found"),
       invalidateProject: () => Promise.reject("Command runtime_invalidate_project not found"),
       clearCache: () => Promise.reject("Command runtime_clear_cache not found"),
+      onCacheInvalidated: async () => () => {},
     };
     const runtime = createRuntimeClient(transport);
 

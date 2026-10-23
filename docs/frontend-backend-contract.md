@@ -14,7 +14,7 @@
 | `diagnostics.getStats` | `runtime_get_debug_stats` | нет | `main`, `secondary` | v1, обязательна | да | да (tauri; в mock намеренно ошибка) |
 | `cache.invalidateProject` | `runtime_invalidate_project` | да | только `main` | v1 | да | да (только TAURI) |
 | `cache.clear` | `runtime_clear_cache` | да | только `main` | v1 | да | да (только TAURI) |
-| — | событие `runtime://cache-invalidated` | — | все окна получают | v1.1, предложение | нет | нет |
+| `events.onCacheInvalidated` | событие `runtime://cache-invalidated` | — | все окна получают | v1 | да | да (tauri; в mock пустая подписка) |
 
 Операции окон (создать и сфокусировать `secondary`) идут не через Core, а через встроенный API Tauri (`@tauri-apps/api/webviewWindow`, `src/lib/windows.ts`). Права на них выданы только окну `main` в `src-tauri/capabilities/window-management.json`. В контракт с ядром они не входят.
 
@@ -120,9 +120,12 @@ SDK проверяет это до вызова и сразу отвечает `
 - Изменяет состояние кэша. Только окно `main`: разрешение `allow-runtime-clear-cache` задано в `capabilities/runtime-main.json`, а обработчик Rust дополнительно проверяет метку вызвавшего `WebviewWindow`.
 - Команда подключена к TypeScript SDK как `runtime.cache.clear()`. В TAURI-режиме кнопка доступна только главному окну и автоматически обновляет статистику после операции.
 
-## 5. Событие `runtime://cache-invalidated` (v1.1, предложение)
+## 5. Событие `runtime://cache-invalidated` (v1)
 
-Payload `{ projectId: string | null }` (`null` после `clear`), рассылается всем окнам. Только информирует: SDK сам ничего не перезапрашивает. В первом этапе не нужно.
+Payload `{ projectId: string | null }` (`null` после `clear`), рассылается всем окнам из `runtime_invalidate_project` и `runtime_clear_cache` после изменения кэша (`src-tauri/src/commands.rs`). Ошибка рассылки не превращает команду в ошибку: кэш к этому моменту уже изменён. Только информирует: SDK сам ничего не перезапрашивает.
+
+- SDK: `runtime.events.onCacheInvalidated(handler)` возвращает функцию отписки. Вне Tauri и в MOCK подписка ничего не делает.
+- UI: каждое окно при событии обновляет статистику и показывает в таймере кэша, что результат сброшен.
 
 
 ## Rust demo-provider fixtures (not the frontend mock)

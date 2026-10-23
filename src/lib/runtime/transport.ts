@@ -1,4 +1,13 @@
-import type { GetMetadataParams, InvalidateProjectResult, ProjectMetadata, RuntimeDebugStats } from "./contract";
+import type {
+  CacheInvalidatedEvent,
+  GetMetadataParams,
+  InvalidateProjectResult,
+  ProjectMetadata,
+  RuntimeDebugStats,
+} from "./contract";
+
+/** Stops a subscription. Safe to call more than once. */
+export type Unsubscribe = () => void;
 
 export type RuntimeMode = "tauri" | "mock";
 
@@ -12,4 +21,5 @@ export interface RuntimeTransport {
   getDebugStats(): Promise<RuntimeDebugStats>;
   invalidateProject(params: GetMetadataParams): Promise<InvalidateProjectResult>;
   clearCache(): Promise<void>;
+  onCacheInvalidated(handler: (event: CacheInvalidatedEvent) => void): Promise<Unsubscribe>;
 }

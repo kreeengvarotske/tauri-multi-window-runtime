@@ -1,6 +1,6 @@
-// Wire contract with Rust Core: docs/ipc-contract.md (draft v0.1, not agreed yet).
+// Wire contract with Rust Core: crates/runtime-ipc and src-tauri/src/commands.rs
+// (described in docs/frontend-backend-contract.md).
 // Field names must match the serde output of the IPC layer (camelCase).
-// Nothing here implies that Core already registers these commands.
 
 export type CachePolicy =
   | { kind: "noStore" }
@@ -37,6 +37,11 @@ export interface InvalidateProjectResult {
   invalidated: boolean;
 }
 
+/** Payload of RUNTIME_EVENTS.cacheInvalidated; `projectId` is null after a full clear. */
+export interface CacheInvalidatedEvent {
+  projectId: string | null;
+}
+
 /** Codes sent by Core (via the IPC layer). */
 export type CoreErrorCode =
   | "INVALID_ARGUMENT"
@@ -67,6 +72,11 @@ export const RUNTIME_COMMANDS = {
   getDebugStats: "runtime_get_debug_stats",
   invalidateProject: "runtime_invalidate_project",
   clearCache: "runtime_clear_cache",
+} as const;
+
+/** Events Core broadcasts to every window. They only inform: the SDK re-requests nothing by itself. */
+export const RUNTIME_EVENTS = {
+  cacheInvalidated: "runtime://cache-invalidated",
 } as const;
 
 export type RuntimeCommandName = (typeof RUNTIME_COMMANDS)[keyof typeof RUNTIME_COMMANDS];

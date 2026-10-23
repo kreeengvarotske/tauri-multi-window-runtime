@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const tauri = vi.hoisted(() => ({ isTauri: vi.fn(), invoke: vi.fn() }));
+const events = vi.hoisted(() => ({ listen: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => tauri);
+vi.mock("@tauri-apps/api/event", () => events);
 
 import { createRuntimeClient } from "../client";
 import { createTauriTransport } from "./tauri-transport";
@@ -10,6 +12,28 @@ describe("tauri transport", () => {
   beforeEach(() => {
     tauri.isTauri.mockReset();
     tauri.invoke.mockReset();
+    events.listen.mockReset();
+  });
+
+  it("subscribes to the cache-invalidated event and passes its payload", async () => {
+    tauri.isTauri.mockReturnValue(true);
+    const unlisten = vi.fn();
+    events.listen.mockResolvedValue(unlisten);
+    const handler = vi.fn();
+
+    const stop = await createTauriTransport().onCacheInvalidated(handler);
+    expect(events.listen).toHaveBeenCalledWith("runtime://cache-invalidated", expect.any(Function));
+    const callback = events.listen.mock.calls[0][1] as (event: { payload: unknown }) => void;
+    callback({ payload: { projectId: null } });
+    expect(handler).toHaveBeenCalledWith({ projectId: null });
+    expect(stop).toBe(unlisten);
+  });
+
+  it("does not subscribe outside Tauri", async () => {
+    tauri.isTauri.mockReturnValue(false);
+    const stop = await createTauriTransport().onCacheInvalidated(vi.fn());
+    expect(events.listen).not.toHaveBeenCalled();
+    expect(() => stop()).not.toThrow();
   });
 
   it("reports IPC_UNAVAILABLE outside Tauri and never calls invoke", async () => {

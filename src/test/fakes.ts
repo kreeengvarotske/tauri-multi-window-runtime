@@ -33,6 +33,9 @@ export function fakeCoreTransport(stats: RuntimeDebugStats = SAMPLE_STATS): Runt
       return { invalidated: true };
     },
     async clearCache(): Promise<void> {},
+    async onCacheInvalidated() {
+      return () => {};
+    },
   };
   return transport;
 }

@@ -4,9 +4,11 @@
 export { createRuntimeClient, createRuntimeFromEnv, type RuntimeClient, type RuntimeSetup } from "./client";
 export { RuntimeError } from "./errors";
 export type { MockControls } from "./mock/mock-transport";
-export type { RuntimeMode, RuntimeTransport } from "./transport";
+export type { RuntimeMode, RuntimeTransport, Unsubscribe } from "./transport";
 export {
   RUNTIME_COMMANDS,
+  RUNTIME_EVENTS,
+  type CacheInvalidatedEvent,
   WINDOW_LABELS,
   type CachePolicy,
   type GetMetadataParams,
