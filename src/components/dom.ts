@@ -1,6 +1,8 @@
 // Minimal DOM helper. Text is always set via textContent, never innerHTML,
 // so data coming from Core or the user cannot inject markup.
 
+import { RuntimeError } from "../lib/runtime";
+
 type Child = Node | string | null | undefined | false;
 
 export function h<K extends keyof HTMLElementTagNameMap>(
@@ -29,5 +31,6 @@ export function formatMs(ms: number): string {
 }
 
 export function errorMessage(error: unknown): string {
+  if (error instanceof RuntimeError) return `${error.code}: ${error.message}`;
   return error instanceof Error ? error.message : String(error);
 }

@@ -1,6 +1,5 @@
-import "./styles.css";
-import { createRuntimeFromEnv, type RuntimeSetup } from "./lib/runtime/client";
-import { getWindowIdentity } from "./lib/windows";
+import type { RuntimeSetup } from "./lib/runtime";
+import type { OpenResult, WindowIdentity } from "./lib/windows";
 import { errorMessage, h } from "./components/dom";
 import { createStatusBar } from "./components/status-bar";
 import { createWindowPanel } from "./components/window-panel";
@@ -8,19 +7,23 @@ import { createRequestPanel } from "./components/request-panel";
 import { createStatsPanel } from "./components/stats-panel";
 import { createHistoryPanel } from "./components/history-panel";
 
-function mount(root: HTMLElement): void {
-  let setup: RuntimeSetup;
-  try {
-    setup = createRuntimeFromEnv();
-  } catch (error) {
+export interface AppOptions {
+  /** Result of runtime setup; a thrown configuration error is passed as `error`. */
+  setup: RuntimeSetup | { error: unknown };
+  identity: WindowIdentity;
+  openSecondary?: () => Promise<OpenResult>;
+}
+
+/** Renders the app. All backend access goes through `setup.runtime`. */
+export function mountApp(root: HTMLElement, { setup, identity, openSecondary }: AppOptions): void {
+  if ("error" in setup) {
     root.replaceChildren(
-      h("div", { class: "banner banner-error" }, h("strong", { text: "Ошибка конфигурации. " }), errorMessage(error)),
+      h("div", { class: "banner banner-error" }, h("strong", { text: "Ошибка конфигурации. " }), errorMessage(setup.error)),
     );
     return;
   }
 
   const { runtime, mock } = setup;
-  const identity = getWindowIdentity();
   const stats = createStatsPanel(runtime);
   const history = createHistoryPanel();
   const requests = createRequestPanel({
@@ -36,9 +39,7 @@ function mount(root: HTMLElement): void {
       "div",
       { class: "layout" },
       h("div", { class: "column" }, requests),
-      h("div", { class: "column" }, stats.element, createWindowPanel(identity), history.element),
+      h("div", { class: "column" }, stats.element, createWindowPanel(identity, openSecondary), history.element),
     ),
   );
 }
-
-mount(document.querySelector<HTMLElement>("#app")!);

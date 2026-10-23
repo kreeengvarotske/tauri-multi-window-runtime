@@ -1,4 +1,4 @@
-import type { RuntimeMode } from "../lib/runtime/client";
+import type { RuntimeMode } from "../lib/runtime";
 import type { WindowIdentity } from "../lib/windows";
 import { h } from "./dom";
 

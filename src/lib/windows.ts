@@ -3,8 +3,9 @@
 
 import { isTauri } from "@tauri-apps/api/core";
 import { WebviewWindow, getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { WINDOW_LABELS } from "./runtime/contract";
 
-export const SECONDARY_LABEL = "secondary";
+const SECONDARY_LABEL = WINDOW_LABELS.secondary;
 
 export interface WindowIdentity {
   label: string;
@@ -16,7 +17,7 @@ export function getWindowIdentity(): WindowIdentity {
   if (isTauri()) {
     return { label: getCurrentWebviewWindow().label, native: true };
   }
-  const label = new URLSearchParams(window.location.search).get("window") ?? "main";
+  const label = new URLSearchParams(window.location.search).get("window") ?? WINDOW_LABELS.main;
   return { label, native: false };
 }
 
