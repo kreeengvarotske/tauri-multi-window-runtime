@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-runtime-clear-cache"
+description = "Enables the runtime_clear_cache command without any pre-configured scope."
+commands.allow = ["runtime_clear_cache"]
+
+[[permission]]
+identifier = "deny-runtime-clear-cache"
+description = "Denies the runtime_clear_cache command without any pre-configured scope."
+commands.deny = ["runtime_clear_cache"]

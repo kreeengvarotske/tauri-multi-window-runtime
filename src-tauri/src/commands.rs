@@ -1,6 +1,4 @@
-use runtime_ipc::{
-    IpcError, IpcErrorCode, ProjectMetadata, RuntimeDebugStats, RuntimeIpc,
-};
+use runtime_ipc::{IpcError, IpcErrorCode, ProjectMetadata, RuntimeDebugStats, RuntimeIpc};
 use serde::Serialize;
 use tauri::{State, WebviewWindow};
 
