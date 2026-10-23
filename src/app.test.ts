@@ -1,10 +1,28 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mountApp } from "./app";
 import { createRuntimeClient, type RuntimeTransport } from "./lib/runtime";
-import type { WindowIdentity } from "./lib/windows";
+import type { SeriesRequest, WindowBridge, WindowIdentity } from "./lib/windows";
 import { SAMPLE_STATS, deferred, fakeCoreTransport, flush, instantMock } from "./test/fakes";
 
 const MAIN: WindowIdentity = { label: "main", native: true };
+const SECONDARY: WindowIdentity = { label: "secondary", native: true };
+
+/** In-memory stand-in for window-to-window messaging. */
+function fakeBridge() {
+  let handler: ((request: SeriesRequest) => void) | null = null;
+  const bridge: WindowBridge & { sent: SeriesRequest[]; deliver(request: SeriesRequest): void } = {
+    sent: [],
+    requestSeriesInSecondary: vi.fn(async (request: SeriesRequest) => {
+      bridge.sent.push(request);
+    }),
+    async onSeriesRequest(h) {
+      handler = h;
+      return () => (handler = null);
+    },
+    deliver: (request) => handler?.(request),
+  };
+  return bridge;
+}
 
 let root: HTMLElement;
 beforeEach(() => {
@@ -14,7 +32,12 @@ beforeEach(() => {
 });
 
 function mountMock(identity = MAIN, mock = instantMock({ windowLabel: identity.label })) {
-  mountApp(root, { setup: { runtime: createRuntimeClient(mock), mock }, identity, openSecondary: vi.fn() });
+  mountApp(root, {
+    setup: { runtime: createRuntimeClient(mock), mock },
+    identity,
+    openSecondary: vi.fn(),
+    bridge: fakeBridge(),
+  });
   return mock;
 }
 
@@ -22,8 +45,9 @@ function mountTauri(
   transport: RuntimeTransport,
   openSecondary = vi.fn(),
   identity: WindowIdentity = MAIN,
+  bridge: WindowBridge = fakeBridge(),
 ) {
-  mountApp(root, { setup: { runtime: createRuntimeClient(transport), mock: null }, identity, openSecondary });
+  mountApp(root, { setup: { runtime: createRuntimeClient(transport), mock: null }, identity, openSecondary, bridge });
   return openSecondary;
 }
 
@@ -254,5 +278,122 @@ describe("Runtime Lab UI", () => {
     mountApp(root, { setup: { error: new Error("bad mode") }, identity: MAIN });
     expect($(".banner-error").textContent).toContain("bad mode");
     expect(root.querySelector("button")).toBeNull();
+  });
+
+  it("polls Core stats while a series runs and checks the invariant afterwards", async () => {
+    const pending = deferred<never>();
+    const getDebugStats = vi.fn(async () => SAMPLE_STATS);
+    mountTauri({ ...fakeCoreTransport(), getProjectMetadata: () => pending.promise, getDebugStats });
+    vi.useFakeTimers();
+    try {
+      button("Выполнить серию запросов").click();
+      await vi.advanceTimersByTimeAsync(1100);
+      expect(getDebugStats.mock.calls.length).toBeGreaterThanOrEqual(3);
+      expect($('[data-stat="invariant"]').textContent).toContain("Серия выполняется");
+
+      pending.reject({ code: "INTERNAL", message: "boom" });
+      await vi.advanceTimersByTimeAsync(0);
+      const callsAfterSeries = getDebugStats.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(getDebugStats.mock.calls.length).toBe(callsAfterSeries);
+      expect($('[data-stat="invariant"]').textContent).toContain("Инвариант выполнен");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("shows when the cached result of the last series expires", async () => {
+    mountTauri(fakeCoreTransport());
+    button("Выполнить серию запросов").click();
+    await flush();
+    await flush();
+    expect($('[data-stat="cache-timer"]').hidden).toBe(false);
+    // fakeCoreTransport answers computedAtMs 42, long in the past.
+    expect($('[data-stat="cache-timer"]').textContent).toContain("истёк");
+  });
+
+  it("refreshes stats and the timer when any window invalidates the cache", async () => {
+    let emit: ((event: { projectId: string | null }) => void) | null = null;
+    const getDebugStats = vi.fn(async () => SAMPLE_STATS);
+    mountTauri(
+      {
+        ...fakeCoreTransport(),
+        getDebugStats,
+        async onCacheInvalidated(handler) {
+          emit = handler;
+          return () => {};
+        },
+      },
+      vi.fn(),
+      SECONDARY,
+    );
+    button("Выполнить серию запросов").click();
+    await flush();
+    await flush();
+    const calls = getDebugStats.mock.calls.length;
+
+    emit!({ projectId: "project-42" });
+    await flush();
+    expect(getDebugStats.mock.calls.length).toBe(calls + 1);
+    expect($('[data-stat="cache-timer"]').textContent).toContain("сброшен");
+  });
+
+  it("asks the secondary window to run the same series, then runs it here", async () => {
+    const bridge = fakeBridge();
+    const transport = fakeCoreTransport();
+    mountTauri(transport, vi.fn(), MAIN, bridge);
+    setInput("#project-id", "demo");
+    setInput("#series-size", "20");
+    button("Серия в обоих окнах").click();
+    await flush();
+    await flush();
+    expect(bridge.sent).toEqual([{ projectId: "demo", size: 20 }]);
+    expect(transport.calls).toBe(20);
+    expect(out("state")).toContain("все 20 ответов успешны");
+  });
+
+  it("reports a closed secondary window instead of running half a demo", async () => {
+    const bridge = fakeBridge();
+    bridge.requestSeriesInSecondary = vi.fn().mockRejectedValue(new Error("Окно «secondary» не открыто."));
+    const transport = fakeCoreTransport();
+    mountTauri(transport, vi.fn(), MAIN, bridge);
+    button("Серия в обоих окнах").click();
+    await flush();
+    expect(transport.calls).toBe(0);
+    expect(out("state")).toContain("не открыто");
+    expect(button("Серия в обоих окнах").disabled).toBe(false);
+  });
+
+  it("runs a series requested by the main window in the secondary window", async () => {
+    const bridge = fakeBridge();
+    const transport = fakeCoreTransport();
+    mountTauri(transport, vi.fn(), SECONDARY, bridge);
+    expect(button("Серия в обоих окнах").hidden).toBe(true);
+    await flush();
+    bridge.deliver({ projectId: "demo", size: 10 });
+    await flush();
+    await flush();
+    expect(transport.calls).toBe(10);
+    expect($<HTMLInputElement>("#project-id").value).toBe("demo");
+    expect(out("state")).toContain("все 10 ответов успешны");
+  });
+
+  it("exports the series history as JSON", async () => {
+    const writeText = vi.fn(async (_text: string) => {});
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    mountMock();
+    expect(button("Скопировать JSON").closest(".row")!.hasAttribute("hidden")).toBe(true);
+    setInput("#project-id", "missing");
+    button("Выполнить серию запросов").click();
+    await flush();
+
+    button("Скопировать JSON").click();
+    await flush();
+    const exported = JSON.parse(writeText.mock.calls[0][0]);
+    expect(exported).toHaveLength(1);
+    expect(exported[0]).toMatchObject({ projectId: "missing", failed: 1, mode: "mock" });
+    expect(exported[0].finishedAt).toMatch(/^\d{4}-\d\d-\d\dT/);
+    expect(exported[0].lastError).toMatch(/^PROJECT_NOT_FOUND: /);
+    expect(out("history-export")).toBe("Скопировано серий: 1.");
   });
 });

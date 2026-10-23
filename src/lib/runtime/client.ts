@@ -8,6 +8,7 @@
 import {
   PROJECT_ID_MAX_LENGTH,
   RUNTIME_COMMANDS,
+  type CacheInvalidatedEvent,
   type GetMetadataParams,
   type InvalidateProjectResult,
   type ProjectMetadata,
@@ -17,7 +18,7 @@ import {
 import { RuntimeError, normalizeRuntimeError } from "./errors";
 import { createMockTransport, type MockControls } from "./mock/mock-transport";
 import { createTauriTransport } from "./tauri/tauri-transport";
-import type { RuntimeMode, RuntimeTransport } from "./transport";
+import type { RuntimeMode, RuntimeTransport, Unsubscribe } from "./transport";
 
 export interface RuntimeClient {
   readonly mode: RuntimeMode;
@@ -30,6 +31,10 @@ export interface RuntimeClient {
   readonly cache: {
     invalidateProject(params: GetMetadataParams): Promise<InvalidateProjectResult>;
     clear(): Promise<void>;
+  };
+  readonly events: {
+    /** Fires in every window after any window invalidated or cleared the cache. */
+    onCacheInvalidated(handler: (event: CacheInvalidatedEvent) => void): Promise<Unsubscribe>;
   };
 }
 
@@ -51,6 +56,9 @@ export function createRuntimeClient(transport: RuntimeTransport): RuntimeClient 
           transport.invalidateProject({ projectId: validateProjectId(projectId) }),
         ),
       clear: () => guard(RUNTIME_COMMANDS.clearCache, () => transport.clearCache()),
+    },
+    events: {
+      onCacheInvalidated: (handler) => transport.onCacheInvalidated(handler),
     },
   };
 }

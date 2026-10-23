@@ -11,6 +11,16 @@ export interface RequestPanelOptions {
   onSeriesComplete(result: SeriesResult): void;
   onRefreshStats(): Promise<void>;
   allowCacheAdmin: boolean;
+  /** Called right before a series starts, e.g. to begin polling stats. */
+  onSeriesStart?(): void;
+  /** Present in the main window: asks the secondary window to run the same series. */
+  onRunInBothWindows?(request: { projectId: string; size: number }): Promise<void>;
+}
+
+export interface RequestPanel {
+  element: HTMLElement;
+  /** Runs a series as if started from this panel; used for requests from another window. */
+  run(projectId: string, size: number, origin?: string): Promise<void>;
 }
 
 export function createRequestPanel({
@@ -19,7 +29,9 @@ export function createRequestPanel({
   onSeriesComplete,
   onRefreshStats,
   allowCacheAdmin,
-}: RequestPanelOptions): HTMLElement {
+  onSeriesStart,
+  onRunInBothWindows,
+}: RequestPanelOptions): RequestPanel {
   const projectInput = h("input", {
     class: "input mono",
     attrs: { id: "project-id", type: "text", value: DEFAULT_PROJECT_ID, spellcheck: "false", autocomplete: "off" },
@@ -36,6 +48,12 @@ export function createRequestPanel({
     attrs: { type: "button", "data-action": "retry" },
   });
   retryButton.hidden = true;
+  const bothButton = h("button", {
+    class: "btn btn-secondary",
+    text: "Серия в обоих окнах",
+    attrs: { type: "button", "data-action": "run-both" },
+  });
+  bothButton.hidden = !onRunInBothWindows;
   const statsButton = h("button", {
     class: "btn btn-secondary",
     text: "Обновить статистику Core",
@@ -119,12 +137,14 @@ export function createRequestPanel({
 
   let lastSeries: { projectId: string; size: number } | null = null;
 
-  async function run(projectId: string, size: number): Promise<void> {
+  async function run(projectId: string, size: number, origin?: string): Promise<void> {
     lastSeries = { projectId, size };
     runButton.disabled = true;
     retryButton.disabled = true;
+    bothButton.disabled = true;
     state.className = "hint";
-    state.textContent = `Выполняется серия из ${size} запросов…`;
+    state.textContent = `${origin ? `${origin}: в` : "В"}ыполняется серия из ${size} запросов…`;
+    onSeriesStart?.();
     out.sent.textContent = String(size);
     out.succeeded.textContent = out.failed.textContent = out.distinct.textContent = out.duration.textContent = "…";
 
@@ -149,6 +169,7 @@ export function createRequestPanel({
 
     runButton.disabled = false;
     retryButton.disabled = false;
+    bothButton.disabled = false;
     retryButton.hidden = result.failed === 0;
 
     onSeriesComplete(result);
@@ -156,6 +177,22 @@ export function createRequestPanel({
 
   runButton.addEventListener("click", () => {
     void run(projectInput.value, Number(sizeSelect.value));
+  });
+  bothButton.addEventListener("click", async () => {
+    if (!onRunInBothWindows) return;
+    const request = { projectId: projectInput.value, size: Number(sizeSelect.value) };
+    bothButton.disabled = true;
+    try {
+      // The other window starts first; the few ms of messaging are far below
+      // Core's operation time, so both series still overlap.
+      await onRunInBothWindows(request);
+    } catch (error) {
+      state.className = "hint text-error";
+      state.textContent = errorMessage(error);
+      bothButton.disabled = false;
+      return;
+    }
+    await run(request.projectId, request.size, "Оба окна");
   });
   retryButton.addEventListener("click", () => {
     if (lastSeries) void run(lastSeries.projectId, lastSeries.size);
@@ -182,14 +219,15 @@ export function createRequestPanel({
   const summary = h(
     "dl",
     { class: "summary" },
-    h("dt", { text: "Отправлено" }), out.sent,
-    h("dt", { text: "Успешно" }), out.succeeded,
-    h("dt", { text: "С ошибкой" }), out.failed,
-    h("dt", { text: "Разных результатов" }), out.distinct,
-    h("dt", { text: "Время серии" }), out.duration,
+    // Each term is grouped with its value so the pairs can wrap as a unit in narrow windows.
+    summaryItem("Отправлено", out.sent),
+    summaryItem("Успешно", out.succeeded),
+    summaryItem("С ошибкой", out.failed),
+    summaryItem("Разных результатов", out.distinct),
+    summaryItem("Время серии", out.duration),
   );
 
-  return panel(
+  const element = panel(
     "Запросы getMetadata",
     form,
     mock &&
@@ -197,7 +235,7 @@ export function createRequestPanel({
         class: "hint",
         text: `MOCK-проекты: ${mock.knownProjectIds.join(", ")}. Mock не объединяет запросы: у каждого ответа свой computedAtMs.`,
       }),
-    h("div", { class: "row" }, runButton, retryButton, statsButton),
+    h("div", { class: "row" }, runButton, bothButton, retryButton, statsButton),
     cacheAdmin,
     state,
     summary,
@@ -212,6 +250,19 @@ export function createRequestPanel({
       text: "Одинаковый computedAtMs у ответов значит один общий результат Core. Сколько операций реально запущено, показывает только статистика Core.",
     }),
   );
+
+  return {
+    element,
+    run(projectId, size, origin) {
+      projectInput.value = projectId;
+      if (SERIES_SIZES.some((n) => n === size)) sizeSelect.value = String(size);
+      return run(projectId, size, origin);
+    },
+  };
+}
+
+function summaryItem(term: string, value: HTMLElement): HTMLElement {
+  return h("div", { class: "summary-item" }, h("dt", { text: term }), value);
 }
 
 function field(label: string, id: string, control: HTMLElement): HTMLElement {

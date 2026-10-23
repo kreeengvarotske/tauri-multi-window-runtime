@@ -89,9 +89,10 @@ h3 { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spa
 .btn-secondary:hover:not(:disabled) { background: var(--panel-border); }
 
 /* Results */
-.summary { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 4px 12px; margin: 0; }
-.summary dt { grid-row: 1; font-size: 12px; color: var(--muted); }
-.summary dd { grid-row: 2; margin: 0; font-size: 18px; }
+.summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 96px), 1fr)); gap: 8px 12px; margin: 0; }
+.summary-item { min-width: 0; }
+.summary dt { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; hyphens: auto; }
+.summary dd { margin: 0; font-size: 18px; }
 
 .two-col { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 @media (max-width: 520px) { .two-col { grid-template-columns: minmax(0, 1fr); } }
@@ -104,11 +105,16 @@ h3 { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spa
 .code-error { color: var(--error); }
 
 /* Stats */
-.stats-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; transition: opacity 0.15s; }
+/* Cards reflow from 3 to 2 to 1 column as the window narrows, so long labels keep their width. */
+.stats-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 140px), 1fr));
+  gap: 8px; transition: opacity 0.15s;
+}
 .stats-grid.is-loading { opacity: 0.5; }
-.stat { padding: 10px; border: 1px solid var(--panel-border); border-radius: 6px; background: var(--code-bg); }
+.stat { min-width: 0; padding: 10px; border: 1px solid var(--panel-border); border-radius: 6px; background: var(--code-bg); }
 .stat-value { font-family: var(--mono); font-size: 22px; }
-.stat-label { font-size: 12px; color: var(--muted); }
+/* Last resort for a very narrow window: hyphenate (lang="ru") instead of overflowing. */
+.stat-label { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; hyphens: auto; }
 
 /* History */
 .history { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; max-height: 260px; overflow: auto; }
@@ -117,7 +123,6 @@ h3 { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spa
   border-left: 3px solid var(--ok); background: var(--code-bg); border-radius: 4px;
 }
 .history-item.has-errors { border-left-color: var(--error); }
-@media (max-width: 520px) { .stats-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 
 
 /* Cache administration */

@@ -1,4 +1,5 @@
-import type { RuntimeClient, RuntimeDebugStats } from "../lib/runtime";
+import type { ProjectMetadata, RuntimeClient, RuntimeDebugStats } from "../lib/runtime";
+import { createCacheTimer, type CacheTimer } from "./cache-timer";
 import { describeCachePolicy, statsInvariantHolds } from "../state/stats";
 import { errorMessage, h, panel } from "./dom";
 
@@ -15,11 +16,21 @@ export const COUNTERS: { key: Counter; label: string }[] = [
 
 export interface StatsPanel {
   element: HTMLElement;
-  refresh(): Promise<void>;
+  /**
+   * `live` is used while a series is in flight: counters update quietly, and
+   * the invariant is not judged because some calls are still unfinished.
+   */
+  refresh(options?: { live?: boolean }): Promise<void>;
+  /** Polls stats every `intervalMs` until the returned function is called. */
+  startAutoRefresh(intervalMs?: number): () => void;
+  /** Feeds the cache timer with the latest successful result. */
+  trackResult(sample: ProjectMetadata): void;
+  /** Called when Core reports that the cache was invalidated or cleared. */
+  cacheInvalidated(projectId: string | null): void;
 }
 
 /** Stats are fetched only on demand, to avoid extra IPC load during tests. */
-export function createStatsPanel(runtime: RuntimeClient): StatsPanel {
+export function createStatsPanel(runtime: RuntimeClient, timer: CacheTimer = createCacheTimer()): StatsPanel {
   const values = new Map<Counter, HTMLElement>();
   const grid = h(
     "div",
@@ -44,25 +55,40 @@ export function createStatsPanel(runtime: RuntimeClient): StatsPanel {
   const button = h("button", { class: "btn btn-secondary", text: "Обновить", attrs: { type: "button" } });
 
   let loading = false;
+  // A full refresh requested while another one is in flight runs right after it,
+  // so the final check after a series is never lost behind a live poll.
+  let fullRefreshQueued = false;
 
-  async function refresh(): Promise<void> {
-    if (loading) return;
+  async function refresh({ live = false }: { live?: boolean } = {}): Promise<void> {
+    if (loading) {
+      if (!live) fullRefreshQueued = true;
+      return;
+    }
     loading = true;
     button.disabled = true;
-    grid.classList.add("is-loading");
-    status.className = "hint";
-    status.textContent = "Запрашиваю статистику Core…";
+    if (!live) {
+      grid.classList.add("is-loading");
+      status.className = "hint";
+      status.textContent = "Запрашиваю статистику Core…";
+    }
     try {
       const stats = await runtime.diagnostics.getStats();
       for (const { key } of COUNTERS) values.get(key)!.textContent = String(stats[key]);
       policy.textContent = `Политика кэша: ${describeCachePolicy(stats.cachePolicy)}`;
-      const ok = statsInvariantHolds(stats);
+      timer.setPolicy(stats.cachePolicy);
       invariant.hidden = false;
-      invariant.className = ok ? "hint text-ok" : "hint text-error";
-      invariant.textContent = ok
-        ? "Инвариант выполнен: принятые = выполнения + присоединившиеся + попадания в кэш."
-        : "Инвариант нарушен: принятые ≠ выполнения + присоединившиеся + попадания в кэш.";
-      status.textContent = `Обновлено в ${new Date().toLocaleTimeString()}.`;
+      if (live) {
+        invariant.className = "hint";
+        invariant.textContent = "Серия выполняется: инвариант проверю, когда все запросы завершатся.";
+      } else {
+        const ok = statsInvariantHolds(stats);
+        invariant.className = ok ? "hint text-ok" : "hint text-error";
+        invariant.textContent = ok
+          ? "Инвариант выполнен: принятые = выполнения + присоединившиеся + попадания в кэш."
+          : "Инвариант нарушен: принятые ≠ выполнения + присоединившиеся + попадания в кэш.";
+      }
+      status.className = "hint";
+      status.textContent = `${live ? "Автообновление" : "Обновлено"} в ${new Date().toLocaleTimeString()}.`;
     } catch (error) {
       for (const value of values.values()) value.textContent = "—";
       policy.textContent = "Политика кэша: —";
@@ -74,10 +100,34 @@ export function createStatsPanel(runtime: RuntimeClient): StatsPanel {
       button.disabled = false;
       grid.classList.remove("is-loading");
     }
+    if (fullRefreshQueued) {
+      fullRefreshQueued = false;
+      await refresh();
+    }
   }
 
   button.addEventListener("click", () => void refresh());
 
-  const element = panel("Диагностика Core", grid, policy, invariant, h("div", { class: "row" }, button, status));
-  return { element, refresh };
+  function startAutoRefresh(intervalMs = 500): () => void {
+    const poll = () => void refresh({ live: true });
+    poll();
+    const id = setInterval(poll, intervalMs);
+    return () => clearInterval(id);
+  }
+
+  const element = panel(
+    "Диагностика Core",
+    grid,
+    policy,
+    timer.element,
+    invariant,
+    h("div", { class: "row" }, button, status),
+  );
+  return {
+    element,
+    refresh,
+    startAutoRefresh,
+    trackResult: (sample) => timer.track(sample),
+    cacheInvalidated: (projectId) => timer.invalidated(projectId),
+  };
 }

@@ -2,6 +2,7 @@
 // in a regular browser it falls back to a tab that is clearly marked as such.
 
 import { isTauri } from "@tauri-apps/api/core";
+import { emitTo } from "@tauri-apps/api/event";
 import { WebviewWindow, getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { WINDOW_LABELS } from "./runtime/contract";
 
@@ -67,4 +68,53 @@ async function open(): Promise<OpenResult> {
       reject(new Error(`Не удалось создать окно «${SECONDARY_LABEL}»: ${String(event.payload)}`)),
     );
   });
+}
+
+/** A series that the main window asks the secondary window to run at the same time. */
+export interface SeriesRequest {
+  projectId: string;
+  size: number;
+}
+
+/** Window-to-window channel for running one series in both windows. */
+export interface WindowBridge {
+  /** Asks the secondary window to start a series. Rejects if it is not open. */
+  requestSeriesInSecondary(request: SeriesRequest): Promise<void>;
+  /** Runs `handler` when the main window asks this window to start a series. */
+  onSeriesRequest(handler: (request: SeriesRequest) => void): Promise<() => void>;
+}
+
+// Frontend-only event between our own windows; Core is not involved.
+const SERIES_EVENT = "lab://run-series";
+const BROWSER_CHANNEL = "runtime-lab";
+
+export function createWindowBridge(): WindowBridge {
+  if (!isTauri()) {
+    // Browser fallback: tabs of the same origin talk over BroadcastChannel.
+    const channel = new BroadcastChannel(BROWSER_CHANNEL);
+    return {
+      async requestSeriesInSecondary(request) {
+        channel.postMessage({ type: SERIES_EVENT, request });
+      },
+      async onSeriesRequest(handler) {
+        const listener = (event: MessageEvent) => {
+          if (event.data?.type === SERIES_EVENT) handler(event.data.request as SeriesRequest);
+        };
+        channel.addEventListener("message", listener);
+        return () => channel.removeEventListener("message", listener);
+      },
+    };
+  }
+
+  return {
+    async requestSeriesInSecondary(request) {
+      if (!(await WebviewWindow.getByLabel(SECONDARY_LABEL))) {
+        throw new Error(`Окно «${SECONDARY_LABEL}» не открыто. Сначала нажмите «Открыть второе окно».`);
+      }
+      await emitTo(SECONDARY_LABEL, SERIES_EVENT, request);
+    },
+    onSeriesRequest(handler) {
+      return getCurrentWebviewWindow().listen<SeriesRequest>(SERIES_EVENT, (event) => handler(event.payload));
+    },
+  };
 }
