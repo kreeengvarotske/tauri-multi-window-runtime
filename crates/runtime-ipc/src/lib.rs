@@ -284,6 +284,8 @@ async fn load_demo_project(project_id: String) -> Result<ProjectMetadata, DemoPr
 
     let (name, revision) = match project_id.as_str() {
         "demo" => ("Demo project", 3),
+        // Matches the frontend's initial project selection.
+        "project-42" => ("Project 42", 7),
         "alpha" => ("Alpha project", 1),
         "beta" => ("Beta project", 2),
         "flaky" => return Err(DemoProjectError::Failed),
@@ -366,6 +368,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn frontend_default_project_id_is_available() {
+        let runtime = RuntimeIpc::new_demo();
+
+        let metadata = runtime
+            .get_project_metadata("project-42".to_owned())
+            .await
+            .unwrap();
+
+        assert_eq!(metadata.name, "Project 42");
+        assert_eq!(metadata.revision, 7);
+        assert_eq!(metadata.project_id, "project-42");
+    }
+
+    #[tokio::test]
     async fn successful_requests_count_execution_and_cache_hit() {
         let runtime = RuntimeIpc::new_demo();
 
@@ -411,6 +427,31 @@ mod tests {
         assert_eq!(stats.coalesced_requests, 1);
         assert_eq!(stats.cache_hits, 0);
         assert_eq!(stats.failed_requests, 0);
+    }
+
+    #[tokio::test]
+    async fn clear_cache_removes_all_cached_entries() {
+        let runtime = RuntimeIpc::new_demo();
+
+        runtime
+            .get_project_metadata("alpha".to_owned())
+            .await
+            .unwrap();
+        runtime
+            .get_project_metadata("beta".to_owned())
+            .await
+            .unwrap();
+        assert_eq!(runtime.get_debug_stats().cached_entries, 2);
+
+        runtime.clear_cache();
+
+        assert_eq!(runtime.get_debug_stats().cached_entries, 0);
+        let after_clear = runtime
+            .get_project_metadata("alpha".to_owned())
+            .await
+            .unwrap();
+        assert_eq!(after_clear.name, "Alpha project");
+        assert_eq!(runtime.get_debug_stats().operations_executed, 3);
     }
 
     #[tokio::test]

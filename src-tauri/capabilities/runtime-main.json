@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "runtime-main",
+  "description": "Only the main window may invalidate or clear the runtime cache",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "allow-runtime-invalidate-project",
+    "allow-runtime-clear-cache"
+  ]
+}
