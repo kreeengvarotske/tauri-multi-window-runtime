@@ -1,4 +1,3 @@
-
 use std::time::{Duration, Instant};
 
 /// Определяет, как долго результат может храниться в кэше.
@@ -30,9 +29,7 @@ impl CachePolicy {
     pub fn is_expired(self, inserted_at: Instant, now: Instant) -> bool {
         match self {
             Self::NoStore => true,
-            Self::Ttl(ttl) => {
-                now.saturating_duration_since(inserted_at) >= ttl
-            }
+            Self::Ttl(ttl) => now.saturating_duration_since(inserted_at) >= ttl,
             Self::Forever => false,
         }
     }
@@ -56,8 +53,7 @@ mod tests {
     fn ttl_is_valid_before_deadline() {
         let policy = CachePolicy::Ttl(Duration::from_secs(10));
         let inserted_at = Instant::now();
-        let just_before_deadline =
-            inserted_at + Duration::from_secs(10) - Duration::from_nanos(1);
+        let just_before_deadline = inserted_at + Duration::from_secs(10) - Duration::from_nanos(1);
 
         assert!(policy.should_store());
         assert!(!policy.is_expired(inserted_at, just_before_deadline));

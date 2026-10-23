@@ -131,10 +131,7 @@ where
     /// Returns the number of live entries, pruning expired entries first.
     pub fn len(&self) -> usize {
         self.remove_expired();
-        self.entries
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .len()
+        self.entries.lock().unwrap_or_else(|p| p.into_inner()).len()
     }
 
     /// Returns whether the cache has no live entries.
@@ -147,11 +144,7 @@ where
 mod tests {
     use super::PolicyCache;
     use crate::cache_policy::CachePolicy;
-    use std::{
-        sync::Arc,
-        thread,
-        time::Duration,
-    };
+    use std::{sync::Arc, thread, time::Duration};
 
     #[test]
     fn stores_and_returns_shared_value() {
@@ -184,11 +177,7 @@ mod tests {
         let cache = PolicyCache::<String, usize>::new();
         let key = "short-lived".to_owned();
 
-        assert!(cache.insert(
-            key.clone(),
-            42,
-            CachePolicy::Ttl(Duration::from_millis(10)),
-        ));
+        assert!(cache.insert(key.clone(), 42, CachePolicy::Ttl(Duration::from_millis(10)),));
 
         thread::sleep(Duration::from_millis(25));
         assert!(cache.get(&key).is_none());
@@ -249,11 +238,7 @@ mod tests {
         let key = "shared".to_owned();
         let value = Arc::new(7);
 
-        assert!(cache.insert_arc(
-            key.clone(),
-            Arc::clone(&value),
-            CachePolicy::Forever,
-        ));
+        assert!(cache.insert_arc(key.clone(), Arc::clone(&value), CachePolicy::Forever,));
 
         let cached = cache.get(&key).unwrap();
         assert!(Arc::ptr_eq(&value, &cached));
