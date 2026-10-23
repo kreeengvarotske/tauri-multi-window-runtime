@@ -52,7 +52,7 @@ impl<K> Default for GenerationState<K> {
 }
 
 /// Keeps a key-generation entry alive while any run call for that key is active.
-struct KeyCallGuard<'a, K> {
+struct KeyCallGuard<'a, K: Eq + Hash> {
     state: &'a Mutex<GenerationState<K>>,
     key: K,
 }
