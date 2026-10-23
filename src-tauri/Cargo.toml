@@ -16,3 +16,6 @@ tauri-build = { version = "2" }
 runtime-ipc = { path = "../crates/runtime-ipc" }
 serde = { version = "1", features = ["derive"] }
 tauri = { version = "2" }
+
+[dev-dependencies]
+serde_json = "1"

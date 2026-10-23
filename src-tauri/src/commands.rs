@@ -1,11 +1,30 @@
 use runtime_ipc::{IpcError, IpcErrorCode, ProjectMetadata, RuntimeDebugStats, RuntimeIpc};
 use serde::Serialize;
-use tauri::{State, WebviewWindow};
+use tauri::{Emitter, State, WebviewWindow};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InvalidateProjectResponse {
     pub invalidated: bool,
+}
+
+/// Broadcast to every window after the cache was invalidated or cleared.
+pub const CACHE_INVALIDATED_EVENT: &str = "runtime://cache-invalidated";
+
+/// Payload of [`CACHE_INVALIDATED_EVENT`]; `projectId` is `null` after a full clear.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CacheInvalidatedEvent {
+    pub project_id: Option<String>,
+}
+
+/// Informs all windows. The cache has already changed at this point, so a
+/// failed broadcast must not turn the command itself into an error.
+fn notify_cache_invalidated(webview_window: &WebviewWindow, project_id: Option<String>) {
+    let _ = webview_window.emit(
+        CACHE_INVALIDATED_EVENT,
+        CacheInvalidatedEvent { project_id },
+    );
 }
 
 fn ensure_main_window(label: &str) -> Result<(), IpcError> {
@@ -46,7 +65,9 @@ pub fn runtime_invalidate_project(
 ) -> Result<InvalidateProjectResponse, IpcError> {
     ensure_main_window(webview_window.label())?;
 
+    let normalized = project_id.trim().to_owned();
     let invalidated = runtime.invalidate_project(project_id)?;
+    notify_cache_invalidated(&webview_window, Some(normalized));
     Ok(InvalidateProjectResponse { invalidated })
 }
 
@@ -59,13 +80,30 @@ pub fn runtime_clear_cache(
 ) -> Result<(), IpcError> {
     ensure_main_window(webview_window.label())?;
     runtime.clear_cache();
+    notify_cache_invalidated(&webview_window, None);
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::ensure_main_window;
+    use super::{CacheInvalidatedEvent, ensure_main_window};
     use runtime_ipc::IpcErrorCode;
+
+    #[test]
+    fn cache_invalidated_event_serializes_as_camel_case() {
+        let event = CacheInvalidatedEvent {
+            project_id: Some("demo".to_owned()),
+        };
+        assert_eq!(
+            serde_json::to_value(event).unwrap(),
+            serde_json::json!({ "projectId": "demo" })
+        );
+        let cleared = CacheInvalidatedEvent { project_id: None };
+        assert_eq!(
+            serde_json::to_value(cleared).unwrap(),
+            serde_json::json!({ "projectId": null })
+        );
+    }
 
     #[test]
     fn main_window_may_modify_cache() {
