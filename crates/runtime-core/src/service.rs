@@ -1,10 +1,4 @@
-
-use crate::{
-    cache::PolicyCache,
-    cache_policy::CachePolicy,
-    CoalescerRunKind,
-    TaskCoalescer,
-};
+use crate::{CoalescerRunKind, TaskCoalescer, cache::PolicyCache, cache_policy::CachePolicy};
 use std::{
     future::Future,
     hash::Hash,
@@ -63,11 +57,7 @@ where
     /// Returns a value or error using the original API.
     ///
     /// This method remains compatible with existing callers.
-    pub async fn run<F, Fut>(
-        &self,
-        key: K,
-        operation: F,
-    ) -> Result<Arc<V>, Arc<E>>
+    pub async fn run<F, Fut>(&self, key: K, operation: F) -> Result<Arc<V>, Arc<E>>
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<V, E>>,
@@ -82,11 +72,7 @@ where
     /// `Executed` means this caller initialized the shared operation.
     ///
     /// Errors are returned in `outcome.result` and are not cached.
-    pub async fn run_with_metadata<F, Fut>(
-        &self,
-        key: K,
-        operation: F,
-    ) -> ServiceRunOutcome<V, E>
+    pub async fn run_with_metadata<F, Fut>(&self, key: K, operation: F) -> ServiceRunOutcome<V, E>
     where
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<V, E>>,
@@ -189,8 +175,8 @@ mod tests {
     use crate::cache_policy::CachePolicy;
     use std::{
         sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         },
         time::Duration,
     };
@@ -484,10 +470,7 @@ mod tests {
             .await;
 
         assert_eq!(outcome.kind, ServiceRunKind::Executed);
-        assert_eq!(
-            outcome.result.unwrap_err().as_str(),
-            "expected failure"
-        );
+        assert_eq!(outcome.result.unwrap_err().as_str(), "expected failure");
         assert_eq!(service.cached_entries(), 0);
     }
 }

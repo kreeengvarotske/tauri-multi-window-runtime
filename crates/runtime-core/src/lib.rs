@@ -10,8 +10,8 @@ use std::{
     future::Future,
     hash::Hash,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
@@ -80,70 +80,66 @@ where
         Self::default()
     }
 
-    pub async fn run<F, Fut>(
-    &self,
-    key: K,
-    operation: F,
-) -> Result<Arc<V>, Arc<E>>
-where
-    F: FnOnce() -> Fut,
-    Fut: Future<Output = Result<V, E>>,
-{
-    self.run_with_kind(key, operation).await.0
-}
+    pub async fn run<F, Fut>(&self, key: K, operation: F) -> Result<Arc<V>, Arc<E>>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<V, E>>,
+    {
+        self.run_with_kind(key, operation).await.0
+    }
 
-pub(crate) async fn run_with_kind<F, Fut>(
-    &self,
-    key: K,
-    operation: F,
-) -> (Result<Arc<V>, Arc<E>>, CoalescerRunKind)
-where
-    F: FnOnce() -> Fut,
-    Fut: Future<Output = Result<V, E>>,
-{
-    let entry = {
-        let mut tasks = self.tasks.lock().unwrap_or_else(|p| p.into_inner());
+    pub(crate) async fn run_with_kind<F, Fut>(
+        &self,
+        key: K,
+        operation: F,
+    ) -> (Result<Arc<V>, Arc<E>>, CoalescerRunKind)
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<V, E>>,
+    {
+        let entry = {
+            let mut tasks = self.tasks.lock().unwrap_or_else(|p| p.into_inner());
 
-        let entry = tasks
-            .entry(key.clone())
-            .or_insert_with(|| {
-                Arc::new(TaskEntry {
-                    cell: OnceCell::new(),
-                    callers: AtomicUsize::new(0),
+            let entry = tasks
+                .entry(key.clone())
+                .or_insert_with(|| {
+                    Arc::new(TaskEntry {
+                        cell: OnceCell::new(),
+                        callers: AtomicUsize::new(0),
+                    })
                 })
+                .clone();
+
+            entry.callers.fetch_add(1, Ordering::Relaxed);
+            entry
+        };
+
+        let _guard = CallerGuard {
+            tasks: &self.tasks,
+            key,
+            entry: Arc::clone(&entry),
+        };
+
+        let initialized_by_this_call = Arc::new(AtomicBool::new(false));
+        let initializer_flag = Arc::clone(&initialized_by_this_call);
+
+        let result = entry
+            .cell
+            .get_or_init(|| async move {
+                initializer_flag.store(true, Ordering::Relaxed);
+                operation().await.map(Arc::new).map_err(Arc::new)
             })
+            .await
             .clone();
 
-        entry.callers.fetch_add(1, Ordering::Relaxed);
-        entry
-    };
+        let kind = if initialized_by_this_call.load(Ordering::Relaxed) {
+            CoalescerRunKind::Executed
+        } else {
+            CoalescerRunKind::Coalesced
+        };
 
-    let _guard = CallerGuard {
-        tasks: &self.tasks,
-        key,
-        entry: Arc::clone(&entry),
-    };
-
-    let initialized_by_this_call = Arc::new(AtomicBool::new(false));
-    let initializer_flag = Arc::clone(&initialized_by_this_call);
-
-    let result = entry
-        .cell
-        .get_or_init(|| async move {
-            initializer_flag.store(true, Ordering::Relaxed);
-            operation().await.map(Arc::new).map_err(Arc::new)
-        })
-        .await
-        .clone();
-
-    let kind = if initialized_by_this_call.load(Ordering::Relaxed) {
-        CoalescerRunKind::Executed
-    } else {
-        CoalescerRunKind::Coalesced
-    };
-
-    (result, kind)
-}
+        (result, kind)
+    }
 }
 
 #[cfg(test)]
@@ -151,8 +147,8 @@ mod tests {
     use super::TaskCoalescer;
     use std::{
         sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         },
         time::Duration,
     };
@@ -307,8 +303,7 @@ mod tests {
     }
     #[tokio::test]
     async fn remaining_caller_retries_after_initializer_is_cancelled() {
-        let coalescer =
-            Arc::new(TaskCoalescer::<String, usize, String>::new());
+        let coalescer = Arc::new(TaskCoalescer::<String, usize, String>::new());
 
         let started = Arc::new(tokio::sync::Notify::new());
         let executions = Arc::new(AtomicUsize::new(0));
@@ -373,14 +368,11 @@ mod tests {
         let _ = first_task.await;
 
         // Второй вызов должен завершиться успешно.
-        let result = tokio::time::timeout(
-            Duration::from_secs(2),
-            second_task,
-        )
-        .await
-        .expect("remaining caller did not finish")
-        .expect("remaining caller task panicked")
-        .expect("remaining caller returned an error");
+        let result = tokio::time::timeout(Duration::from_secs(2), second_task)
+            .await
+            .expect("remaining caller did not finish")
+            .expect("remaining caller task panicked")
+            .expect("remaining caller returned an error");
 
         assert_eq!(*result, 42);
         assert_eq!(executions.load(Ordering::SeqCst), 2);
