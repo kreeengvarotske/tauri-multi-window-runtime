@@ -182,11 +182,12 @@ export function createRequestPanel({
   const summary = h(
     "dl",
     { class: "summary" },
-    h("dt", { text: "Отправлено" }), out.sent,
-    h("dt", { text: "Успешно" }), out.succeeded,
-    h("dt", { text: "С ошибкой" }), out.failed,
-    h("dt", { text: "Разных результатов" }), out.distinct,
-    h("dt", { text: "Время серии" }), out.duration,
+    // Each term is grouped with its value so the pairs can wrap as a unit in narrow windows.
+    summaryItem("Отправлено", out.sent),
+    summaryItem("Успешно", out.succeeded),
+    summaryItem("С ошибкой", out.failed),
+    summaryItem("Разных результатов", out.distinct),
+    summaryItem("Время серии", out.duration),
   );
 
   return panel(
@@ -212,6 +213,10 @@ export function createRequestPanel({
       text: "Одинаковый computedAtMs у ответов значит один общий результат Core. Сколько операций реально запущено, показывает только статистика Core.",
     }),
   );
+}
+
+function summaryItem(term: string, value: HTMLElement): HTMLElement {
+  return h("div", { class: "summary-item" }, h("dt", { text: term }), value);
 }
 
 function field(label: string, id: string, control: HTMLElement): HTMLElement {
