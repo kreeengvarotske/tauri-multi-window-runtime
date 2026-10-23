@@ -102,22 +102,22 @@ SDK проверяет это до вызова и сразу отвечает `
 
 **Mock:** всегда `STATS_UNAVAILABLE_IN_MOCK`. Поддельные счётчики выглядели бы как данные ядра, поэтому их нет.
 
-## 3. `runtime_invalidate_project` (v1.1, предложение)
+## 3. `runtime_invalidate_project` (Rust-команда v1; SDK/UI — следующий шаг)
 
 Сбросить кэш одного проекта, чтобы показать повторное вычисление без ожидания TTL.
 
 - Вход: `{ projectId: string }`. Выход: `{ invalidated: boolean }`.
 - Ошибки: `INVALID_ARGUMENT`, `ACCESS_DENIED`, `INTERNAL`.
-- Изменяет состояние ядра. Только окно `main` (`allow-runtime-invalidate-project` в `capabilities/main-window.json`).
-- В первом этапе не нужна. В SDK и UI не реализована.
+- Изменяет состояние кэша. Только окно `main`: разрешение `allow-runtime-invalidate-project` задано в `capabilities/runtime-main.json`, а обработчик Rust дополнительно проверяет метку вызвавшего `WebviewWindow`.
+- Rust-команда реализована и зарегистрирована в Tauri; TypeScript SDK и UI-кнопка пока не подключены.
 
-## 4. `runtime_clear_cache` (v1.1, предложение)
+## 4. `runtime_clear_cache` (Rust-команда v1; SDK/UI — следующий шаг)
 
 Очистить весь кэш сервиса.
 
 - Вход: нет. Выход: `null`.
 - Ошибки: `ACCESS_DENIED`, `INTERNAL`.
-- Изменяет состояние ядра. Только окно `main`.
+- Изменяет состояние кэша. Только окно `main`: разрешение `allow-runtime-clear-cache` задано в `capabilities/runtime-main.json`, а обработчик Rust дополнительно проверяет метку вызвавшего `WebviewWindow`.
 - В первом этапе не нужна. В SDK и UI не реализована.
 
 ## 5. Событие `runtime://cache-invalidated` (v1.1, предложение)
