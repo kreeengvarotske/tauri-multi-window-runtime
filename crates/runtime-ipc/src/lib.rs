@@ -284,6 +284,8 @@ async fn load_demo_project(project_id: String) -> Result<ProjectMetadata, DemoPr
 
     let (name, revision) = match project_id.as_str() {
         "demo" => ("Demo project", 3),
+        // Matches the frontend's initial project selection.
+        "project-42" => ("Project 42", 7),
         "alpha" => ("Alpha project", 1),
         "beta" => ("Beta project", 2),
         "flaky" => return Err(DemoProjectError::Failed),
@@ -363,6 +365,20 @@ mod tests {
         let stats = runtime.get_debug_stats();
         assert_eq!(stats.requests_received, 0);
         assert_eq!(stats.failed_requests, 0);
+    }
+
+    #[tokio::test]
+    async fn frontend_default_project_id_is_available() {
+        let runtime = RuntimeIpc::new_demo();
+
+        let metadata = runtime
+            .get_project_metadata("project-42".to_owned())
+            .await
+            .unwrap();
+
+        assert_eq!(metadata.name, "Project 42");
+        assert_eq!(metadata.revision, 7);
+        assert_eq!(metadata.project_id, "project-42");
     }
 
     #[tokio::test]

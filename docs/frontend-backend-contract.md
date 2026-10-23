@@ -124,6 +124,19 @@ SDK проверяет это до вызова и сразу отвечает `
 
 Payload `{ projectId: string | null }` (`null` после `clear`), рассылается всем окнам. Только информирует: SDK сам ничего не перезапрашивает. В первом этапе не нужно.
 
+
+## Rust demo-provider fixtures (not the frontend mock)
+
+The real Rust provider used by Tauri accepts these IDs in v1:
+- `demo` → Demo project, revision 3;
+- `project-42` → Project 42, revision 7 (the frontend's initial selection);
+- `alpha` → Alpha project, revision 1;
+- `beta` → Beta project, revision 2;
+- `missing` (and any unknown ID) → `PROJECT_NOT_FOUND`;
+- `flaky` → `OPERATION_FAILED` on every execution; errors are not cached.
+
+The mock-only `main-only` and `forbidden` fixtures simulate project-level authorization states in the frontend tests; the Rust demo v1 does not implement project-level authorization. The Rust `ACCESS_DENIED` path currently protects cache administration commands invoked from a window other than `main`.
+
 ## Статус интеграции v1
 
 - [x] `runtime_get_project_metadata` зарегистрирована в Tauri и обращается к `RuntimeIpc`.
