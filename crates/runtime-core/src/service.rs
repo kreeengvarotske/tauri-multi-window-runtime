@@ -146,6 +146,7 @@ where
                 };
             }
 
+            let global_version = generations.global_version;
             let key_state = generations
                 .keys
                 .entry(key.clone())
@@ -155,7 +156,6 @@ where
                 });
             key_state.active_calls += 1;
 
-            let global_version = generations.global_version;
             let key_version = key_state.version;
             (global_version, key_version)
         };
@@ -544,17 +544,19 @@ mod tests {
             CachePolicy::Forever,
         ));
         let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
         let executions = Arc::new(AtomicUsize::new(0));
 
         let task_service = Arc::clone(&service);
         let task_started = Arc::clone(&started);
+        let task_release = Arc::clone(&release);
         let task_executions = Arc::clone(&executions);
         let task = tokio::spawn(async move {
             task_service
                 .run("unrelated".to_owned(), || async move {
                     task_executions.fetch_add(1, Ordering::SeqCst);
                     task_started.notify_one();
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    task_release.notified().await;
                     Ok(42)
                 })
                 .await
@@ -564,6 +566,7 @@ mod tests {
 
         // Invalidating a key with no active calls must not affect this operation.
         assert!(!service.invalidate(&"different".to_owned()));
+        release.notify_one();
 
         let first = task.await.unwrap().unwrap();
         assert_eq!(*first, 42);
