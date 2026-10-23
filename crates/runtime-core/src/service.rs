@@ -1,5 +1,6 @@
 use crate::{CoalescerRunKind, TaskCoalescer, cache::PolicyCache, cache_policy::CachePolicy};
 use std::{
+    collections::HashMap,
     future::Future,
     hash::Hash,
     sync::{Arc, Mutex},
@@ -28,16 +29,69 @@ pub struct ServiceRunOutcome<V, E> {
 /// Internal wrapper that allows sharing a value through the coalescer.
 struct CachedValue<V>(Arc<V>);
 
+/// Generation and active-call count for one key with work in flight.
+struct KeyGeneration {
+    version: u64,
+    active_calls: usize,
+}
+
+/// A service-wide generation invalidates all work; per-key generations
+/// invalidate only the affected key. Idle key entries are removed by the guard.
+struct GenerationState<K> {
+    global_version: u64,
+    keys: HashMap<K, KeyGeneration>,
+}
+
+impl<K> Default for GenerationState<K> {
+    fn default() -> Self {
+        Self {
+            global_version: 0,
+            keys: HashMap::new(),
+        }
+    }
+}
+
+/// Keeps a key-generation entry alive while any run call for that key is active.
+struct KeyCallGuard<'a, K> {
+    state: &'a Mutex<GenerationState<K>>,
+    key: K,
+}
+
+impl<K> Drop for KeyCallGuard<'_, K>
+where
+    K: Eq + Hash,
+{
+    fn drop(&mut self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let remove_entry = match state.keys.get_mut(&self.key) {
+            Some(key_state) => {
+                debug_assert!(key_state.active_calls > 0);
+                key_state.active_calls -= 1;
+                key_state.active_calls == 0
+            }
+            None => false,
+        };
+
+        if remove_entry {
+            state.keys.remove(&self.key);
+        }
+    }
+}
+
 /// Combines cache lookup, concurrent request coalescing,
 /// and successful-result caching.
 ///
-/// Errors are never cached. Calls started after `invalidate` or `clear`
-/// use a new generation, so they do not join older in-flight work.
+/// Errors are never cached. `invalidate` advances only the affected key's
+/// generation, while `clear` advances the service-wide generation.
 pub struct CachedService<K, V, E> {
     cache: PolicyCache<K, V>,
-    coalescer: TaskCoalescer<(K, u64), CachedValue<V>, E>,
+    coalescer: TaskCoalescer<(K, u64, u64), CachedValue<V>, E>,
     policy: CachePolicy,
-    generation: Mutex<u64>,
+    generation: Mutex<GenerationState<K>>,
 }
 
 impl<K, V, E> CachedService<K, V, E>
@@ -50,7 +104,7 @@ where
             cache: PolicyCache::new(),
             coalescer: TaskCoalescer::new(),
             policy,
-            generation: Mutex::new(0),
+            generation: Mutex::new(GenerationState::default()),
         }
     }
 
@@ -77,10 +131,10 @@ where
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<V, E>>,
     {
-        // Read the generation and cache under the same gate used by
-        // invalidation. This keeps cache publication and invalidation ordered.
-        let generation = {
-            let generation = self
+        // Keep cache lookup, generation capture, and invalidation ordered by the
+        // same mutex. Each in-flight call also keeps its key state alive.
+        let (global_version, key_version) = {
+            let mut generations = self
                 .generation
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -92,7 +146,22 @@ where
                 };
             }
 
-            *generation
+            let key_state = generations
+                .keys
+                .entry(key.clone())
+                .or_insert(KeyGeneration {
+                    version: 0,
+                    active_calls: 0,
+                });
+            key_state.active_calls += 1;
+
+            let global_version = generations.global_version;
+            let key_version = key_state.version;
+            (global_version, key_version)
+        };
+        let _key_call_guard = KeyCallGuard {
+            state: &self.generation,
+            key: key.clone(),
         };
 
         let cache = &self.cache;
@@ -102,16 +171,23 @@ where
 
         let (result, coalescer_kind) = self
             .coalescer
-            .run_with_kind((key, generation), || async move {
+            .run_with_kind((key, global_version, key_version), || async move {
                 let value = operation().await?;
                 let value = Arc::new(value);
 
-                // An invalidation during the operation prevents stale insertion.
+                // An invalidation during the operation prevents stale insertion,
+                // but invalidating a different key leaves this result cacheable.
                 let current_generation = generation_gate
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-                if *current_generation == generation {
+                let may_cache = current_generation.global_version == global_version
+                    && current_generation
+                        .keys
+                        .get(&cache_key)
+                        .is_some_and(|key_state| key_state.version == key_version);
+
+                if may_cache {
                     cache.insert_arc(cache_key, Arc::clone(&value), policy);
                 }
 
@@ -129,18 +205,21 @@ where
         ServiceRunOutcome { result, kind }
     }
 
-    /// Invalidates a key and separates future calls from older in-flight work.
+    /// Invalidates a key and separates future calls for that key from older work.
     ///
-    /// This bumps the service-wide generation: operations already in flight
-    /// for any key still return to existing callers, but cannot populate
-    /// the cache. Returns `true` if a cached entry existed.
+    /// In-flight operations for other keys remain cacheable. A key generation
+    /// is kept only while calls for that key are active. Returns `true` if a
+    /// cached entry existed.
     pub fn invalidate(&self, key: &K) -> bool {
-        let mut generation = self
+        let mut generations = self
             .generation
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        *generation = generation.wrapping_add(1);
+        if let Some(key_state) = generations.keys.get_mut(key) {
+            key_state.version = key_state.version.wrapping_add(1);
+        }
+
         self.cache.invalidate(key)
     }
 
@@ -154,7 +233,7 @@ where
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        *generation = generation.wrapping_add(1);
+        generation.global_version = generation.global_version.wrapping_add(1);
         self.cache.clear();
     }
 
@@ -457,6 +536,74 @@ mod tests {
         assert_eq!(second.kind, ServiceRunKind::Coalesced);
         assert_eq!(*first.result.unwrap(), 42);
         assert_eq!(*second.result.unwrap(), 42);
+    }
+
+    #[tokio::test]
+    async fn invalidating_one_key_does_not_block_another_key_from_being_cached() {
+        let service = Arc::new(CachedService::<String, usize, String>::new(
+            CachePolicy::Forever,
+        ));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let executions = Arc::new(AtomicUsize::new(0));
+
+        let task_service = Arc::clone(&service);
+        let task_started = Arc::clone(&started);
+        let task_executions = Arc::clone(&executions);
+        let task = tokio::spawn(async move {
+            task_service
+                .run("unrelated".to_owned(), || async move {
+                    task_executions.fetch_add(1, Ordering::SeqCst);
+                    task_started.notify_one();
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    Ok(42)
+                })
+                .await
+        });
+
+        started.notified().await;
+
+        // Invalidating a key with no active calls must not affect this operation.
+        assert!(!service.invalidate(&"different".to_owned()));
+
+        let first = task.await.unwrap().unwrap();
+        assert_eq!(*first, 42);
+
+        // If invalidation had changed the service-wide generation, the first
+        // result would not have been cached and this closure would run again.
+        let cached = service
+            .run("unrelated".to_owned(), || async {
+                executions.fetch_add(1, Ordering::SeqCst);
+                Ok(100)
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(*cached, 42);
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn idle_key_generation_entries_are_released() {
+        let service = CachedService::<String, usize, String>::new(CachePolicy::Forever);
+
+        for index in 0..100 {
+            let key = format!("key-{index}");
+            service
+                .run(key.clone(), || async { Ok::<usize, String>(1) })
+                .await
+                .unwrap();
+            service.invalidate(&key);
+        }
+
+        let generations = service
+            .generation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        assert!(
+            generations.keys.is_empty(),
+            "idle per-key generation entries must not accumulate"
+        );
     }
 
     #[tokio::test]
