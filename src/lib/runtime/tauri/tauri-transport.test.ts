@@ -25,8 +25,21 @@ describe("tauri transport", () => {
     const transport = createTauriTransport();
     await transport.getProjectMetadata({ projectId: "demo" });
     await transport.getDebugStats();
+    await transport.invalidateProject({ projectId: "demo" });
+    await transport.clearCache();
     expect(tauri.invoke).toHaveBeenNthCalledWith(1, "runtime_get_project_metadata", { projectId: "demo" });
     expect(tauri.invoke).toHaveBeenNthCalledWith(2, "runtime_get_debug_stats", undefined);
+    expect(tauri.invoke).toHaveBeenNthCalledWith(3, "runtime_invalidate_project", { projectId: "demo" });
+    expect(tauri.invoke).toHaveBeenNthCalledWith(4, "runtime_clear_cache", undefined);
+  });
+
+  it("returns Core's invalidation result and maps clear's null to void", async () => {
+    tauri.isTauri.mockReturnValue(true);
+    const transport = createTauriTransport();
+    tauri.invoke.mockResolvedValueOnce({ invalidated: true });
+    await expect(transport.invalidateProject({ projectId: "demo" })).resolves.toEqual({ invalidated: true });
+    tauri.invoke.mockResolvedValueOnce(null);
+    await expect(transport.clearCache()).resolves.toBeUndefined();
   });
 
   it("surfaces Core IpcError codes through the client", async () => {

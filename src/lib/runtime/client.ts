@@ -9,6 +9,8 @@ import {
   PROJECT_ID_MAX_LENGTH,
   RUNTIME_COMMANDS,
   type GetMetadataParams,
+  type InvalidateProjectParams,
+  type InvalidateProjectResult,
   type ProjectMetadata,
   type RuntimeCommandName,
   type RuntimeDebugStats,
@@ -26,6 +28,14 @@ export interface RuntimeClient {
   readonly diagnostics: {
     getStats(): Promise<RuntimeDebugStats>;
   };
+  /**
+   * Administrative cache operations. Only the `main` window is allowed;
+   * Core checks the calling window itself, the SDK sends no window info.
+   */
+  readonly cache: {
+    invalidateProject(params: InvalidateProjectParams): Promise<InvalidateProjectResult>;
+    clear(): Promise<void>;
+  };
 }
 
 export function createRuntimeClient(transport: RuntimeTransport): RuntimeClient {
@@ -39,6 +49,13 @@ export function createRuntimeClient(transport: RuntimeTransport): RuntimeClient 
     },
     diagnostics: {
       getStats: () => guard(RUNTIME_COMMANDS.getDebugStats, () => transport.getDebugStats()),
+    },
+    cache: {
+      invalidateProject: (params) =>
+        guard(RUNTIME_COMMANDS.invalidateProject, () =>
+          transport.invalidateProject({ projectId: validateProjectId(params.projectId) }),
+        ),
+      clear: () => guard(RUNTIME_COMMANDS.clearCache, () => transport.clearCache()),
     },
   };
 }

@@ -8,11 +8,19 @@ const DEFAULT_PROJECT_ID = "project-42";
 export interface RequestPanelOptions {
   runtime: RuntimeClient;
   mock: MockControls | null;
+  /** Show cache controls. Only for `main`; Core enforces the rule anyway. */
+  canManageCache: boolean;
   onSeriesComplete(result: SeriesResult): void;
   onRefreshStats(): void;
 }
 
-export function createRequestPanel({ runtime, mock, onSeriesComplete, onRefreshStats }: RequestPanelOptions): HTMLElement {
+export function createRequestPanel({
+  runtime,
+  mock,
+  canManageCache,
+  onSeriesComplete,
+  onRefreshStats,
+}: RequestPanelOptions): HTMLElement {
   const projectInput = h("input", {
     class: "input mono",
     attrs: { id: "project-id", type: "text", value: DEFAULT_PROJECT_ID, spellcheck: "false", autocomplete: "off" },
@@ -91,6 +99,49 @@ export function createRequestPanel({ runtime, mock, onSeriesComplete, onRefreshS
   });
   statsButton.addEventListener("click", onRefreshStats);
 
+  const invalidateButton = h("button", {
+    class: "btn btn-secondary",
+    text: "Сбросить кэш проекта",
+    attrs: { type: "button", "data-action": "invalidate" },
+  });
+  const clearButton = h("button", {
+    class: "btn btn-secondary",
+    text: "Очистить весь кэш",
+    attrs: { type: "button", "data-action": "clear-cache" },
+  });
+
+  async function manageCache(action: () => Promise<string>): Promise<void> {
+    invalidateButton.disabled = clearButton.disabled = true;
+    try {
+      const message = await action();
+      state.className = "hint text-ok";
+      state.textContent = message;
+      // Mock has no Core stats to refresh.
+      if (runtime.mode === "tauri") onRefreshStats();
+    } catch (error) {
+      state.className = "hint text-error";
+      state.textContent = errorMessage(error);
+    } finally {
+      invalidateButton.disabled = clearButton.disabled = false;
+    }
+  }
+
+  invalidateButton.addEventListener("click", () => {
+    const projectId = projectInput.value.trim();
+    void manageCache(async () => {
+      const { invalidated } = await runtime.cache.invalidateProject({ projectId });
+      return invalidated
+        ? `Кэш проекта «${projectId}» сброшен: следующая серия снова выполнит операцию.`
+        : `Для проекта «${projectId}» в кэше ничего не было.`;
+    });
+  });
+  clearButton.addEventListener("click", () => {
+    void manageCache(async () => {
+      await runtime.cache.clear();
+      return "Кэш Core очищен.";
+    });
+  });
+
   const projectField = field("projectId", "project-id", projectInput);
   if (mock) {
     const listId = "mock-project-ids";
@@ -127,6 +178,7 @@ export function createRequestPanel({ runtime, mock, onSeriesComplete, onRefreshS
         text: `MOCK-проекты: ${mock.knownProjectIds.join(", ")}. Mock не объединяет запросы: у каждого ответа свой computedAtMs.`,
       }),
     h("div", { class: "row" }, runButton, retryButton, statsButton),
+    canManageCache && h("div", { class: "row" }, invalidateButton, clearButton),
     state,
     summary,
     h(

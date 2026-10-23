@@ -12,8 +12,8 @@
 |---|---|---|---|---|---|---|
 | `projects.getMetadata` | `runtime_get_project_metadata` | нет (заполняет кэш ядра как побочный эффект) | `main`, `secondary` | v1, обязательна | да | да (tauri + mock) |
 | `diagnostics.getStats` | `runtime_get_debug_stats` | нет | `main`, `secondary` | v1, обязательна | да | да (tauri; в mock намеренно ошибка) |
-| — | `runtime_invalidate_project` | да | только `main` | команда реализована в Rust v1; UI пока не использует | да | нет |
-| — | `runtime_clear_cache` | да | только `main` | команда реализована в Rust v1; UI пока не использует | да | нет |
+| `cache.invalidateProject` | `runtime_invalidate_project` | да | только `main` | v1 | да | да (tauri + mock) |
+| `cache.clear` | `runtime_clear_cache` | да | только `main` | v1 | да | да (tauri + mock) |
 | — | событие `runtime://cache-invalidated` | — | все окна получают | v1.1, предложение | нет | нет |
 
 Операции окон (создать и сфокусировать `secondary`) идут не через Core, а через встроенный API Tauri (`@tauri-apps/api/webviewWindow`, `src/lib/windows.ts`). Права на них выданы только окну `main` в `src-tauri/capabilities/window-management.json`. В контракт с ядром они не входят.
@@ -102,23 +102,23 @@ SDK проверяет это до вызова и сразу отвечает `
 
 **Mock:** всегда `STATS_UNAVAILABLE_IN_MOCK`. Поддельные счётчики выглядели бы как данные ядра, поэтому их нет.
 
-## 3. `runtime_invalidate_project` (Rust-команда v1; SDK/UI — следующий шаг)
+## 3. `runtime_invalidate_project` (v1)
 
 Сбросить кэш одного проекта, чтобы показать повторное вычисление без ожидания TTL.
 
 - Вход: `{ projectId: string }`. Выход: `{ invalidated: boolean }`.
 - Ошибки: `INVALID_ARGUMENT`, `ACCESS_DENIED`, `INTERNAL`.
 - Изменяет состояние кэша. Только окно `main`: разрешение `allow-runtime-invalidate-project` задано в `capabilities/runtime-main.json`, а обработчик Rust дополнительно проверяет метку вызвавшего `WebviewWindow`.
-- Rust-команда реализована и зарегистрирована в Tauri; TypeScript SDK и UI-кнопка пока не подключены.
+- SDK: `runtime.cache.invalidateProject({ projectId })`, кнопка «Сбросить кэш проекта» показывается только в окне `main`. Mock соблюдает то же правило окон и всегда отвечает `invalidated: false`, потому что своего кэша у него нет.
 
-## 4. `runtime_clear_cache` (Rust-команда v1; SDK/UI — следующий шаг)
+## 4. `runtime_clear_cache` (v1)
 
 Очистить весь кэш сервиса.
 
 - Вход: нет. Выход: `null`.
 - Ошибки: `ACCESS_DENIED`, `INTERNAL`.
 - Изменяет состояние кэша. Только окно `main`: разрешение `allow-runtime-clear-cache` задано в `capabilities/runtime-main.json`, а обработчик Rust дополнительно проверяет метку вызвавшего `WebviewWindow`.
-- В первом этапе не нужна. В SDK и UI не реализована.
+- SDK: `runtime.cache.clear()`, кнопка «Очистить весь кэш» показывается только в окне `main`. Mock соблюдает то же правило окон.
 
 ## 5. Событие `runtime://cache-invalidated` (v1.1, предложение)
 

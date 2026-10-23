@@ -33,7 +33,7 @@ describe("createRuntimeClient", () => {
 
   it("turns raw transport rejections into RuntimeError with the command name", async () => {
     const transport: RuntimeTransport = {
-      mode: "tauri",
+      ...fakeCoreTransport(),
       getProjectMetadata: () => Promise.reject({ code: "ACCESS_DENIED", message: "nope" }),
       getDebugStats: () => Promise.reject("Command runtime_get_debug_stats not found"),
     };
@@ -46,6 +46,29 @@ describe("createRuntimeClient", () => {
     await expect(runtime.diagnostics.getStats()).rejects.toMatchObject({
       code: "COMMAND_NOT_FOUND",
       command: "runtime_get_debug_stats",
+    });
+  });
+});
+
+describe("runtime.cache", () => {
+  it("trims and validates projectId before invalidating", async () => {
+    const invalidateProject = vi.fn(async () => ({ invalidated: true }));
+    const runtime = createRuntimeClient({ ...fakeCoreTransport(), invalidateProject });
+    await expect(runtime.cache.invalidateProject({ projectId: " demo " })).resolves.toEqual({ invalidated: true });
+    expect(invalidateProject).toHaveBeenCalledWith({ projectId: "demo" });
+
+    await expect(runtime.cache.invalidateProject({ projectId: "  " })).rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
+    expect(invalidateProject).toHaveBeenCalledOnce();
+  });
+
+  it("normalizes ACCESS_DENIED from Core with the command name", async () => {
+    const runtime = createRuntimeClient({
+      ...fakeCoreTransport(),
+      clearCache: () => Promise.reject({ code: "ACCESS_DENIED", message: "main only" }),
+    });
+    await expect(runtime.cache.clear()).rejects.toMatchObject({
+      code: "ACCESS_DENIED",
+      command: "runtime_clear_cache",
     });
   });
 });

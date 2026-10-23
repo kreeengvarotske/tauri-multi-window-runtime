@@ -10,6 +10,8 @@ export {
   WINDOW_LABELS,
   type CachePolicy,
   type GetMetadataParams,
+  type InvalidateProjectParams,
+  type InvalidateProjectResult,
   type ProjectMetadata,
   type RuntimeDebugStats,
   type RuntimeErrorCode,

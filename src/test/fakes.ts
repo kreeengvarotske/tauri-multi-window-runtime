@@ -29,6 +29,10 @@ export function fakeCoreTransport(stats: RuntimeDebugStats = SAMPLE_STATS): Runt
     async getDebugStats() {
       return stats;
     },
+    async invalidateProject() {
+      return { invalidated: true };
+    },
+    async clearCache() {},
   };
   return transport;
 }

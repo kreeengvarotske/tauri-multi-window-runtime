@@ -1,6 +1,6 @@
-// Wire contract with Rust Core: docs/ipc-contract.md (draft v0.1, not agreed yet).
+// Wire contract with Rust Core: crates/runtime-ipc and src-tauri/src/commands.rs
+// (described in docs/frontend-backend-contract.md).
 // Field names must match the serde output of the IPC layer (camelCase).
-// Nothing here implies that Core already registers these commands.
 
 export type CachePolicy =
   | { kind: "noStore" }
@@ -33,6 +33,15 @@ export interface GetMetadataParams {
   projectId: string;
 }
 
+export interface InvalidateProjectParams {
+  projectId: string;
+}
+
+export interface InvalidateProjectResult {
+  /** false when the project had no cache entry. */
+  invalidated: boolean;
+}
+
 /** Codes sent by Core (via the IPC layer). */
 export type CoreErrorCode =
   | "INVALID_ARGUMENT"
@@ -60,6 +69,10 @@ export interface IpcErrorPayload {
 export const RUNTIME_COMMANDS = {
   getProjectMetadata: "runtime_get_project_metadata",
   getDebugStats: "runtime_get_debug_stats",
+  /** Main window only; Core answers ACCESS_DENIED to any other window. */
+  invalidateProject: "runtime_invalidate_project",
+  /** Main window only; Core answers ACCESS_DENIED to any other window. */
+  clearCache: "runtime_clear_cache",
 } as const;
 
 export type RuntimeCommandName = (typeof RUNTIME_COMMANDS)[keyof typeof RUNTIME_COMMANDS];

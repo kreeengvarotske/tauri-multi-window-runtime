@@ -1,4 +1,10 @@
-import type { GetMetadataParams, ProjectMetadata, RuntimeDebugStats } from "./contract";
+import type {
+  GetMetadataParams,
+  InvalidateProjectParams,
+  InvalidateProjectResult,
+  ProjectMetadata,
+  RuntimeDebugStats,
+} from "./contract";
 
 export type RuntimeMode = "tauri" | "mock";
 
@@ -10,4 +16,6 @@ export interface RuntimeTransport {
   readonly mode: RuntimeMode;
   getProjectMetadata(params: GetMetadataParams): Promise<ProjectMetadata>;
   getDebugStats(): Promise<RuntimeDebugStats>;
+  invalidateProject(params: InvalidateProjectParams): Promise<InvalidateProjectResult>;
+  clearCache(): Promise<void>;
 }

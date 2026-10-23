@@ -4,8 +4,17 @@
 // other WebViews and proves nothing about Core behaviour. Every call computes
 // its own result (own `computedAtMs`), there is no coalescing or cache here.
 // Errors are thrown in the IpcError shape `{ code, message }`, as Core would.
+// Cache commands follow Core's window rule (main only) but have nothing to
+// drop, so invalidation always reports `invalidated: false`.
 
-import type { CoreErrorCode, IpcErrorPayload, ProjectMetadata, RuntimeDebugStats } from "../contract";
+import {
+  WINDOW_LABELS,
+  type CoreErrorCode,
+  type InvalidateProjectResult,
+  type IpcErrorPayload,
+  type ProjectMetadata,
+  type RuntimeDebugStats,
+} from "../contract";
 import { RuntimeError } from "../errors";
 import type { RuntimeTransport } from "../transport";
 import { MOCK_FAILING_PROJECTS, MOCK_PROJECT_IDS, MOCK_PROJECTS } from "./fixtures";
@@ -68,8 +77,23 @@ export function createMockTransport(options: MockTransportOptions = {}): MockTra
         "Статистика ядра недоступна: включён режим MOCK, Rust Core не подключён.",
       );
     },
+
+    async invalidateProject(): Promise<InvalidateProjectResult> {
+      ensureMainWindow();
+      return { invalidated: false };
+    },
+
+    async clearCache(): Promise<void> {
+      ensureMainWindow();
+    },
   };
   return transport;
+
+  function ensureMainWindow(): void {
+    if (windowLabel !== WINDOW_LABELS.main) {
+      throw ipcError("ACCESS_DENIED", `MOCK: окну «${windowLabel}» запрещено изменять кэш, это может только «main».`);
+    }
+  }
 }
 
 function ipcError(code: CoreErrorCode, message: string): IpcErrorPayload {

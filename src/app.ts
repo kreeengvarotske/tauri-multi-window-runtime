@@ -1,4 +1,4 @@
-import type { RuntimeSetup } from "./lib/runtime";
+import { WINDOW_LABELS, type RuntimeSetup } from "./lib/runtime";
 import type { OpenResult, WindowIdentity } from "./lib/windows";
 import { errorMessage, h } from "./components/dom";
 import { createStatusBar } from "./components/status-bar";
@@ -29,6 +29,7 @@ export function mountApp(root: HTMLElement, { setup, identity, openSecondary }: 
   const requests = createRequestPanel({
     runtime,
     mock,
+    canManageCache: identity.label === WINDOW_LABELS.main,
     onSeriesComplete: history.add,
     onRefreshStats: () => void stats.refresh(),
   });

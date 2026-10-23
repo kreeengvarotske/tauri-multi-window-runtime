@@ -150,6 +150,41 @@ describe("Runtime Lab UI", () => {
     expect(button("Открыть второе окно")).toBeUndefined();
   });
 
+  it("invalidates the current project and refreshes Core stats", async () => {
+    const transport = fakeCoreTransport();
+    const invalidateProject = vi.fn(async () => ({ invalidated: true }));
+    const getDebugStats = vi.fn(async () => SAMPLE_STATS);
+    mountTauri({ ...transport, invalidateProject, getDebugStats });
+    setInput("#project-id", "demo");
+    button("Сбросить кэш проекта").click();
+    await flush();
+    expect(invalidateProject).toHaveBeenCalledWith({ projectId: "demo" });
+    expect(out("state")).toContain("Кэш проекта «demo» сброшен");
+    expect(getDebugStats).toHaveBeenCalledOnce();
+  });
+
+  it("clears the cache and shows Core errors such as ACCESS_DENIED", async () => {
+    const clearCache = vi
+      .fn()
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce({ code: "ACCESS_DENIED", message: "main only" });
+    mountTauri({ ...fakeCoreTransport(), clearCache });
+    const clear = button("Очистить весь кэш");
+    clear.click();
+    await flush();
+    expect(out("state")).toBe("Кэш Core очищен.");
+    clear.click();
+    await flush();
+    expect(out("state")).toBe("ACCESS_DENIED: main only");
+    expect(clear.disabled).toBe(false);
+  });
+
+  it("does not offer cache controls in the secondary window", () => {
+    mountMock({ label: "secondary", native: true });
+    expect(button("Сбросить кэш проекта")).toBeUndefined();
+    expect(button("Очистить весь кэш")).toBeUndefined();
+  });
+
   it("shows empty states before any request", () => {
     mountTauri(fakeCoreTransport());
     expect(root.textContent).toContain("Серий пока не было.");
