@@ -1,4 +1,4 @@
-import type { RuntimeSetup } from "./lib/runtime";
+import { WINDOW_LABELS, type RuntimeSetup } from "./lib/runtime";
 import type { OpenResult, WindowIdentity } from "./lib/windows";
 import { errorMessage, h } from "./components/dom";
 import { createStatusBar } from "./components/status-bar";
@@ -30,7 +30,8 @@ export function mountApp(root: HTMLElement, { setup, identity, openSecondary }: 
     runtime,
     mock,
     onSeriesComplete: history.add,
-    onRefreshStats: () => void stats.refresh(),
+    onRefreshStats: () => stats.refresh(),
+    allowCacheAdmin: runtime.mode === "tauri" && identity.label === WINDOW_LABELS.main,
   });
 
   root.replaceChildren(

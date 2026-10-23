@@ -33,6 +33,10 @@ export interface GetMetadataParams {
   projectId: string;
 }
 
+export interface InvalidateProjectResult {
+  invalidated: boolean;
+}
+
 /** Codes sent by Core (via the IPC layer). */
 export type CoreErrorCode =
   | "INVALID_ARGUMENT"
@@ -46,7 +50,8 @@ export type ClientErrorCode =
   | "IPC_UNAVAILABLE"
   | "COMMAND_NOT_FOUND"
   | "UNKNOWN_ERROR"
-  | "STATS_UNAVAILABLE_IN_MOCK";
+  | "STATS_UNAVAILABLE_IN_MOCK"
+  | "CACHE_ADMIN_UNAVAILABLE_IN_MOCK";
 
 /** Unknown codes from Core are kept as a string. */
 export type RuntimeErrorCode = CoreErrorCode | ClientErrorCode | (string & {});
@@ -60,6 +65,8 @@ export interface IpcErrorPayload {
 export const RUNTIME_COMMANDS = {
   getProjectMetadata: "runtime_get_project_metadata",
   getDebugStats: "runtime_get_debug_stats",
+  invalidateProject: "runtime_invalidate_project",
+  clearCache: "runtime_clear_cache",
 } as const;
 
 export type RuntimeCommandName = (typeof RUNTIME_COMMANDS)[keyof typeof RUNTIME_COMMANDS];

@@ -51,9 +51,16 @@ describe("mock transport", () => {
     expect(sleep).toHaveBeenCalledWith(200);
   });
 
-  it("does not fake Core stats", async () => {
-    await expect(createRuntimeClient(instantMock()).diagnostics.getStats()).rejects.toMatchObject({
+  it("does not fake Core stats or cache administration in mock mode", async () => {
+    const runtime = createRuntimeClient(instantMock());
+    await expect(runtime.diagnostics.getStats()).rejects.toMatchObject({
       code: "STATS_UNAVAILABLE_IN_MOCK",
+    });
+    await expect(runtime.cache.invalidateProject({ projectId: "demo" })).rejects.toMatchObject({
+      code: "CACHE_ADMIN_UNAVAILABLE_IN_MOCK",
+    });
+    await expect(runtime.cache.clear()).rejects.toMatchObject({
+      code: "CACHE_ADMIN_UNAVAILABLE_IN_MOCK",
     });
   });
 });

@@ -9,10 +9,17 @@ export interface RequestPanelOptions {
   runtime: RuntimeClient;
   mock: MockControls | null;
   onSeriesComplete(result: SeriesResult): void;
-  onRefreshStats(): void;
+  onRefreshStats(): Promise<void>;
+  allowCacheAdmin: boolean;
 }
 
-export function createRequestPanel({ runtime, mock, onSeriesComplete, onRefreshStats }: RequestPanelOptions): HTMLElement {
+export function createRequestPanel({
+  runtime,
+  mock,
+  onSeriesComplete,
+  onRefreshStats,
+  allowCacheAdmin,
+}: RequestPanelOptions): HTMLElement {
   const projectInput = h("input", {
     class: "input mono",
     attrs: { id: "project-id", type: "text", value: DEFAULT_PROJECT_ID, spellcheck: "false", autocomplete: "off" },
@@ -45,6 +52,70 @@ export function createRequestPanel({ runtime, mock, onSeriesComplete, onRefreshS
   const sample = h("pre", { class: "code", text: "Нет данных", attrs: { "data-out": "sample" } });
   const lastError = h("pre", { class: "code code-error", text: "Нет ошибок", attrs: { "data-out": "last-error" } });
   const state = h("p", { class: "hint", attrs: { "aria-live": "polite", "data-out": "state" } });
+
+  const invalidateCacheButton = h("button", {
+    class: "btn btn-secondary",
+    text: "Инвалидировать проект",
+    attrs: { type: "button", "data-cache-action": "invalidate" },
+  });
+  const clearCacheButton = h("button", {
+    class: "btn btn-secondary",
+    text: "Очистить весь кэш",
+    attrs: { type: "button", "data-cache-action": "clear" },
+  });
+  const cacheAdminStatus = h("p", {
+    class: "hint",
+    text: "Изменения затрагивают общий кэш обоих окон.",
+    attrs: { "aria-live": "polite", "data-cache-admin-status": "" },
+  });
+  const cacheAdmin = allowCacheAdmin
+    ? h(
+        "div",
+        { class: "cache-admin" },
+        h("h3", { text: "Управление кэшем" }),
+        h("div", { class: "row" }, invalidateCacheButton, clearCacheButton),
+        cacheAdminStatus,
+      )
+    : null;
+  let cacheAdminPending = false;
+
+  async function runCacheAdmin(action: "invalidate" | "clear"): Promise<void> {
+    if (cacheAdminPending) return;
+    cacheAdminPending = true;
+    invalidateCacheButton.disabled = true;
+    clearCacheButton.disabled = true;
+    cacheAdminStatus.className = "hint";
+    cacheAdminStatus.textContent =
+      action === "invalidate"
+        ? `Инвалидирую кэш проекта «${projectInput.value.trim()}»…`
+        : "Очищаю общий кэш…";
+
+    try {
+      if (action === "invalidate") {
+        const projectId = projectInput.value;
+        const result = await runtime.cache.invalidateProject({ projectId });
+        cacheAdminStatus.className = result.invalidated ? "hint text-ok" : "hint";
+        cacheAdminStatus.textContent = result.invalidated
+          ? `Кэш проекта «${projectId.trim()}» инвалидирован.`
+          : `Запись проекта «${projectId.trim()}» не найдена в кэше.`;
+      } else {
+        await runtime.cache.clear();
+        cacheAdminStatus.className = "hint text-ok";
+        cacheAdminStatus.textContent = "Общий кэш очищен.";
+      }
+      await onRefreshStats();
+    } catch (error) {
+      cacheAdminStatus.className = "hint text-error";
+      cacheAdminStatus.textContent = errorMessage(error);
+    } finally {
+      cacheAdminPending = false;
+      invalidateCacheButton.disabled = false;
+      clearCacheButton.disabled = false;
+    }
+  }
+
+  invalidateCacheButton.addEventListener("click", () => void runCacheAdmin("invalidate"));
+  clearCacheButton.addEventListener("click", () => void runCacheAdmin("clear"));
 
   let lastSeries: { projectId: string; size: number } | null = null;
 
@@ -89,7 +160,7 @@ export function createRequestPanel({ runtime, mock, onSeriesComplete, onRefreshS
   retryButton.addEventListener("click", () => {
     if (lastSeries) void run(lastSeries.projectId, lastSeries.size);
   });
-  statsButton.addEventListener("click", onRefreshStats);
+  statsButton.addEventListener("click", () => void onRefreshStats());
 
   const projectField = field("projectId", "project-id", projectInput);
   if (mock) {
@@ -127,6 +198,7 @@ export function createRequestPanel({ runtime, mock, onSeriesComplete, onRefreshS
         text: `MOCK-проекты: ${mock.knownProjectIds.join(", ")}. Mock не объединяет запросы: у каждого ответа свой computedAtMs.`,
       }),
     h("div", { class: "row" }, runButton, retryButton, statsButton),
+    cacheAdmin,
     state,
     summary,
     h(

@@ -5,7 +5,13 @@
 // its own result (own `computedAtMs`), there is no coalescing or cache here.
 // Errors are thrown in the IpcError shape `{ code, message }`, as Core would.
 
-import type { CoreErrorCode, IpcErrorPayload, ProjectMetadata, RuntimeDebugStats } from "../contract";
+import type {
+  CoreErrorCode,
+  IpcErrorPayload,
+  InvalidateProjectResult,
+  ProjectMetadata,
+  RuntimeDebugStats,
+} from "../contract";
 import { RuntimeError } from "../errors";
 import type { RuntimeTransport } from "../transport";
 import { MOCK_FAILING_PROJECTS, MOCK_PROJECT_IDS, MOCK_PROJECTS } from "./fixtures";
@@ -68,8 +74,23 @@ export function createMockTransport(options: MockTransportOptions = {}): MockTra
         "Статистика ядра недоступна: включён режим MOCK, Rust Core не подключён.",
       );
     },
+
+    async invalidateProject(_params): Promise<InvalidateProjectResult> {
+      throw cacheAdminUnavailableInMock();
+    },
+
+    async clearCache(): Promise<void> {
+      throw cacheAdminUnavailableInMock();
+    },
   };
   return transport;
+}
+
+function cacheAdminUnavailableInMock(): RuntimeError {
+  return new RuntimeError(
+    "CACHE_ADMIN_UNAVAILABLE_IN_MOCK",
+    "Управление кэшем недоступно в MOCK-режиме: Rust Core не подключён.",
+  );
 }
 
 function ipcError(code: CoreErrorCode, message: string): IpcErrorPayload {

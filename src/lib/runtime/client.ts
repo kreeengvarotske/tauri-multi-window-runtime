@@ -9,6 +9,7 @@ import {
   PROJECT_ID_MAX_LENGTH,
   RUNTIME_COMMANDS,
   type GetMetadataParams,
+  type InvalidateProjectResult,
   type ProjectMetadata,
   type RuntimeCommandName,
   type RuntimeDebugStats,
@@ -26,6 +27,10 @@ export interface RuntimeClient {
   readonly diagnostics: {
     getStats(): Promise<RuntimeDebugStats>;
   };
+  readonly cache: {
+    invalidateProject(params: GetMetadataParams): Promise<InvalidateProjectResult>;
+    clear(): Promise<void>;
+  };
 }
 
 export function createRuntimeClient(transport: RuntimeTransport): RuntimeClient {
@@ -40,6 +45,13 @@ export function createRuntimeClient(transport: RuntimeTransport): RuntimeClient 
     diagnostics: {
       getStats: () => guard(RUNTIME_COMMANDS.getDebugStats, () => transport.getDebugStats()),
     },
+    cache: {
+      invalidateProject: ({ projectId }) =>
+        guard(RUNTIME_COMMANDS.invalidateProject, () =>
+          transport.invalidateProject({ projectId: validateProjectId(projectId) }),
+        ),
+      clear: () => guard(RUNTIME_COMMANDS.clearCache, () => transport.clearCache()),
+    },
   };
 }
 
@@ -49,7 +61,8 @@ function validateProjectId(raw: string): string {
   if (!projectId) {
     throw new RuntimeError("INVALID_ARGUMENT", "projectId не может быть пустым.");
   }
-  if (projectId.length > PROJECT_ID_MAX_LENGTH) {
+  // Match Rust's str::chars().count(), not JavaScript UTF-16 code units.
+  if (Array.from(projectId).length > PROJECT_ID_MAX_LENGTH) {
     throw new RuntimeError("INVALID_ARGUMENT", `projectId длиннее ${PROJECT_ID_MAX_LENGTH} символов.`);
   }
   return projectId;

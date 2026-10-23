@@ -18,8 +18,12 @@ function mountMock(identity = MAIN, mock = instantMock({ windowLabel: identity.l
   return mock;
 }
 
-function mountTauri(transport: RuntimeTransport, openSecondary = vi.fn()) {
-  mountApp(root, { setup: { runtime: createRuntimeClient(transport), mock: null }, identity: MAIN, openSecondary });
+function mountTauri(
+  transport: RuntimeTransport,
+  openSecondary = vi.fn(),
+  identity: WindowIdentity = MAIN,
+) {
+  mountApp(root, { setup: { runtime: createRuntimeClient(transport), mock: null }, identity, openSecondary });
   return openSecondary;
 }
 
@@ -134,6 +138,55 @@ describe("Runtime Lab UI", () => {
     button("Обновить").click();
     await flush();
     expect($('[data-stat="invariant"]').textContent).toContain("нарушен");
+  });
+
+  it("invalidates the selected project from the cache in the main Tauri window", async () => {
+    const transport = fakeCoreTransport();
+    const invalidateProject = vi.fn(async ({ projectId }: { projectId: string }) => ({
+      invalidated: projectId === "project-42",
+    }));
+    mountTauri({ ...transport, invalidateProject });
+    button("Инвалидировать проект").click();
+    await flush();
+
+    expect(invalidateProject).toHaveBeenCalledWith({ projectId: "project-42" });
+    expect($("[data-cache-admin-status]").textContent).toContain("Кэш проекта «project-42» инвалидирован.");
+  });
+
+  it("clears the cache from the main Tauri window", async () => {
+    const transport = fakeCoreTransport();
+    const clearCache = vi.fn(async () => undefined);
+    mountTauri({ ...transport, clearCache });
+    button("Очистить весь кэш").click();
+    await flush();
+
+    expect(clearCache).toHaveBeenCalledOnce();
+    expect($("[data-cache-admin-status]").textContent).toContain("Общий кэш очищен.");
+  });
+
+  it("does not render cache administration controls in the secondary window", () => {
+    mountTauri(fakeCoreTransport(), vi.fn(), { label: "secondary", native: true });
+    expect(button("Инвалидировать проект")).toBeUndefined();
+    expect(button("Очистить весь кэш")).toBeUndefined();
+  });
+
+  it("hides real cache administration in mock mode", () => {
+    mountMock();
+    expect(button("Инвалидировать проект")).toBeUndefined();
+    expect(button("Очистить весь кэш")).toBeUndefined();
+  });
+
+  it("shows ACCESS_DENIED returned by a cache administration command", async () => {
+    const transport = fakeCoreTransport();
+    const invalidateProject = vi.fn(async () => {
+      throw { code: "ACCESS_DENIED", message: "Only main is allowed" };
+    });
+    mountTauri({ ...transport, invalidateProject });
+    button("Инвалидировать проект").click();
+    await flush();
+
+    expect($("[data-cache-admin-status]").className).toContain("text-error");
+    expect($("[data-cache-admin-status]").textContent).toContain("ACCESS_DENIED: Only main is allowed");
   });
 
   it("opens the secondary window through the injected window API", async () => {

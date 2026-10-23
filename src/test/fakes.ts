@@ -1,4 +1,4 @@
-import type { ProjectMetadata, RuntimeDebugStats, RuntimeTransport } from "../lib/runtime";
+import type { InvalidateProjectResult, ProjectMetadata, RuntimeDebugStats, RuntimeTransport } from "../lib/runtime";
 import { createMockTransport, type MockTransportOptions } from "../lib/runtime/mock/mock-transport";
 
 /** Mock transport without delays, for fast deterministic tests. */
@@ -29,6 +29,10 @@ export function fakeCoreTransport(stats: RuntimeDebugStats = SAMPLE_STATS): Runt
     async getDebugStats() {
       return stats;
     },
+    async invalidateProject(): Promise<InvalidateProjectResult> {
+      return { invalidated: true };
+    },
+    async clearCache(): Promise<void> {},
   };
   return transport;
 }

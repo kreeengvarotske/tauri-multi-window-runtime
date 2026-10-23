@@ -2,7 +2,14 @@
 // Error normalization is done by the client, not here.
 
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import { RUNTIME_COMMANDS, type ProjectMetadata, type RuntimeCommandName, type RuntimeDebugStats } from "../contract";
+import {
+  RUNTIME_COMMANDS,
+  type GetMetadataParams,
+  type InvalidateProjectResult,
+  type ProjectMetadata,
+  type RuntimeCommandName,
+  type RuntimeDebugStats,
+} from "../contract";
 import { RuntimeError } from "../errors";
 import type { RuntimeTransport } from "../transport";
 
@@ -11,6 +18,9 @@ export function createTauriTransport(): RuntimeTransport {
     mode: "tauri",
     getProjectMetadata: ({ projectId }) => call<ProjectMetadata>(RUNTIME_COMMANDS.getProjectMetadata, { projectId }),
     getDebugStats: () => call<RuntimeDebugStats>(RUNTIME_COMMANDS.getDebugStats),
+    invalidateProject: ({ projectId }: GetMetadataParams) =>
+      call<InvalidateProjectResult>(RUNTIME_COMMANDS.invalidateProject, { projectId }),
+    clearCache: () => call<void>(RUNTIME_COMMANDS.clearCache),
   };
 }
 

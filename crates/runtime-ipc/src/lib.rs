@@ -430,6 +430,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn clear_cache_removes_all_cached_entries() {
+        let runtime = RuntimeIpc::new_demo();
+
+        runtime.get_project_metadata("alpha".to_owned()).await.unwrap();
+        runtime.get_project_metadata("beta".to_owned()).await.unwrap();
+        assert_eq!(runtime.get_debug_stats().cached_entries, 2);
+
+        runtime.clear_cache();
+
+        assert_eq!(runtime.get_debug_stats().cached_entries, 0);
+        let after_clear = runtime.get_project_metadata("alpha".to_owned()).await.unwrap();
+        assert_eq!(after_clear.name, "Alpha project");
+        assert_eq!(runtime.get_debug_stats().operations_executed, 3);
+    }
+
+    #[tokio::test]
     async fn errors_are_counted_but_not_cached() {
         let runtime = RuntimeIpc::new_demo();
 
