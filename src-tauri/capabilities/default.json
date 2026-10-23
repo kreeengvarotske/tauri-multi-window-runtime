@@ -2,6 +2,13 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Base IPC access shared by the main and secondary windows",
-  "windows": ["main", "secondary"],
-  "permissions": ["core:default"]
+  "windows": [
+    "main",
+    "secondary"
+  ],
+  "permissions": [
+    "core:default",
+    "allow-runtime-get-project-metadata",
+    "allow-runtime-get-debug-stats"
+  ]
 }

@@ -1,6 +1,6 @@
 # Операции, которые нужны фронтенду от Rust Core
 
-Статус: **предложение, ждёт одобрения владельца ядра.** Ни одна команда ниже пока не реализована в Rust: в ветке `feat/runtime-core` есть только библиотечные абстракции (`TaskCoalescer`, `CachePolicy`, `PolicyCache`, `CachedService`), а `src-tauri/src/lib.rs` не регистрирует команд.
+Статус: **интеграция v1 реализована в ветке `feat/frontend-integration`, ожидает локальной проверки и ревью.** Команды Tauri используют `crates/runtime-ipc`, который в свою очередь вызывает универсальное ядро `crates/runtime-core`.
 
 Основа: черновик `docs/ipc-contract.md` v0.1 (PR #1). Этот документ не вводит новых команд, а раскладывает их по полям, которые нужны для интеграции: схемы, ошибки, изменяет ли операция состояние, права окон, этап. Если документы разойдутся, приоритет у `ipc-contract.md` после его согласования.
 
@@ -10,10 +10,10 @@
 
 | Операция SDK | Команда Tauri | Изменяет состояние | Окна | Этап | В Rust | В SDK |
 |---|---|---|---|---|---|---|
-| `projects.getMetadata` | `runtime_get_project_metadata` | нет (заполняет кэш ядра как побочный эффект) | `main`, `secondary` | v1, обязательна | нет | да (tauri + mock) |
-| `diagnostics.getStats` | `runtime_get_debug_stats` | нет | `main`, `secondary` | v1, обязательна | нет | да (tauri; в mock намеренно ошибка) |
-| — | `runtime_invalidate_project` | да | только `main` | v1.1, предложение | нет | нет |
-| — | `runtime_clear_cache` | да | только `main` | v1.1, предложение | нет | нет |
+| `projects.getMetadata` | `runtime_get_project_metadata` | нет (заполняет кэш ядра как побочный эффект) | `main`, `secondary` | v1, обязательна | да | да (tauri + mock) |
+| `diagnostics.getStats` | `runtime_get_debug_stats` | нет | `main`, `secondary` | v1, обязательна | да | да (tauri; в mock намеренно ошибка) |
+| — | `runtime_invalidate_project` | да | только `main` | команда реализована в Rust v1; UI пока не использует | да | нет |
+| — | `runtime_clear_cache` | да | только `main` | команда реализована в Rust v1; UI пока не использует | да | нет |
 | — | событие `runtime://cache-invalidated` | — | все окна получают | v1.1, предложение | нет | нет |
 
 Операции окон (создать и сфокусировать `secondary`) идут не через Core, а через встроенный API Tauri (`@tauri-apps/api/webviewWindow`, `src/lib/windows.ts`). Права на них выданы только окну `main` в `src-tauri/capabilities/window-management.json`. В контракт с ядром они не входят.
@@ -24,7 +24,7 @@
 - Любая ошибка отклоняет Promise объектом `{ code: string, message: string }`. SDK превращает его в `RuntimeError` с тем же `code`; неизвестный `code` показывается как есть.
 - Окно не передаёт свою метку, `windowId` или права. Ядро берёт контекст из `tauri::WebviewWindow` в обработчике. Метки `main` и `secondary` становятся частью контракта.
 - SDK не кэширует, не объединяет запросы и не повторяет их. Каждый вызов UI доходит до `invoke`.
-- Права на команды задаются capabilities (app manifest в `build.rs`). Пока ядро их не объявило, capabilities фронтенда их не упоминают.
+- Права на команды заданы через `tauri_build::AppManifest` и capabilities. Чтение доступно `main` и `secondary`; изменение кэша — только `main`. Обработчики дополнительно проверяют доверенную метку `WebviewWindow`, полученную от Tauri.
 
 Коды, которые создаёт только SDK: `IPC_UNAVAILABLE` (страница не в Tauri), `COMMAND_NOT_FOUND` (команда не зарегистрирована), `UNKNOWN_ERROR` (непонятное отклонение), `STATS_UNAVAILABLE_IN_MOCK`.
 
@@ -61,7 +61,7 @@ SDK проверяет это до вызова и сразу отвечает `
 | `OPERATION_FAILED` | вычисление упало; ошибка не кэшируется |
 | `INTERNAL` | всё остальное |
 
-**Права:** все окна (`main`, `secondary`), разрешение `allow-runtime-get-project-metadata` в `capabilities/default.json`. Проверку доступа к конкретному проекту делает ядро.
+**Права:** все окна (`main`, `secondary`), разрешение `allow-runtime-get-project-metadata` в `capabilities/default.json`. В демо v1 проверка доступа к отдельным проектам не реализована; `ACCESS_DENIED` зарезервирован, а доступ к административным командам контролируется на уровне окна.
 
 **Этап:** v1, без неё интеграция невозможна.
 
@@ -98,7 +98,7 @@ SDK проверяет это до вызова и сразу отвечает `
 
 **Этап:** v1, нужна для демонстрации объединения запросов.
 
-**Блокер:** `CachedService::run` не сообщает исход вызова, поэтому `cacheHits` и `coalescedRequests` снаружи ядра не различить (вопрос 1 в `ipc-contract.md`).
+**Решено:** `runtime-ipc` вызывает `CachedService::run_with_metadata()` и обновляет счётчики по `outcome.kind`; ошибки считаются отдельно через `outcome.result`.
 
 **Mock:** всегда `STATS_UNAVAILABLE_IN_MOCK`. Поддельные счётчики выглядели бы как данные ядра, поэтому их нет.
 
@@ -124,10 +124,12 @@ SDK проверяет это до вызова и сразу отвечает `
 
 Payload `{ projectId: string | null }` (`null` после `clear`), рассылается всем окнам. Только информирует: SDK сам ничего не перезапрашивает. В первом этапе не нужно.
 
-## Что нужно от владельца ядра для v1
+## Статус интеграции v1
 
-1. Одобрить или поправить форму `ProjectMetadata`, `RuntimeDebugStats` и ошибок.
-2. Способ узнать исход вызова в `CachedService` (кэш / объединение / запуск).
-3. Зарегистрировать две команды v1 и объявить их в app manifest, чтобы добавить разрешения в `capabilities/default.json`.
-4. Тестовые `projectId`, включая стабильные `PROJECT_NOT_FOUND` и `OPERATION_FAILED`, чтобы заменить фикстуры mock на реальные.
-5. Задержка демо-операции 300–500 мс, иначе объединение может быть не видно.
+- [x] `runtime_get_project_metadata` зарегистрирована в Tauri и обращается к `RuntimeIpc`.
+- [x] `runtime_get_debug_stats` зарегистрирована в Tauri; чтение статистики само не считается запросом.
+- [x] `runtime_invalidate_project` и `runtime_clear_cache` доступны только окну `main` через capabilities и дополнительную проверку `WebviewWindow::label()`.
+- [x] `runtime-core` остаётся без зависимостей от Tauri и serde.
+- [ ] Прогнать сборку frontend (`npm ci && npm run build`), затем Cargo-проверки с обновлением корневого `Cargo.lock`.
+- [ ] Проверить запуск `npm run tauri dev` и вручную проверить второй window.
+- [ ] Подключить UI-контролы инвалидации/очистки к SDK (Rust-команды уже есть, TypeScript transport пока не экспортирует их).
