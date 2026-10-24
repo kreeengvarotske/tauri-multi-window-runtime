@@ -56,6 +56,17 @@
             <div class="metric metric-wide"><span>Series duration</span><strong id="duration-value">—</strong></div>
           </div>
 
+          <div class="note-panel automated-load" id="timed-load-panel">
+            <strong>Automated paired load</strong>
+            <p>Runs 50 independent requests in each window concurrently for at least 60 seconds. Use the same PowerShell process monitor as Runtime Lab. Every baseline request starts its own operation.</p>
+            <div class="button-row">
+              <button id="run-timed-load" class="button button-primary">Run paired load (60 seconds)</button>
+              <button id="download-timed-report" class="button button-secondary" hidden>Download JSON report</button>
+            </div>
+            <p id="timed-load-status" class="status" aria-live="polite">Open the secondary window before starting.</p>
+            <pre id="timed-load-report" class="code-panel">The timed report will appear here after the run.</pre>
+          </div>
+
           <h3>Sample response</h3>
           <pre id="sample-response" class="code-panel">No response yet.</pre>
           <h3>Last error</h3>
