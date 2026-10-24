@@ -25,7 +25,7 @@ pub struct ProjectMetadata {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
-enum CachePolicyDto {
+pub enum CachePolicyDto {
     NoStore,
 }
 
