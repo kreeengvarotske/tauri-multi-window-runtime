@@ -42,7 +42,7 @@ pub struct BaselineDebugStats {
 }
 
 #[tauri::command]
-pub async fn baseline_get_project_metadata(
+async fn baseline_get_project_metadata(
     project_id: String,
     stats: State<'_, BaselineStats>,
 ) -> Result<ProjectMetadata, String> {
@@ -83,7 +83,7 @@ pub async fn baseline_get_project_metadata(
 }
 
 #[tauri::command]
-pub fn baseline_get_debug_stats(stats: State<'_, BaselineStats>) -> BaselineDebugStats {
+fn baseline_get_debug_stats(stats: State<'_, BaselineStats>) -> BaselineDebugStats {
     BaselineDebugStats {
         requests_received: stats.requests_received.load(Ordering::Relaxed),
         operations_executed: stats.operations_executed.load(Ordering::Relaxed),
@@ -93,6 +93,18 @@ pub fn baseline_get_debug_stats(stats: State<'_, BaselineStats>) -> BaselineDebu
         cached_entries: 0,
         cache_policy: CachePolicyDto::NoStore,
     }
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .manage(BaselineStats::default())
+        .invoke_handler(tauri::generate_handler![
+            baseline_get_project_metadata,
+            baseline_get_debug_stats
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running Vanilla Tauri Baseline");
 }
 
 fn unix_time_ms() -> u64 {
