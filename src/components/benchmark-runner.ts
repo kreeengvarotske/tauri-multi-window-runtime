@@ -15,6 +15,14 @@ export interface BenchmarkRoundResult {
   passed: boolean;
 }
 
+export interface BenchmarkCounterTotals {
+  requestsReceived: number;
+  operationsExecuted: number;
+  coalescedRequests: number;
+  cacheHits: number;
+  failedRequests: number;
+}
+
 export interface BenchmarkSuiteReport {
   schemaVersion: 1;
   startedAt: string;
@@ -28,7 +36,7 @@ export interface BenchmarkSuiteReport {
   requestsExpected: number;
   roundsCompleted: number;
   durationMs: number;
-  totals: Omit<BenchmarkRoundResult, "round" | "durationMs" | "cachedEntriesAtEnd" | "passed">;
+  totals: BenchmarkCounterTotals;
   rounds: BenchmarkRoundResult[];
   passed: boolean;
 }
