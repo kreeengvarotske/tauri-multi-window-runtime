@@ -41,6 +41,11 @@ input:focus, select:focus { border-color: var(--blue); box-shadow: 0 0 0 3px #5b
 .button-primary { background: #3476d0; color: white; }
 .button-secondary { background: #222c39; border-color: #354253; color: #d7e1ed; }
 .status { margin: 15px 0 0; min-height: 20px; color: #95bdf4; font-size: 12px; }
+.status-success { color: var(--green); }
+.status-error { color: var(--red); }
+.automated-load { margin-top: 18px; }
+.automated-load .button-row { margin-top: 10px; }
+.automated-load .code-panel { max-height: 180px; }
 .metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; margin-top: 12px; }
 .metric { display: flex; flex-direction: column; gap: 8px; padding: 12px; background: #111720; border: 1px solid #283342; border-radius: 9px; min-width: 0; }
 .metric span, .stats-list span { color: var(--muted); font-size: 11px; }
