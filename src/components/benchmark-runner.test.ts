@@ -85,6 +85,25 @@ describe("runPairedBenchmarkSuite", () => {
     expect(report.passed).toBe(false);
   });
 
+  it("supports a timed load until the requested interval elapses", async () => {
+    const harness = createHarness();
+    const report = await runPairedBenchmarkSuite({
+      ...harness,
+      durationSeconds: 5,
+      size: 50,
+      now: (() => {
+        let clock = 0;
+        return () => (clock += 500);
+      })(),
+    });
+
+    expect(report.runType).toBe("timed-load");
+    expect(report.roundsRequested).toBeNull();
+    expect(report.roundsCompleted).toBeGreaterThan(0);
+    expect(report.requestsExpected).toBe(report.roundsCompleted * 100);
+    expect(report.passed).toBe(true);
+  });
+
   it("rejects an invalid number of rounds before clearing cache", async () => {
     const harness = createHarness();
     await expect(
