@@ -73,12 +73,49 @@ Import-Csv .\tauri-runtime.csv |
 
 ## Summarize a run
 
+The CSV uses an invariant decimal point (for example, `380.69`) regardless of the Windows display language. Keep the explicit invariant-culture parsing below when calculating numeric summaries; `Import-Csv` returns text values.
+
 ```powershell
 $data = Import-Csv .\tauri-runtime.csv
-$data | Measure-Object -Property WorkingSetMB -Average -Maximum
-$data | Measure-Object -Property PrivateBytesMB -Average -Maximum
-$data | Where-Object { $_.CpuPercentAllCores -ne '' } |
-    Measure-Object -Property CpuPercentAllCores -Average -Maximum
+$culture = [System.Globalization.CultureInfo]::InvariantCulture
+
+$workingSet = @($data | ForEach-Object {
+    [double]::Parse($_.WorkingSetMB, $culture)
+})
+$privateBytes = @($data | ForEach-Object {
+    [double]::Parse($_.PrivateBytesMB, $culture)
+})
+$cpu = @($data |
+    Where-Object { -not [string]::IsNullOrWhiteSpace($_.CpuPercentAllCores) } |
+    ForEach-Object { [double]::Parse($_.CpuPercentAllCores, $culture) })
+$intervals = @($data | ForEach-Object {
+    [double]::Parse($_.IntervalSeconds, $culture)
+})
+
+[pscustomobject]@{
+    Metric = 'WorkingSetMB'
+    Count = $workingSet.Count
+    Average = ($workingSet | Measure-Object -Average).Average
+    Maximum = ($workingSet | Measure-Object -Maximum).Maximum
+}
+[pscustomobject]@{
+    Metric = 'PrivateBytesMB'
+    Count = $privateBytes.Count
+    Average = ($privateBytes | Measure-Object -Average).Average
+    Maximum = ($privateBytes | Measure-Object -Maximum).Maximum
+}
+[pscustomobject]@{
+    Metric = 'CpuPercentAllCores'
+    Count = $cpu.Count
+    Average = ($cpu | Measure-Object -Average).Average
+    Maximum = ($cpu | Measure-Object -Maximum).Maximum
+}
+[pscustomobject]@{
+    Metric = 'IntervalSeconds'
+    Count = $intervals.Count
+    Average = ($intervals | Measure-Object -Average).Average
+    Maximum = ($intervals | Measure-Object -Maximum).Maximum
+}
 ```
 
-The CPU percentage is blank for the first sample and can also be blank when CPU-time deltas cannot be calculated. The final command filters out blank values before summarizing.
+The CPU percentage is blank for the first sample and can also be blank when CPU-time deltas cannot be calculated. The CPU summary excludes blank values. Parse decimal values with `InvariantCulture` rather than relying on the Windows regional settings.
