@@ -1,5 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { WebviewWindow, getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { installPairedLoadBridge, runTimedPairedLoad, type PairedLoadReport } from "./paired-load";
 import "./styles.css";
 
 interface ProjectMetadata {
@@ -43,6 +44,11 @@ const historyList = byId<HTMLOListElement>("history");
 const runStatus = byId<HTMLParagraphElement>("run-status");
 const sampleResponse = byId<HTMLPreElement>("sample-response");
 const lastError = byId<HTMLParagraphElement>("last-error");
+const timedLoadPanel = byId<HTMLElement>("timed-load-panel");
+const timedLoadButton = byId<HTMLButtonElement>("run-timed-load");
+const downloadTimedReportButton = byId<HTMLButtonElement>("download-timed-report");
+const timedLoadStatus = byId<HTMLParagraphElement>("timed-load-status");
+const timedLoadReportElement = byId<HTMLPreElement>("timed-load-report");
 
 const tauri = isTauri();
 const windowLabel = tauri
@@ -51,8 +57,12 @@ const windowLabel = tauri
 byId<HTMLSpanElement>("window-label").textContent = windowLabel;
 byId<HTMLSpanElement>("mode-badge").textContent = tauri ? "TAURI" : "BROWSER";
 openSecondaryButton.hidden = windowLabel !== "main";
+timedLoadPanel.hidden = windowLabel !== "main";
+installPairedLoadBridge(windowLabel, tauri);
 
 const history: SeriesHistory[] = [];
+let automatedLoadRunning = false;
+let latestPairedLoadReport: PairedLoadReport | null = null;
 const maxHistoryItems = 20;
 
 function setText(id: string, value: string): void {
@@ -191,6 +201,69 @@ async function runSeries(): Promise<void> {
   }
 }
 
+async function runAutomatedTimedLoad(): Promise<void> {
+  if (automatedLoadRunning) return;
+  if (!tauri) {
+    timedLoadStatus.textContent = "Run this benchmark from the native Tauri app, not a browser tab.";
+    return;
+  }
+
+  automatedLoadRunning = true;
+  setRunBusy(true);
+  openSecondaryButton.disabled = true;
+  refreshStatsButton.disabled = true;
+  timedLoadButton.disabled = true;
+  downloadTimedReportButton.hidden = true;
+  timedLoadStatus.className = "status";
+  timedLoadStatus.textContent = "Running paired load for at least 60 seconds. Keep both windows open and do not run other series.";
+  timedLoadReportElement.textContent = "Benchmark in progress…";
+  latestPairedLoadReport = null;
+
+  try {
+    latestPairedLoadReport = await runTimedPairedLoad({
+      durationSeconds: 60,
+      requestsPerWindow: 50,
+      projectId: "project-42",
+      onRound(round, roundsCompleted) {
+        timedLoadStatus.textContent =
+          "Round " + roundsCompleted + ": " + round.requestsAttempted + "/" +
+          round.requestsExpected + " requests attempted, " + round.failures +
+          " failures, " + round.durationMs.toFixed(1) + " ms.";
+      },
+    });
+
+    timedLoadReportElement.textContent = JSON.stringify(latestPairedLoadReport, null, 2);
+    timedLoadStatus.className = latestPairedLoadReport.passed ? "status status-success" : "status status-error";
+    timedLoadStatus.textContent = latestPairedLoadReport.passed
+      ? "PASS: " + latestPairedLoadReport.totals.requestsReceived + " requests, " +
+        latestPairedLoadReport.totals.operationsExecuted + " operations, 0 coalesced requests and 0 errors."
+      : "The load finished, but the observed results did not match the baseline expectations. Inspect the JSON report.";
+    downloadTimedReportButton.hidden = false;
+  } catch (error) {
+    timedLoadReportElement.textContent = String(error);
+    timedLoadStatus.className = "status status-error";
+    timedLoadStatus.textContent = "Paired load stopped before a complete report was produced.";
+  } finally {
+    automatedLoadRunning = false;
+    setRunBusy(false);
+    openSecondaryButton.disabled = false;
+    refreshStatsButton.disabled = false;
+    timedLoadButton.disabled = false;
+  }
+}
+
+function downloadTimedReport(): void {
+  if (!latestPairedLoadReport) return;
+  const json = JSON.stringify(latestPairedLoadReport, null, 2);
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const url = URL.createObjectURL(new Blob([json], { type: "application/json" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "vanilla-tauri-benchmark-" + timestamp + ".json";
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
 async function refreshStats(): Promise<void> {
   if (!tauri) {
     setText("stats-updated", "Backend stats are only available in the native Tauri app.");
@@ -217,6 +290,8 @@ async function refreshStats(): Promise<void> {
 }
 
 runButton.addEventListener("click", () => void runSeries());
+timedLoadButton.addEventListener("click", () => void runAutomatedTimedLoad());
+downloadTimedReportButton.addEventListener("click", downloadTimedReport);
 refreshStatsButton.addEventListener("click", () => void refreshStats());
 openSecondaryButton.addEventListener("click", async () => {
   openSecondaryButton.disabled = true;
