@@ -4,8 +4,9 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "icons:generate": "tauri icon ./src-tauri/icons/vanilla-baseline.svg --output ./src-tauri/icons",
+    "dev": "npm run icons:generate && vite",
+    "build": "npm run icons:generate && tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "tauri": "tauri"
   },
