@@ -140,6 +140,7 @@ $firstRow = $true
 $sampleNumber = 0
 
 while ($watch.Elapsed.TotalSeconds -lt $DurationSeconds) {
+    $sampleStartedAt = $watch.Elapsed.TotalSeconds
     $snapshot = @(Get-ProcessSnapshot)
     $rootStillExists = @($snapshot | Where-Object { [int]$_.ProcessId -eq $resolvedRootPid }).Count -gt 0
     if (-not $rootStillExists) {
@@ -216,11 +217,12 @@ while ($watch.Elapsed.TotalSeconds -lt $DurationSeconds) {
     $previousSampleTime = $now
     $sampleNumber++
 
-    # Keep the requested cadence inclusive of sampling/CSV overhead.
-    # Sleeping a full interval here would stretch a 1-second interval by the
-    # time spent collecting process snapshots and writing each CSV row.
-    $workElapsed = $watch.Elapsed.TotalSeconds - $now
-    $remainingSleepSeconds = $SampleIntervalSeconds - $workElapsed
+    # Keep the requested cadence inclusive of sampling and CSV overhead.
+    # Use this sample's processing time to estimate the next sample's processing
+    # cost; actual intervals may still vary with OS scheduling and process churn.
+    $sampleProcessingSeconds = $now - $sampleStartedAt
+    $postSampleSeconds = $watch.Elapsed.TotalSeconds - $now
+    $remainingSleepSeconds = $SampleIntervalSeconds - $sampleProcessingSeconds - $postSampleSeconds
     if ($remainingSleepSeconds -gt 0) {
         $sleepMilliseconds = [int][Math]::Max(1, [Math]::Round($remainingSleepSeconds * 1000))
         Start-Sleep -Milliseconds $sleepMilliseconds
