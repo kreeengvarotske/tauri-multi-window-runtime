@@ -6,6 +6,7 @@ import { createWindowPanel } from "./components/window-panel";
 import { createRequestPanel } from "./components/request-panel";
 import { createStatsPanel } from "./components/stats-panel";
 import { createHistoryPanel } from "./components/history-panel";
+import { createBenchmarkRunner } from "./components/benchmark-runner";
 
 export interface AppOptions {
   /** Result of runtime setup; a thrown configuration error is passed as `error`. */
@@ -55,6 +56,17 @@ export function mountApp(root: HTMLElement, { setup, identity, openSecondary, br
     onRunInBothWindows: isMain ? (request) => windows.requestSeriesInSecondary(request) : undefined,
   });
 
+  // The automated suite is intentionally available only in the real main
+  // Tauri window because it clears the shared Core cache between rounds.
+  const benchmarkRunner =
+    runtime.mode === "tauri" && isMain
+      ? createBenchmarkRunner({
+          runtime,
+          bridge: windows,
+          runLocalSeries: (projectId, size) => requests.run(projectId, size, "Автотест main"),
+        })
+      : null;
+
   // Every window hears about cache changes, including the ones made elsewhere.
   void runtime.events.onCacheInvalidated(({ projectId }) => {
     stats.cacheInvalidated(projectId);
@@ -69,7 +81,7 @@ export function mountApp(root: HTMLElement, { setup, identity, openSecondary, br
     h(
       "div",
       { class: "layout" },
-      h("div", { class: "column" }, requests.element),
+      h("div", { class: "column" }, requests.element, benchmarkRunner),
       h("div", { class: "column" }, stats.element, createWindowPanel(identity, openSecondary), history.element),
     ),
   );
