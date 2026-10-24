@@ -31,6 +31,8 @@ npm.cmd run tauri dev
 
 The Vite dev server uses port 1430 to avoid colliding with Runtime Lab's port 1420. Open the secondary window with the button in the main window.
 
+The source icon is `src-tauri/icons/vanilla-baseline.svg`. The npm `dev` and `build` scripts generate Tauri's platform-specific icons (including the Windows `icon.ico`) into `src-tauri/icons` before starting Vite or building the frontend. This avoids depending on generated binary assets being present in a fresh checkout.
+
 ## Build a release executable
 
 ```powershell
