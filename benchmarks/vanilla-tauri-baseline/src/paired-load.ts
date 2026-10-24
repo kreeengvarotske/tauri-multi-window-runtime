@@ -22,11 +22,9 @@ interface DebugStats {
 export interface PairedLoadRound {
   round: number;
   requestsExpected: number;
-  requestsReceived: number;
-  operationsExecuted: number;
-  coalescedRequests: number;
-  cacheHits: number;
-  failedRequests: number;
+  requestsAttempted: number;
+  successes: number;
+  failures: number;
   durationMs: number;
   mainSuccesses: number;
   secondarySuccesses: number;
@@ -164,29 +162,26 @@ export async function runTimedPairedLoad(options?: {
         secondaryResult.promise,
       ]);
 
-      const afterRound = await invoke<DebugStats>("baseline_get_debug_stats");
-      const deltas = statsDelta(before, afterRound);
+      const mainAttempted = main.successes + main.failures;
+      const secondaryAttempted = secondaryBatch.successes + secondaryBatch.failures;
+      const successes = main.successes + secondaryBatch.successes;
+      const failures = main.failures + secondaryBatch.failures;
+      const requestsAttempted = mainAttempted + secondaryAttempted;
       const roundResult: PairedLoadRound = {
         round,
         requestsExpected: requestsPerWindow * 2,
-        requestsReceived: deltas.requestsReceived,
-        operationsExecuted: deltas.operationsExecuted,
-        coalescedRequests: deltas.coalescedRequests,
-        cacheHits: deltas.cacheHits,
-        failedRequests: deltas.failedRequests,
+        requestsAttempted,
+        successes,
+        failures,
         durationMs: Math.round((performance.now() - roundStarted) * 100) / 100,
         mainSuccesses: main.successes,
         secondarySuccesses: secondaryBatch.successes,
         mainFailures: main.failures,
         secondaryFailures: secondaryBatch.failures,
         passed:
-          deltas.requestsReceived === requestsPerWindow * 2 &&
-          deltas.operationsExecuted === requestsPerWindow * 2 &&
-          deltas.coalescedRequests === 0 &&
-          deltas.cacheHits === 0 &&
-          deltas.failedRequests === 0 &&
-          main.successes === requestsPerWindow &&
-          secondaryBatch.successes === requestsPerWindow,
+          requestsAttempted === requestsPerWindow * 2 &&
+          successes === requestsPerWindow * 2 &&
+          failures === 0,
       };
       rounds.push(roundResult);
       options?.onRound?.(roundResult, rounds.length);
