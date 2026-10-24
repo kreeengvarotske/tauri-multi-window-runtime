@@ -58,6 +58,6 @@ jobs:
         run: cargo test
         working-directory: benchmarks/vanilla-tauri-baseline/src-tauri
 
-      - name: Build native Release application and installer
+      - name: Build native Release application
         run: npm run tauri build
         working-directory: benchmarks/vanilla-tauri-baseline
