@@ -5,6 +5,10 @@
   "windows": ["main", "secondary"],
   "permissions": [
     "core:default",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:event:allow-emit",
+    "core:event:allow-emit-to",
     "allow-baseline-get-project-metadata",
     "allow-baseline-get-debug-stats"
   ]
