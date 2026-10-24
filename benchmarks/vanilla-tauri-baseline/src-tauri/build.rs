@@ -1,7 +1,4 @@
-const COMMANDS: &[&str] = &[
-    "baseline_get_project_metadata",
-    "baseline_get_debug_stats",
-];
+const COMMANDS: &[&str] = &["baseline_get_project_metadata", "baseline_get_debug_stats"];
 
 fn main() {
     tauri_build::try_build(
