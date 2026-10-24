@@ -22,6 +22,11 @@ interface DebugStats {
 export interface PairedLoadRound {
   round: number;
   requestsExpected: number;
+  requestsReceived: number;
+  operationsExecuted: number;
+  coalescedRequests: number;
+  cacheHits: number;
+  failedRequests: number;
   requestsAttempted: number;
   successes: number;
   failures: number;
@@ -151,6 +156,7 @@ export async function runTimedPairedLoad(options?: {
     }
 
     const round = rounds.length + 1;
+    const beforeRound = await invoke<DebugStats>("baseline_get_debug_stats");
     const roundStarted = performance.now();
     const request: PairedLoadRequest = { runId, round, projectId, size: requestsPerWindow };
     const secondaryResult = await prepareSecondaryResultWaiter(runId, round);
@@ -162,6 +168,8 @@ export async function runTimedPairedLoad(options?: {
         secondaryResult.promise,
       ]);
 
+      const afterRound = await invoke<DebugStats>("baseline_get_debug_stats");
+      const deltas = statsDelta(beforeRound, afterRound);
       const mainAttempted = main.successes + main.failures;
       const secondaryAttempted = secondaryBatch.successes + secondaryBatch.failures;
       const successes = main.successes + secondaryBatch.successes;
@@ -170,6 +178,11 @@ export async function runTimedPairedLoad(options?: {
       const roundResult: PairedLoadRound = {
         round,
         requestsExpected: requestsPerWindow * 2,
+        requestsReceived: deltas.requestsReceived,
+        operationsExecuted: deltas.operationsExecuted,
+        coalescedRequests: deltas.coalescedRequests,
+        cacheHits: deltas.cacheHits,
+        failedRequests: deltas.failedRequests,
         requestsAttempted,
         successes,
         failures,
@@ -179,6 +192,11 @@ export async function runTimedPairedLoad(options?: {
         mainFailures: main.failures,
         secondaryFailures: secondaryBatch.failures,
         passed:
+          deltas.requestsReceived === requestsPerWindow * 2 &&
+          deltas.operationsExecuted === requestsPerWindow * 2 &&
+          deltas.coalescedRequests === 0 &&
+          deltas.cacheHits === 0 &&
+          deltas.failedRequests === 0 &&
           requestsAttempted === requestsPerWindow * 2 &&
           successes === requestsPerWindow * 2 &&
           failures === 0,
