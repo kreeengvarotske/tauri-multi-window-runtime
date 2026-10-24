@@ -139,10 +139,10 @@ export async function runTimedPairedLoad(options?: {
   await waitForSecondaryReady();
 
   const startedAt = new Date().toISOString();
-  const suiteStarted = performance.now();
-  const deadline = suiteStarted + durationSeconds * 1000;
   const runId = createRunId();
   const before = await invoke<DebugStats>("baseline_get_debug_stats");
+  const suiteStarted = performance.now();
+  const deadline = suiteStarted + durationSeconds * 1000;
   const rounds: PairedLoadRound[] = [];
 
   while (rounds.length === 0 || performance.now() < deadline) {
