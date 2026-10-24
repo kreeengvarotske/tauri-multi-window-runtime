@@ -77,6 +77,7 @@ function setRunBusy(busy: boolean): void {
   runButton.disabled = busy;
   requestCountSelect.disabled = busy;
   projectIdInput.disabled = busy;
+  timedLoadButton.disabled = busy || automatedLoadRunning;
   runButton.textContent = busy ? "Running…" : "Run concurrent series";
 }
 
@@ -202,7 +203,7 @@ async function runSeries(): Promise<void> {
 }
 
 async function runAutomatedTimedLoad(): Promise<void> {
-  if (automatedLoadRunning) return;
+  if (automatedLoadRunning || runButton.disabled) return;
   if (!tauri) {
     timedLoadStatus.textContent = "Run this benchmark from the native Tauri app, not a browser tab.";
     return;
