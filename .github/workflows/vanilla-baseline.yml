@@ -1,0 +1,63 @@
+name: Vanilla Tauri baseline
+
+on:
+  pull_request:
+    paths:
+      - "benchmarks/vanilla-tauri-baseline/**"
+      - ".github/workflows/vanilla-baseline.yml"
+  push:
+    branches:
+      - benchmarks/vanilla-tauri-baseline
+    paths:
+      - "benchmarks/vanilla-tauri-baseline/**"
+      - ".github/workflows/vanilla-baseline.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  windows-release:
+    runs-on: windows-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: benchmarks/vanilla-tauri-baseline/package-lock.json
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: benchmarks/vanilla-tauri-baseline
+
+      - name: Type-check frontend
+        run: npm run typecheck
+        working-directory: benchmarks/vanilla-tauri-baseline
+
+      - name: Build frontend
+        run: npm run build
+        working-directory: benchmarks/vanilla-tauri-baseline
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+        working-directory: benchmarks/vanilla-tauri-baseline/src-tauri
+
+      - name: Run Clippy
+        run: cargo clippy --all-targets -- -D warnings
+        working-directory: benchmarks/vanilla-tauri-baseline/src-tauri
+
+      - name: Run Rust tests
+        run: cargo test
+        working-directory: benchmarks/vanilla-tauri-baseline/src-tauri
+
+      - name: Build native Release application and installer
+        run: npm run tauri build
+        working-directory: benchmarks/vanilla-tauri-baseline
