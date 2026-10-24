@@ -57,7 +57,7 @@ const windowLabel = tauri
 byId<HTMLSpanElement>("window-label").textContent = windowLabel;
 byId<HTMLSpanElement>("mode-badge").textContent = tauri ? "TAURI" : "BROWSER";
 openSecondaryButton.hidden = windowLabel !== "main";
-timedLoadPanel.hidden = windowLabel !== "main";
+timedLoadPanel.hidden = windowLabel !== "main" || !tauri;
 installPairedLoadBridge(windowLabel, tauri);
 
 const history: SeriesHistory[] = [];
