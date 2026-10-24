@@ -215,7 +215,16 @@ while ($watch.Elapsed.TotalSeconds -lt $DurationSeconds) {
     $previousCpuByPid = $currentCpuByPid
     $previousSampleTime = $now
     $sampleNumber++
-    Start-Sleep -Seconds $SampleIntervalSeconds
+
+    # Keep the requested cadence inclusive of sampling/CSV overhead.
+    # Sleeping a full interval here would stretch a 1-second interval by the
+    # time spent collecting process snapshots and writing each CSV row.
+    $workElapsed = $watch.Elapsed.TotalSeconds - $now
+    $remainingSleepSeconds = $SampleIntervalSeconds - $workElapsed
+    if ($remainingSleepSeconds -gt 0) {
+        $sleepMilliseconds = [int][Math]::Max(1, [Math]::Round($remainingSleepSeconds * 1000))
+        Start-Sleep -Milliseconds $sleepMilliseconds
+    }
 }
 
 $watch.Stop()
