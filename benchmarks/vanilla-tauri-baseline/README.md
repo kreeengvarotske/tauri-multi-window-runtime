@@ -43,6 +43,23 @@ npm.cmd run tauri build
 
 Bundling is disabled in this benchmark app so the executable can be measured without creating an installer. The exact output path should be taken from the build log; it is normally under the nested Rust target directory.
 
+## Automated 60-second paired load
+
+Build and launch the Release executable, then open the secondary window from the main window. The main window now has a **Run paired load (60 seconds)** button. It starts 50 independent metadata requests in each window per round and repeats paired rounds until at least 60 seconds have elapsed and the final round completes. It downloads a JSON report containing request outcomes and Rust Core counter deltas.
+
+For a resource sample, start the root process monitor from the repository root before clicking the button:
+
+```powershell
+$results = Join-Path $env:USERPROFILE "Documents\tauri-benchmark-results\baseline"
+New-Item -ItemType Directory -Force -Path $results | Out-Null
+$app = Get-Process -Name "vanilla-tauri-baseline" -ErrorAction Stop | Select-Object -First 1
+.\benchmarks\windows\Measure-ProcessTree.ps1 -RootPid $app.Id -DurationSeconds 75 -SampleIntervalSeconds 1 -OutputPath (Join-Path $results "vanilla-automated-load-01.csv")
+```
+
+When the sampler begins, switch to the app and click **Run paired load (60 seconds)**. Keep both windows open and do not run other request series while it is active. The JSON report should show `requestsReceived = operationsExecuted`, with zero coalesced requests, cache hits, and errors. Save the JSON and CSV together for each run.
+
+Run the same 60-second paired scenario on Runtime Lab with 50 requests in each window and the same project ID. The exact number of rounds may vary slightly between applications; record actual requests per second alongside memory and CPU rather than assuming the round count is identical. To strengthen conclusions, repeat each variant at least five times, alternate which variant runs first, and compare medians and ranges.
+
 ## Recommended benchmark procedure
 
 1. Record Windows build, CPU model, logical processor count, RAM, Node.js, npm, Rust, and WebView2 versions.
