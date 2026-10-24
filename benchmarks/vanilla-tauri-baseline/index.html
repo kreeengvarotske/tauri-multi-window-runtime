@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>Vanilla Tauri Baseline</title>
+    <script type="module" src="/src/main.ts"></script>
+  </head>
+  <body>
+    <main class="app">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">PERFORMANCE BENCHMARK</p>
+          <h1>Vanilla Tauri Baseline</h1>
+          <p class="subtitle">A reference app without task coalescing or shared cache</p>
+        </div>
+        <div class="window-badges">
+          <span class="badge" id="mode-badge">TAURI</span>
+          <span class="badge badge-muted">Window <strong id="window-label">main</strong></span>
+        </div>
+      </header>
+
+      <div class="grid">
+        <section class="panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">LOAD GENERATOR</p>
+              <h2>Metadata requests</h2>
+            </div>
+            <span class="tag">NO CACHE</span>
+          </div>
+
+          <label for="project-id">Project ID</label>
+          <input id="project-id" value="project-42" maxlength="128" autocomplete="off" />
+
+          <label for="request-count">Concurrent requests</label>
+          <select id="request-count">
+            <option value="1">1 request</option>
+            <option value="10">10 requests</option>
+            <option value="20">20 requests</option>
+            <option value="50" selected>50 requests</option>
+          </select>
+
+          <div class="button-row">
+            <button id="run-series" class="button button-primary">Run concurrent series</button>
+            <button id="open-secondary" class="button button-secondary">Open secondary window</button>
+          </div>
+          <p id="run-status" class="status" aria-live="polite">Ready. No request has been run yet.</p>
+
+          <div class="metrics">
+            <div class="metric"><span>Sent</span><strong id="sent-count">—</strong></div>
+            <div class="metric"><span>Succeeded</span><strong id="success-count">—</strong></div>
+            <div class="metric"><span>Failed</span><strong id="failed-count">—</strong></div>
+            <div class="metric"><span>Distinct payloads</span><strong id="distinct-count">—</strong></div>
+            <div class="metric metric-wide"><span>Series duration</span><strong id="duration-value">—</strong></div>
+          </div>
+
+          <div class="note-panel automated-load" id="timed-load-panel">
+            <strong>Automated paired load</strong>
+            <p>Runs 50 independent requests in each window concurrently for at least 60 seconds. Use the same PowerShell process monitor as Runtime Lab. Every baseline request starts its own operation.</p>
+            <div class="button-row">
+              <button id="run-timed-load" class="button button-primary">Run paired load (60 seconds)</button>
+              <button id="download-timed-report" class="button button-secondary" hidden>Download JSON report</button>
+            </div>
+            <p id="timed-load-status" class="status" aria-live="polite">Open the secondary window before starting.</p>
+            <pre id="timed-load-report" class="code-panel">The timed report will appear here after the run.</pre>
+          </div>
+
+          <h3>Sample response</h3>
+          <pre id="sample-response" class="code-panel">No response yet.</pre>
+          <h3>Last error</h3>
+          <p id="last-error" class="error-text">None</p>
+        </section>
+
+        <div class="side-column">
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">BACKEND</p>
+                <h2>Diagnostic counters</h2>
+              </div>
+              <span class="tag tag-neutral">MANUAL POLL</span>
+            </div>
+            <p class="muted">Refresh counters manually. The statistics command does not create or cache metadata.</p>
+            <button id="refresh-stats" class="button button-secondary">Refresh backend stats</button>
+            <div class="stats-list">
+              <div><span>Requests received</span><strong id="stats-requests">Not loaded</strong></div>
+              <div><span>Operations executed</span><strong id="stats-executions">Not loaded</strong></div>
+              <div><span>Coalesced requests</span><strong id="stats-coalesced">Not loaded</strong></div>
+              <div><span>Cache hits</span><strong id="stats-cache-hits">Not loaded</strong></div>
+              <div><span>Failed requests</span><strong id="stats-failures">Not loaded</strong></div>
+              <div><span>Cached entries</span><strong id="stats-cache-entries">Not loaded</strong></div>
+            </div>
+            <p id="stats-policy" class="muted">Cache policy: not loaded</p>
+            <p id="stats-updated" class="muted" aria-live="polite">Stats have not been refreshed.</p>
+          </section>
+
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">RUN HISTORY</p>
+                <h2>Recent series</h2>
+              </div>
+              <span class="tag tag-neutral">LOCAL ONLY</span>
+            </div>
+            <ol id="history" class="history">
+              <li class="history-empty">No runs recorded yet.</li>
+            </ol>
+          </section>
+
+          <section class="note-panel">
+            <strong>Baseline behavior</strong>
+            <p>Every valid IPC invocation starts its own provider operation. This app intentionally has no task coalescing and no metadata cache.</p>
+          </section>
+        </div>
+      </div>
+    </main>
+  </body>
+</html>
