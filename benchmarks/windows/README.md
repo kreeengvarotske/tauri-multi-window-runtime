@@ -61,6 +61,7 @@ This does not permanently change the system execution policy.
 - Keep debug-stats polling consistent. Prefer an initial run with periodic stats polling disabled, followed by a separate run where all variants use the same polling frequency.
 - Run each scenario at least five times and save each run as a separate CSV file.
 - This script discovers child processes using Windows `ParentProcessId`. Some WebView2 or Electron broker/service processes may not be descendants of the main process and may be omitted. Inspect `ProcessTree` in the CSV. If relevant processes are missing, do not treat the sum as the application's complete memory usage; extend collection to group processes by command line or application profile identifier.
+- The sampler compensates for its collection and CSV-write overhead when scheduling the next sample. Real intervals may still vary because of Windows scheduling, so inspect `IntervalSeconds` in every run.
 - This is a first-pass comparison tool, not a replacement for Windows Performance Recorder/ETW. Sampling introduces a small amount of overhead, so avoid excessively short intervals.
 
 ## Inspect recent samples
