@@ -100,6 +100,20 @@ function Get-CpuSeconds {
     }
 }
 
+function Format-InvariantDecimal {
+    param(
+        [AllowNull()]
+        [object]$Value,
+        [int]$DecimalPlaces = 2
+    )
+
+    if ($null -eq $Value) {
+        return $null
+    }
+
+    return ([double]$Value).ToString(("F{0}" -f $DecimalPlaces), [System.Globalization.CultureInfo]::InvariantCulture)
+}
+
 # Ensure the output directory exists.
 $resolvedOutput = [System.IO.Path]::GetFullPath($OutputPath)
 $outputDirectory = [System.IO.Path]::GetDirectoryName($resolvedOutput)
@@ -116,7 +130,7 @@ $logicalCpuCount = [Environment]::ProcessorCount
 Write-Host "Measuring process: $($rootRecord.Name), PID=$resolvedRootPid"
 Write-Host "Duration: $DurationSeconds seconds; interval: $SampleIntervalSeconds seconds"
 Write-Host "CSV: $resolvedOutput"
-Write-Host "CpuPercentAllCores is normalized to total capacity of all logical CPUs (0–100%). For example, one fully utilized core on an 8-logical-CPU system is about 12.5%."
+Write-Host "CpuPercentAllCores is normalized to total capacity of all logical CPUs (0 to 100%). On an 8-logical-CPU system, one fully utilized core is about 12.5%."
 Write-Host "Stop: Ctrl+C"
 
 $watch = [System.Diagnostics.Stopwatch]::StartNew()
@@ -174,17 +188,17 @@ while ($watch.Elapsed.TotalSeconds -lt $DurationSeconds) {
 
     $row = [pscustomobject]@{
         Timestamp          = (Get-Date).ToString('o')
-        ElapsedSeconds     = [Math]::Round($now, 2)
-        IntervalSeconds    = [Math]::Round($elapsed, 3)
+        ElapsedSeconds     = Format-InvariantDecimal -Value ([Math]::Round($now, 2)) -DecimalPlaces 2
+        IntervalSeconds    = Format-InvariantDecimal -Value ([Math]::Round($elapsed, 3)) -DecimalPlaces 3
         Sample             = $sampleNumber
         RootPid            = $resolvedRootPid
         ProcessCount       = $tree.Count
         ProcessIds         = (($tree | ForEach-Object { [string]$_.ProcessId }) -join ';')
         ProcessTree        = ($treeDescriptions -join ';')
-        WorkingSetMB       = [Math]::Round(($workingSetBytes / 1MB), 2)
-        PrivateBytesMB     = [Math]::Round(($privateBytes / 1MB), 2)
-        CpuPercentAllCores = $cpuPercent
-        CpuDeltaSeconds    = if ($sampleNumber -gt 0) { [Math]::Round($cpuDeltaSeconds, 4) } else { $null }
+        WorkingSetMB       = Format-InvariantDecimal -Value ([Math]::Round(($workingSetBytes / 1MB), 2)) -DecimalPlaces 2
+        PrivateBytesMB     = Format-InvariantDecimal -Value ([Math]::Round(($privateBytes / 1MB), 2)) -DecimalPlaces 2
+        CpuPercentAllCores = if ($null -ne $cpuPercent) { Format-InvariantDecimal -Value $cpuPercent -DecimalPlaces 2 } else { $null }
+        CpuDeltaSeconds    = if ($sampleNumber -gt 0) { Format-InvariantDecimal -Value ([Math]::Round($cpuDeltaSeconds, 4)) -DecimalPlaces 4 } else { $null }
         LogicalCpuCount    = $logicalCpuCount
     }
 
