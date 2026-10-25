@@ -23,7 +23,7 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
-      - name: Test private-memory unit validation fail-closed
+      - name: Test private-memory unit validation fail-closed (empty, non-finite, wrong-unit)
         shell: powershell
         run: .\benchmarks\windows\Test-PrivateUnitValidation.ps1
 
