@@ -574,6 +574,24 @@ else {
     }
     $looks.Add([pscustomobject]@{ Name = 'look1'; Rows = $look1 })
     if ($ExtensionDirectory) {
+        # Never label look 1 data as look 2: the extension must cover every
+        # scenario that still has at least one undecided primary hypothesis.
+        $requiredScenarios = @($undecided | ForEach-Object { ($_ -split '/', 2)[0] } | Sort-Object -Unique)
+        $actualScenarios = @($extension.scenarios | ForEach-Object { [string]$_ } | Sort-Object -Unique)
+        $missingScenarios = @($requiredScenarios | Where-Object { $actualScenarios -notcontains $_ })
+        $unexpectedScenarios = @($actualScenarios | Where-Object { $requiredScenarios -notcontains $_ })
+        if ($missingScenarios.Count -gt 0 -or $unexpectedScenarios.Count -gt 0) {
+            throw ("The extension scenarios must exactly match those with undecided primary tests at look 1. Required: [{0}]; configured: [{1}]; missing: [{2}]; unexpected: [{3}]. Refusing to re-test look 1 data as look 2." -f
+                ($requiredScenarios -join ', '), ($actualScenarios -join ', '), ($missingScenarios -join ', '), ($unexpectedScenarios -join ', '))
+        }
+        foreach ($scenario in $requiredScenarios) {
+            foreach ($pairNumber in 11..20) {
+                $pairCount = @($pairRows | Where-Object { $_.Scenario -eq $scenario -and [int]$_.Pair -eq $pairNumber }).Count
+                if ($pairCount -ne 1) {
+                    throw ("The extension is missing a unique planned pair {0} for scenario {1}; found {2} row(s). Refusing to perform look 2 with reused or incomplete data." -f $pairNumber, $scenario, $pairCount)
+                }
+            }
+        }
         $look2 = Invoke-Analysis -MaxPair (2 * $plannedPairsPerLook) -Alpha $lookAlpha -TestedKeys $undecided
         foreach ($row in $look2) {
             if ($row.Role -ne 'primary') { continue }
