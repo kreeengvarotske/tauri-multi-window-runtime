@@ -251,16 +251,19 @@ foreach ($directory in $directories) {
             Rounds = $null; PassedRounds = $null; Overruns = $null
             RequestsReceived = $null; OperationsExecuted = $null; CoalescedRequests = $null; CacheHits = $null; FailedRequests = $null
             RequestsPerSecond = $null; RoundMsP50 = $null; RoundMsP95 = $null
-            MonitorRows = 0; LoadRows = 0; LoadRowsExpected = $null; LoadRowsWithMissingValues = $null; LoadProcessCountMax = $null
-            IntervalMedianSeconds = $null; IntervalMaxSeconds = $null; LoadIntervalMaxSeconds = $null
+            MonitorRows = 0; LoadRows = 0; LoadRowsExpected = $null; LoadRowsWithMissingValues = $null
+            LoadRowsWithMissingPrivateValues = $null; LoadRowsWithUnreadableCpu = $null; LoadProcessCountMax = $null
+            IntervalMedianSeconds = $null; IntervalMaxSeconds = $null; LoadIntervalMedianSeconds = $null; LoadIntervalMaxSeconds = $null
             MonitorCpuSeconds = $(if ($null -ne $log -and $log.PSObject.Properties['monitorCpuSeconds']) { $log.monitorCpuSeconds } else { $null })
         }
         foreach ($metric in $resourceMetrics) { $row[$metric] = $null }
 
         if ($null -eq $log) { $reasons.Add('no runs.log entry') }
         else {
-            if ($log.exitCode -ne 0) { $reasons.Add("exit code $($log.exitCode)") }
+            if ($null -eq $log.exitCode -or [int]$log.exitCode -ne 0) { $reasons.Add("app exit code $($log.exitCode)") }
             if ($log.timedOut) { $reasons.Add('timed out') }
+            if ($null -eq $log.monitorExit) { $reasons.Add('monitor exit code missing from runs.log') }
+            elseif ([int]$log.monitorExit -ne 0) { $reasons.Add("monitor exit code $($log.monitorExit)") }
         }
         if ($null -ne $report) {
             $row.Passed = [bool]$report.passed
@@ -309,8 +312,10 @@ foreach ($directory in $directories) {
                         Private    = ConvertTo-Number $_.PrivateBytesMB
                         CpuDelta   = ConvertTo-Number $_.CpuDeltaSeconds
                         Sample     = [int]$_.Sample
-                        Interval   = ConvertTo-Number $_.IntervalSeconds
-                        Missing    = [int](ConvertTo-Number $_.PrivateMissingCount) + [int](ConvertTo-Number $_.CpuUnreadableCount)
+                        Interval       = ConvertTo-Number $_.IntervalSeconds
+                        PrivateMissing = [int](ConvertTo-Number $_.PrivateMissingCount)
+                        CpuUnreadable  = [int](ConvertTo-Number $_.CpuUnreadableCount)
+                        Missing        = [int](ConvertTo-Number $_.PrivateMissingCount) + [int](ConvertTo-Number $_.CpuUnreadableCount)
                     }
                 })
             $row.MonitorRows = $samples.Count
@@ -325,7 +330,9 @@ foreach ($directory in $directories) {
             $idleAfter = Select-Phase $samples $loadTo (Get-Time $report.phases.endedAt)
             $row.LoadRows = $load.Count
             $row.LoadRowsExpected = [Math]::Floor(($loadTo - $loadFrom).TotalSeconds / $nominalInterval)
-            $row.LoadIntervalMaxSeconds = Get-Max @($load | Where-Object { $_.Sample -gt 0 -and $null -ne $_.Interval } | ForEach-Object { $_.Interval })
+            $loadIntervals = @($load | Where-Object { $_.Sample -gt 0 -and $null -ne $_.Interval } | ForEach-Object { $_.Interval })
+            $row.LoadIntervalMedianSeconds = Get-Median $loadIntervals
+            $row.LoadIntervalMaxSeconds = Get-Max $loadIntervals
             $row.IdleBeforePrivateMB = Get-Average @($idleBefore | ForEach-Object { $_.Private })
             $row.LoadPrivateMBAvg = Get-Average @($load | ForEach-Object { $_.Private })
             $row.LoadPrivateMBMaxSample = Get-Max @($load | ForEach-Object { $_.Private })
@@ -336,13 +343,16 @@ foreach ($directory in $directories) {
             $row.IdleAfterPrivateMB = Get-Average @($idleAfter | ForEach-Object { $_.Private })
             $idleCpu = @($idleBefore | Where-Object { $null -ne $_.CpuDelta } | ForEach-Object { $_.CpuDelta })
             if ($idleCpu.Count -gt 0) { $row.IdleBeforeCpuSeconds = ($idleCpu | Measure-Object -Sum).Sum }
+            $row.LoadRowsWithMissingPrivateValues = @($load | Where-Object { $_.PrivateMissing -gt 0 -or $null -eq $_.Private }).Count
+            $row.LoadRowsWithUnreadableCpu = @($load | Where-Object { $_.CpuUnreadable -gt 0 -or $null -eq $_.CpuDelta }).Count
             $row.LoadRowsWithMissingValues = @($load | Where-Object { $_.Missing -gt 0 }).Count
             $row.LoadProcessCountMax = Get-Max @($load | ForEach-Object { [double]$_.Processes })
 
             if ($row.LoadRowsExpected -gt 0 -and $row.LoadRows -lt $minLoadCoverage * $row.LoadRowsExpected) { $reasons.Add("load rows $($row.LoadRows) < $([int]($minLoadCoverage * 100))% of $($row.LoadRowsExpected)") }
-            if ($row.LoadRowsWithMissingValues -gt 0) { $reasons.Add("$($row.LoadRowsWithMissingValues) load rows with missing values") }
-            if ($null -eq $row.IntervalMedianSeconds -or [Math]::Abs($row.IntervalMedianSeconds - $nominalInterval) -gt $maxIntervalDeviation * $nominalInterval) {
-                $reasons.Add("interval median $(Format-Number $row.IntervalMedianSeconds 3) s not within $([int]($maxIntervalDeviation * 100))% of $nominalInterval s")
+            if ($row.LoadRowsWithMissingPrivateValues -gt 0) { $reasons.Add("$($row.LoadRowsWithMissingPrivateValues) load rows with missing private-memory values") }
+            if ($monitorProfile -eq 'Cpu' -and $row.LoadRowsWithUnreadableCpu -gt 0) { $reasons.Add("$($row.LoadRowsWithUnreadableCpu) load rows with unreadable CPU values") }
+            if ($null -eq $row.LoadIntervalMedianSeconds -or [Math]::Abs($row.LoadIntervalMedianSeconds - $nominalInterval) -gt $maxIntervalDeviation * $nominalInterval) {
+                $reasons.Add("load interval median $(Format-Number $row.LoadIntervalMedianSeconds 3) s not within $([int]($maxIntervalDeviation * 100))% of nominal $nominalInterval s")
             }
             if ($null -ne $row.LoadIntervalMaxSeconds -and $row.LoadIntervalMaxSeconds -gt $maxIntervalFactor * $nominalInterval) {
                 $reasons.Add("load gap $(Format-Number $row.LoadIntervalMaxSeconds 3) s > $maxIntervalFactor x $nominalInterval s")
@@ -374,7 +384,259 @@ foreach ($directory in $directories) {
     }
 }
 
-if ($runs.Count -eq 0) { throw "No run reports found in $($directories -join ', ')" }
+# Preserve every planned/logged launch even when the app never wrote a JSON report.
+# Otherwise a timed-out or crashed process can disappear from runs.csv and pairs.csv.
+foreach ($directory in $directories) {
+    $directoryLabel = Split-Path -Leaf $directory
+    $scheduleFile = Join-Path $directory 'schedule.csv'
+    $scheduledNames = @{}
+    $candidateNames = New-Object System.Collections.Generic.List[string]
+    if (Test-Path -LiteralPath $scheduleFile) {
+        foreach ($planned in @(Import-Csv -LiteralPath $scheduleFile)) {
+            $name = [string]$planned.Name
+            if (-not [string]::IsNullOrWhiteSpace($name)) {
+                $scheduledNames[$name] = $true
+                if (-not $candidateNames.Contains($name)) { $candidateNames.Add($name) }
+            }
+        }
+    }
+
+    $runLogPath = Join-Path $directory 'runs.log'
+    $logByName = @{}
+    if (Test-Path -LiteralPath $runLogPath) {
+        foreach ($line in @(Get-Content -LiteralPath $runLogPath)) {
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            $entry = $null
+            try { $entry = $line | ConvertFrom-Json }
+            catch { $deviations.Add(("{0}: malformed runs.log line ignored while locating missing reports" -f $directoryLabel)); continue }
+            if ($null -eq $entry -or [string]::IsNullOrWhiteSpace([string]$entry.name)) { continue }
+            $logByName[[string]$entry.name] = $entry
+            if (-not $candidateNames.Contains([string]$entry.name)) { $candidateNames.Add([string]$entry.name) }
+        }
+    }
+
+    foreach ($name in @($candidateNames | Sort-Object -Unique)) {
+        if ($name -notmatch '^(S[1-4])-pair(\d+)-(plain|runtime)New-Item -ItemType Directory -Path $OutputDirectory | Out-Null
+$OutputDirectory = (Resolve-Path -LiteralPath $OutputDirectory).Path
+
+$numberColumns = @($resourceMetrics + $performanceMetrics)
+$formattedColumns = @($numberColumns + @('IntervalMedianSeconds', 'IntervalMaxSeconds', 'LoadIntervalMedianSeconds', 'LoadIntervalMaxSeconds'))
+$runs | ForEach-Object {
+    $out = [ordered]@{}
+    foreach ($property in $_.PSObject.Properties) {
+        if ($formattedColumns -contains $property.Name) { $out[$property.Name] = Format-Number $property.Value 3 }
+        else { $out[$property.Name] = $property.Value }
+    }
+    [pscustomobject]$out
+} | Export-Csv -LiteralPath (Join-Path $OutputDirectory 'runs.csv') -NoTypeInformation -Encoding UTF8
+
+# Paired differences; a pair is valid only if both of its runs are.
+$pairRows = New-Object System.Collections.Generic.List[object]
+foreach ($group in @($runs | Group-Object Scenario, Pair | Sort-Object { $_.Group[0].Scenario }, { $_.Group[0].Pair })) {
+    $plain = @($group.Group | Where-Object { $_.Build -eq 'plain' })
+    $runtime = @($group.Group | Where-Object { $_.Build -eq 'runtime' })
+    $reasons = New-Object System.Collections.Generic.List[string]
+    if ($plain.Count -ne 1) { $reasons.Add("plain runs: $($plain.Count)") }
+    if ($runtime.Count -ne 1) { $reasons.Add("runtime runs: $($runtime.Count)") }
+    foreach ($run in @($plain + $runtime)) { if (-not $run.Valid) { $reasons.Add("$($run.Build): $($run.InvalidReason)") } }
+    $first = $group.Group[0]
+    $pairRow = [ordered]@{ Scenario = $first.Scenario; Pair = $first.Pair; Valid = $reasons.Count -eq 0; InvalidReason = $reasons -join '; ' }
+    foreach ($metric in $numberColumns) {
+        $pairRow["Plain$metric"] = $null; $pairRow["Runtime$metric"] = $null; $pairRow[$metric] = $null
+        if ($plain.Count -eq 1 -and $runtime.Count -eq 1 -and $null -ne $plain[0].$metric -and $null -ne $runtime[0].$metric) {
+            $pairRow["Plain$metric"] = [double]$plain[0].$metric
+            $pairRow["Runtime$metric"] = [double]$runtime[0].$metric
+            $pairRow[$metric] = [double]$runtime[0].$metric - [double]$plain[0].$metric
+        }
+    }
+    $pairRows.Add([pscustomobject]$pairRow)
+}
+$pairRows | ForEach-Object {
+    $out = [ordered]@{ Scenario = $_.Scenario; Pair = $_.Pair; Valid = $_.Valid; InvalidReason = $_.InvalidReason }
+    foreach ($metric in $numberColumns) { $out[$metric] = Format-Number $_.$metric }
+    [pscustomobject]$out
+} | Export-Csv -LiteralPath (Join-Path $OutputDirectory 'pairs.csv') -NoTypeInformation -Encoding UTF8
+
+function Invoke-Analysis {
+    # One look: per scenario and metric, statistics over the valid pairs with Pair <= MaxPair.
+    param([int]$MaxPair, [double]$Alpha, [string[]]$TestedKeys)
+    $rows = New-Object System.Collections.Generic.List[object]
+    foreach ($scenario in @($pairRows | Select-Object -ExpandProperty Scenario -Unique | Sort-Object)) {
+        $inLook = @($pairRows | Where-Object { $_.Scenario -eq $scenario -and $_.Pair -le $MaxPair })
+        $valid = @($inLook | Where-Object { $_.Valid })
+        foreach ($metric in $comparedMetrics) {
+            $usable = @($valid | Where-Object { $null -ne $_.$metric })
+            $diffs = [double[]]@($usable | ForEach-Object { [double]$_.$metric })
+            $plainValues = [double[]]@($usable | ForEach-Object { [double]$_."Plain$metric" })
+            $runtimeValues = [double[]]@($usable | ForEach-Object { [double]$_."Runtime$metric" })
+            $key = "$scenario/$metric"
+            $primary = $primaryMetrics -contains $metric
+            $row = [pscustomobject][ordered]@{
+                Scenario = $scenario; Metric = $metric
+                Role = $(if ($primary) { 'primary' } else { 'descriptive' })
+                PairsInLook = $inLook.Count; ValidPairs = $diffs.Count; InvalidPairs = $inLook.Count - $valid.Count
+                PlainMedian = Get-Median $plainValues; RuntimeMedian = Get-Median $runtimeValues
+                DiffMedian = Get-Median $diffs
+                DiffMin = $(if ($diffs.Count -gt 0) { ($diffs | Measure-Object -Minimum).Minimum } else { $null })
+                DiffMax = $(if ($diffs.Count -gt 0) { ($diffs | Measure-Object -Maximum).Maximum } else { $null })
+                CiLevel = 1 - $Alpha; CiLow = $null; CiHigh = $null; CiCoverage = $null
+                P = $null; PHolm = $null; Decided = $false; Verdict = ''
+            }
+            if ($diffs.Count -ge 1) {
+                $interval = [SymmetricBenchStats]::MedianInterval($diffs, 1 - $Alpha)
+                if ($null -ne $interval) { $row.CiLow = $interval[0]; $row.CiHigh = $interval[1]; $row.CiCoverage = $interval[2] }
+            }
+            if ($primary -and $TestedKeys -contains $key -and $diffs.Count -ge $minValidPairsPerLook) {
+                $row.P = [SymmetricBenchStats]::SignTestP($diffs)
+            }
+            $rows.Add($row)
+        }
+    }
+    # Holm over the primary tests of this look.
+    $tested = @($rows | Where-Object { $null -ne $_.P } | Sort-Object P)
+    $running = 0.0
+    for ($k = 0; $k -lt $tested.Count; $k++) {
+        $adjusted = [Math]::Min(1.0, ($tested.Count - $k) * $tested[$k].P)
+        if ($adjusted -lt $running) { $adjusted = $running }
+        $running = $adjusted
+        $tested[$k].PHolm = $adjusted
+    }
+    foreach ($row in $rows) {
+        if ($row.ValidPairs -eq 0) { $row.Verdict = 'no valid data'; continue }
+        if ($row.Role -ne 'primary') { $row.Verdict = 'descriptive'; continue }
+        if ($TestedKeys -notcontains "$($row.Scenario)/$($row.Metric)") { continue }
+        if ($null -eq $row.P) { $row.Verdict = "insufficient valid pairs (< $minValidPairsPerLook)"; continue }
+        if ($row.PHolm -lt $Alpha) {
+            $row.Decided = $true
+            if ([Math]::Abs($row.DiffMedian) -lt $practicalThreshold * [Math]::Abs($row.PlainMedian)) { $row.Verdict = 'difference below 2% of plain' }
+            elseif ($row.DiffMedian -lt 0) { $row.Verdict = 'runtime lower' }
+            else { $row.Verdict = 'runtime higher' }
+        }
+    }
+    return , $rows.ToArray()
+}
+
+$allPrimaryKeys = @(foreach ($scenario in @($pairRows | Select-Object -ExpandProperty Scenario -Unique)) { foreach ($metric in $primaryMetrics) { "$scenario/$metric" } })
+$looks = New-Object System.Collections.Generic.List[object]
+if ($phase -eq 'Pilot') {
+    $rows = Invoke-Analysis -MaxPair ([int]::MaxValue) -Alpha 0.05 -TestedKeys @()
+    foreach ($row in $rows) { if ($row.Role -eq 'primary' -and $row.ValidPairs -gt 0) { $row.Verdict = 'pilot: no conclusion' } }
+    $looks.Add([pscustomobject]@{ Name = 'pilot'; Rows = $rows })
+}
+else {
+    $look1 = Invoke-Analysis -MaxPair $plannedPairsPerLook -Alpha $lookAlpha -TestedKeys $allPrimaryKeys
+    $undecided = @($look1 | Where-Object { $_.Role -eq 'primary' -and -not $_.Decided } | ForEach-Object { "$($_.Scenario)/$($_.Metric)" })
+    foreach ($row in $look1) {
+        if ($row.Role -eq 'primary' -and -not $row.Decided) {
+            $note = $(if ($ExtensionDirectory) { 'undecided, tested again at look 2' } else { 'undecided: extend to 20 pairs' })
+            $row.Verdict = $(if ($row.Verdict) { "$($row.Verdict); $note" } else { $note })
+        }
+    }
+    $looks.Add([pscustomobject]@{ Name = 'look1'; Rows = $look1 })
+    if ($ExtensionDirectory) {
+        $look2 = Invoke-Analysis -MaxPair (2 * $plannedPairsPerLook) -Alpha $lookAlpha -TestedKeys $undecided
+        foreach ($row in $look2) {
+            if ($row.Role -ne 'primary') { continue }
+            if ($undecided -notcontains "$($row.Scenario)/$($row.Metric)") { $row.Verdict = 'decided at look 1'; continue }
+            if (-not $row.Decided -and -not $row.Verdict) { $row.Verdict = 'no detectable difference' }
+        }
+        $looks.Add([pscustomobject]@{ Name = 'look2'; Rows = $look2 })
+    }
+}
+
+$summaryRows = New-Object System.Collections.Generic.List[object]
+foreach ($look in $looks) {
+    foreach ($row in $look.Rows) {
+        $out = [ordered]@{ Look = $look.Name }
+        foreach ($property in $row.PSObject.Properties) {
+            if (@('P', 'PHolm') -contains $property.Name) { $out[$property.Name] = Format-Number $property.Value 4 }
+            elseif (@('PlainMedian', 'RuntimeMedian', 'DiffMedian', 'DiffMin', 'DiffMax', 'CiLow', 'CiHigh') -contains $property.Name) { $out[$property.Name] = Format-Number $property.Value }
+            elseif (@('CiLevel', 'CiCoverage') -contains $property.Name) { $out[$property.Name] = Format-Number $property.Value 3 }
+            else { $out[$property.Name] = $property.Value }
+        }
+        $summaryRows.Add([pscustomobject]$out)
+    }
+}
+$summaryRows | Export-Csv -LiteralPath (Join-Path $OutputDirectory 'summary.csv') -NoTypeInformation -Encoding UTF8
+
+# Markdown: protocol notes, correctness, validity, then resources.
+$lines = New-Object System.Collections.Generic.List[string]
+$lines.Add(('Profile: {0} (nominal monitor interval {1} s). Phase: {2}. Commit {3}. {4}.' -f $monitorProfile, $configuration.sampleIntervalSeconds, $phase, $configuration.gitHead, $configuration.os))
+$lines.Add(('Sources: {0}. Analysis: {1}.' -f (($directories | ForEach-Object { Split-Path -Leaf $_ }) -join ', '), (Split-Path -Leaf $OutputDirectory)))
+$lines.Add('')
+$lines.Add('Estimand: median paired difference (runtime - plain) over valid pairs. MaxSample columns are the largest sampled value, not a guaranteed true peak.')
+$lines.Add('')
+if ($deviations.Count -gt 0) {
+    $lines.Add('## Protocol deviations')
+    $lines.Add('')
+    foreach ($deviation in $deviations) { $lines.Add("- $deviation") }
+    $lines.Add('')
+}
+$lines.Add('## Correctness (counters per run)')
+$lines.Add('')
+$lines.Add('| Scenario | Pair | Build | Passed | Rounds passed | Overruns | Received | Executed | Coalesced | Cache hits | Failed | Note |')
+$lines.Add('|---|---|---|---|---|---|---|---|---|---|---|---|')
+foreach ($run in @($runs | Sort-Object Scenario, Pair, Build)) {
+    $lines.Add(('| {0} | {1} | {2} | {3} | {4}/{5} | {6} | {7} | {8} | {9} | {10} | {11} | {12} |' -f $run.Scenario, $run.Pair, $run.Build, $run.Passed, $run.PassedRounds, $run.Rounds, $run.Overruns, $run.RequestsReceived, $run.OperationsExecuted, $run.CoalescedRequests, $run.CacheHits, $run.FailedRequests, $run.Error))
+}
+$lines.Add('')
+$lines.Add('## Run validity and monitoring')
+$lines.Add('')
+$lines.Add('| Run | Valid | Load rows / expected | Overall / load interval median / load max (s) | Monitor CPU s | Reason |')
+$lines.Add('|---|---|---|---|---|---|')
+foreach ($run in @($runs | Sort-Object Scenario, Pair, Build)) {
+    $lines.Add(('| {0}-{1}-{2} | {3} | {4} / {5} | {6} / {7} / {8} | {9} | {10} |' -f $run.Scenario, $run.Pair, $run.Build, $run.Valid, $run.LoadRows, $run.LoadRowsExpected, (Format-Number $run.IntervalMedianSeconds 3), (Format-Number $run.LoadIntervalMedianSeconds 3), (Format-Number $run.LoadIntervalMaxSeconds 3), $run.MonitorCpuSeconds, $run.InvalidReason))
+}
+$lines.Add('')
+$invalidPairs = @($pairRows | Where-Object { -not $_.Valid })
+$lines.Add(('Invalid pairs (kept in pairs.csv, left out of the statistics): {0}' -f $(if ($invalidPairs.Count -eq 0) { 'none' } else { ($invalidPairs | ForEach-Object { "$($_.Scenario) pair $($_.Pair)" }) -join ', ' })))
+$lines.Add('')
+foreach ($look in $looks) {
+    $lines.Add("## Resources and latency, $($look.Name) (paired differences: runtime - plain)")
+    $lines.Add('')
+    if ($monitorProfile -eq 'Ram') { $lines.Add('CPU metrics are not compared in the Ram profile (0.2 s WMI sampling adds observer overhead).'); $lines.Add('') }
+    $lines.Add('| Scenario | Metric | Role | Valid / in look | Plain median | Runtime median | Diff median | Diff min..max | CI of median diff | p (Holm) | Verdict |')
+    $lines.Add('|---|---|---|---|---|---|---|---|---|---|---|')
+    foreach ($row in @($summaryRows | Where-Object { $_.Look -eq $look.Name })) {
+        $ci = if ($row.CiLow -ne '') { '{0}..{1} ({2}%)' -f $row.CiLow, $row.CiHigh, ([double]$row.CiCoverage * 100).ToString('0.#', $culture) } elseif ($row.ValidPairs -gt 0) { "too few pairs for $(([double]$row.CiLevel * 100).ToString('0.#', $culture))%" } else { '' }
+        $pText = if ($row.P -ne '') { '{0} ({1})' -f $row.P, $row.PHolm } else { '' }
+        $lines.Add(('| {0} | {1} | {2} | {3} / {4} | {5} | {6} | {7} | {8}..{9} | {10} | {11} | {12} |' -f $row.Scenario, $row.Metric, $row.Role, $row.ValidPairs, $row.PairsInLook, $row.PlainMedian, $row.RuntimeMedian, $row.DiffMedian, $row.DiffMin, $row.DiffMax, $ci, $pText, $row.Verdict))
+    }
+    $lines.Add('')
+}
+$lines | Set-Content -LiteralPath (Join-Path $OutputDirectory 'summary.md') -Encoding UTF8
+Write-Host "Wrote runs.csv, pairs.csv, summary.csv and summary.md to $OutputDirectory"
+) { continue }
+        $scenario = $Matches[1]; $pair = [int]$Matches[2]; $build = $Matches[3]
+        $alreadyRepresented = @($runs | Where-Object { $_.Directory -eq $directoryLabel -and $_.Scenario -eq $scenario -and $_.Pair -eq $pair -and $_.Build -eq $build })
+        if ($alreadyRepresented.Count -gt 0) { continue }
+
+        $log = $logByName[$name]
+        if ($null -eq $log) {
+            $reason = if ($scheduledNames.ContainsKey($name)) { 'scheduled run has no runs.log entry and no JSON report' } else { 'unexpected run has no runs.log entry and no JSON report' }
+        } else {
+            $reason = "JSON report missing; app exit code $($log.exitCode), timedOut=$($log.timedOut), monitorExit=$($log.monitorExit)"
+        }
+        $row = [ordered]@{
+            Scenario = $scenario; Pair = $pair; Build = $build; Directory = $directoryLabel
+            Valid = $false; InvalidReason = $reason
+            Passed = $false; Error = 'JSON report missing'
+            ExitCode = $(if ($null -ne $log) { $log.exitCode } else { $null })
+            TimedOut = $(if ($null -ne $log) { $log.timedOut } else { $null })
+            Rounds = $null; PassedRounds = $null; Overruns = $null
+            RequestsReceived = $null; OperationsExecuted = $null; CoalescedRequests = $null; CacheHits = $null; FailedRequests = $null
+            RequestsPerSecond = $null; RoundMsP50 = $null; RoundMsP95 = $null
+            MonitorRows = 0; LoadRows = 0; LoadRowsExpected = $null; LoadRowsWithMissingValues = $null
+            LoadRowsWithMissingPrivateValues = $null; LoadRowsWithUnreadableCpu = $null; LoadProcessCountMax = $null
+            IntervalMedianSeconds = $null; IntervalMaxSeconds = $null; LoadIntervalMedianSeconds = $null; LoadIntervalMaxSeconds = $null
+            MonitorCpuSeconds = $(if ($null -ne $log -and $log.PSObject.Properties['monitorCpuSeconds']) { $log.monitorCpuSeconds } else { $null })
+        }
+        foreach ($metric in $resourceMetrics) { $row[$metric] = $null }
+        $runs.Add([pscustomobject]$row)
+    }
+}
+
+if ($runs.Count -eq 0) { throw "No run reports, scheduled runs, or logged launches found in $($directories -join ', ')" }
 New-Item -ItemType Directory -Path $OutputDirectory | Out-Null
 $OutputDirectory = (Resolve-Path -LiteralPath $OutputDirectory).Path
 
