@@ -63,18 +63,23 @@ public static class SymmetricBenchStats {
         return Math.Min(1.0, sum);
     }
 
-    // Exact two-sided sign test of "median paired difference = 0"; zero differences are dropped.
+    // Two-sided binomial sign test of median = 0. Keep all valid pairs in n;
+    // exact-zero differences contribute to neither sign but stay in the denominator.
+    // Exact for continuous differences; conservative when ties/atoms occur at zero.
     public static double SignTestP(double[] diffs) {
         int positive = 0, negative = 0;
+        int n = diffs.Length;
         foreach (double d in diffs) { if (d > 0) positive++; else if (d < 0) negative++; }
-        int n = positive + negative;
         if (n == 0) return 1.0;
-        return Math.Min(1.0, 2.0 * BinomialHalfCdf(n, Math.Min(positive, negative)));
+        double positiveTail = 1.0 - BinomialHalfCdf(n, positive - 1);
+        double negativeTail = 1.0 - BinomialHalfCdf(n, negative - 1);
+        return Math.Min(1.0, 2.0 * Math.Min(positiveTail, negativeTail));
     }
 
-    // Distribution-free interval for the median from order statistics (the sign test inverted):
+    // Distribution-free interval for the median from order statistics.
+    // Coverage is exact for continuous data; with ties it is a conservative lower bound.
     // [d(k), d(n-k+1)] with the largest k such that P(X <= k-1) <= (1-level)/2.
-    // Returns {low, high, coverage}, or null when n is too small for the level.
+    // Returns {low, high, coverageBound}, or null when n is too small for the level.
     public static double[] MedianInterval(double[] diffs, double level) {
         int n = diffs.Length;
         double tail = (1.0 - level) / 2.0;
