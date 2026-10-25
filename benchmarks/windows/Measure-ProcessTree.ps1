@@ -249,7 +249,7 @@ Write-Host "CSV: $resolvedOutput"
 if ($null -ne $diagnosticsOutput) {
     Write-Host "Diagnostics CSV: $diagnosticsOutput"
 }
-Write-Host "CpuPercentAllCores is normalized to total capacity of all logical CPUs (0 to 100%). On an 8-logical-CPU system, one fully utilized core is about 12.5%."
+Write-Host ("CpuPercentAllCores is normalized to total capacity of all logical CPUs (0 to 100%). This system has {0} logical CPUs, so one fully utilized core is about {1}%." -f $logicalCpuCount, (Format-InvariantDecimal -Value (100.0 / $logicalCpuCount) -DecimalPlaces 2))
 Write-Host "Stop: Ctrl+C"
 
 $watch = [System.Diagnostics.Stopwatch]::StartNew()
