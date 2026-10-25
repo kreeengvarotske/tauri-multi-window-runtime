@@ -1,0 +1,60 @@
+name: Windows process monitor smoke test
+
+on:
+  pull_request:
+    paths:
+      - "benchmarks/windows/**"
+      - ".github/workflows/process-monitor-smoke.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "benchmarks/windows/**"
+      - ".github/workflows/process-monitor-smoke.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  powershell-smoke:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Run monitor with fractional sample interval
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Write-Host ("OS: " + [System.Environment]::OSVersion.VersionString)
+          Write-Host ("PowerShell: " + $PSVersionTable.PSVersion.ToString())
+
+          $output = Join-Path $env:RUNNER_TEMP 'process-monitor-smoke.csv'
+          & .\benchmarks\windows\Measure-ProcessTree.ps1 -RootPid $PID -DurationSeconds 4 -SampleIntervalSeconds 0.2 -OutputPath $output
+
+          if (-not (Test-Path -LiteralPath $output)) {
+            throw "The monitor did not create its CSV output."
+          }
+
+          $rows = @(Import-Csv -LiteralPath $output)
+          if ($rows.Count -lt 2) {
+            throw "Expected at least two samples for the fractional-interval smoke test; got $($rows.Count)."
+          }
+
+          $requiredColumns = @('IntervalSeconds', 'WorkingSetMB', 'PrivateBytesMB', 'PrivateMissingCount', 'CpuUnreadableCount')
+          foreach ($column in $requiredColumns) {
+            if (-not ($rows[0].PSObject.Properties.Name -contains $column)) {
+              throw "Missing expected CSV column: $column"
+            }
+          }
+
+          foreach ($row in $rows) {
+            if ([string]::IsNullOrWhiteSpace($row.IntervalSeconds) -or
+                [string]::IsNullOrWhiteSpace($row.WorkingSetMB) -or
+                [string]::IsNullOrWhiteSpace($row.PrivateBytesMB)) {
+              throw "Required measurement field was blank in sample $($row.Sample)."
+            }
+          }
+
+          Write-Host "Smoke test passed: $($rows.Count) samples written; requested interval 0.2 seconds."
