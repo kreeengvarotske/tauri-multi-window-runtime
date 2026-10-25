@@ -389,7 +389,7 @@ foreach ($source in $sources) {
                         $time = Get-Time $_.Timestamp; $time -ge $loadFrom -and $time -lt $loadTo
                     })
                 $diagnosticBytes = @($diagnosticLoadRows | ForEach-Object { ConvertTo-Number $_.CimPrivatePageCount })
-                $row.DiagnosticsPrivateMetricsValid = $diagnosticLoadRows.Count -gt 0 -and @($diagnosticBytes | Where-Object { $null -eq $_ }).Count -eq 0
+                $row.DiagnosticsPrivateMetricsValid = $diagnosticLoadRows.Count -gt 0 -and $diagnosticBytes.Count -eq $diagnosticLoadRows.Count
                 $exeBytes = @($diagnosticLoadRows | Where-Object { [int]$_.Pid -eq $rootPid } | ForEach-Object {
                         $value = ConvertTo-Number $_.CimPrivatePageCount
                         if ($null -ne $value) { $value / 1MB }
@@ -416,7 +416,7 @@ New-Item -ItemType Directory -Path $OutputDirectory | Out-Null
 $OutputDirectory = (Resolve-Path -LiteralPath $OutputDirectory).Path
 
 $numberColumns = @($resourceMetrics + $performanceMetrics)
-$formattedColumns = @($numberColumns + @('IntervalMedianSeconds', 'IntervalMaxSeconds', 'LoadIntervalMaxSeconds'))
+$formattedColumns = @($numberColumns + @('IntervalMedianSeconds', 'IntervalMaxSeconds', 'LoadIntervalMedianSeconds', 'LoadIntervalMaxSeconds'))
 $runs | ForEach-Object {
     $out = [ordered]@{}
     foreach ($property in $_.PSObject.Properties) {
