@@ -503,3 +503,57 @@ mod tests {
         assert_eq!(stats.cached_entries, 1);
     }
 }
+
+/// Counter classification under concurrent load (T11 in the stage 1 test plan).
+#[cfg(test)]
+mod concurrency {
+    use super::RuntimeIpc;
+    use runtime_core::CachePolicy;
+    use std::{sync::Arc, time::Duration};
+    use tokio::sync::Barrier;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn t11_counters_classify_every_request_after_completion() {
+        let ipc = Arc::new(RuntimeIpc::with_cache_policy(CachePolicy::Ttl(
+            Duration::from_secs(3600),
+        )));
+        let ids = ["demo", "alpha", "flaky", "missing"];
+        let (mut ok, mut err) = (0u64, 0u64);
+        for wave in 0..3 {
+            match wave {
+                1 => assert!(ipc.invalidate_project("demo".to_owned()).unwrap()),
+                2 => ipc.clear_cache(),
+                _ => {}
+            }
+            let barrier = Arc::new(Barrier::new(40));
+            let mut hs = Vec::new();
+            for n in 0..40 {
+                let (ipc, barrier, id) = (ipc.clone(), barrier.clone(), ids[n % 4]);
+                hs.push(tokio::spawn(async move {
+                    barrier.wait().await;
+                    ipc.get_project_metadata(id.to_owned()).await
+                }));
+            }
+            // every request of the wave completes before any counter is checked
+            for h in hs {
+                match h.await.unwrap() {
+                    Ok(_) => ok += 1,
+                    Err(_) => err += 1,
+                }
+            }
+        }
+        let s = ipc.get_debug_stats();
+        assert_eq!(ok + err, 120);
+        assert_eq!(s.requests_received, 120);
+        assert_eq!(
+            s.requests_received,
+            s.operations_executed + s.coalesced_requests + s.cache_hits
+        );
+        assert_eq!(s.failed_requests, err);
+        assert_eq!(err, 60);
+        // wave 2: alpha is still cached (only demo was invalidated)
+        assert!(s.cache_hits >= 10, "{s:?}");
+        // minimum distinct executions: 4 + 3 + 4
+        assert!(s.operations_executed >= 11, "{s:?}");
+    }
+}
