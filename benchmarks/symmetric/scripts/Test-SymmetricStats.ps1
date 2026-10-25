@@ -138,7 +138,7 @@ try {
                 $rows.Add(('"{0}","1000","6","300","{1}","{2}","{3}","{4}","0","0"' -f $time, $privateMb.ToString('R', $culture), $cpu, $i, $intervalText))
             }
             $rows | Set-Content -LiteralPath (Join-Path $runs "$($run.Name).monitor.csv") -Encoding UTF8
-            $log.Add((@{ name = $run.Name; exitCode = 0; timedOut = $false; monitorCpuSeconds = 1.0 } | ConvertTo-Json -Compress))
+            $log.Add((@{ name = $run.Name; exitCode = 0; timedOut = $false; monitorExit = 0; monitorCpuSeconds = 1.0 } | ConvertTo-Json -Compress))
         }
         $log | Set-Content -LiteralPath (Join-Path $Directory 'runs.log') -Encoding UTF8
     }
