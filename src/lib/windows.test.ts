@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createWindowBridge, type SeriesRequest } from "./windows";
+import { createWindowBridge, openSecondaryWindow, type SeriesRequest } from "./windows";
 
 // Tauri events are not buffered: an event emitted before a listener is
 // registered is lost. This fake bus behaves the same way, and listener
@@ -11,12 +11,14 @@ const bus = vi.hoisted(() => ({
   openWindows: new Set<string>(["main", "secondary"]),
   registrationDelayMs: new Map<string, number>(),
   currentLabel: "main",
+  windowVisibleAfterMs: 120,
   emitted: [] as { target: string; event: string; payload: unknown }[],
   reset() {
     this.listeners.clear();
     this.openWindows = new Set(["main", "secondary"]);
     this.registrationDelayMs.clear();
     this.currentLabel = "main";
+    this.windowVisibleAfterMs = 120;
     this.emitted = [];
   },
   deliver(target: string, event: string, payload: unknown) {
@@ -37,8 +39,17 @@ vi.mock("@tauri-apps/api/event", () => ({
   emitTo: async (target: string, event: string, payload: unknown) => bus.deliver(target, event, payload),
 }));
 vi.mock("@tauri-apps/api/webviewWindow", () => ({
-  WebviewWindow: {
-    getByLabel: async (label: string) => (bus.openWindows.has(label) ? { label } : null),
+  // Creating a window: `tauri://created` fires at once, but `getByLabel` only
+  // finds the window after `bus.windowVisibleAfterMs`, as observed on Windows 10.
+  WebviewWindow: class {
+    static getByLabel = async (label: string) => (bus.openWindows.has(label) ? { label } : null);
+    constructor(readonly label: string) {
+      setTimeout(() => bus.openWindows.add(label), bus.windowVisibleAfterMs);
+    }
+    async once(event: string, handler: () => void) {
+      if (event === "tauri://created") setTimeout(handler, 0);
+      return () => {};
+    }
   },
   getCurrentWebviewWindow: () => {
     const label = bus.currentLabel;
@@ -231,5 +242,43 @@ describe("window bridge handshake", () => {
     bus.openWindows.delete("secondary");
     await vi.advanceTimersByTimeAsync(250);
     await expect(series.completed).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/закрыто/) });
+  });
+
+  it("waits for a window it is still creating instead of reporting it as not open", async () => {
+    bus.openWindows.delete("secondary");
+    bus.registrationDelayMs.set("secondary", 300);
+    const main = bridgeFor("main");
+    const opened = openSecondaryWindow();
+    // The user clicks "Серия в обоих окнах" right after "Открыть второе окно".
+    const sent = main.requestSeriesInSecondary(REQUEST).then(
+      () => "resolved",
+      (error: Error) => error.message,
+    );
+    await vi.advanceTimersByTimeAsync(10);
+    await opened;
+    expect(bus.openWindows.has("secondary")).toBe(false);
+    // The new page loads and starts listening.
+    const handler = vi.fn();
+    bus.currentLabel = "secondary";
+    void bridgeFor("secondary").onSeriesRequest(handler);
+    bus.currentLabel = "main";
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(await sent).toBe("resolved");
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it("still fails when the window being created never appears", async () => {
+    bus.openWindows.delete("secondary");
+    bus.windowVisibleAfterMs = 60_000;
+    const main = bridgeFor("main", { confirmTimeoutMs: 2_000 });
+    void openSecondaryWindow();
+    const sent = main.requestSeriesInSecondary(REQUEST).then(
+      () => "resolved",
+      (error: Error) => error.message,
+    );
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(await sent).toMatch(/не открыто|не подтвердило/);
+    expect(bus.emitted.filter((e) => e.event === "lab://run-series")).toHaveLength(0);
   });
 });

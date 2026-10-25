@@ -26,6 +26,12 @@ export type OpenResult = "created" | "focused" | "browser-tab";
 
 let pending: Promise<OpenResult> | null = null;
 
+// Until this time a freshly created secondary window may still be unknown to
+// `WebviewWindow.getByLabel` (on Windows 10 for up to ~150 ms after the click),
+// so the bridge waits for it instead of reporting it as not open.
+let secondaryStartingUntil = 0;
+const SECONDARY_STARTUP_GRACE_MS = 5_000;
+
 /**
  * Opens the secondary window or focuses it if it already exists.
  * Concurrent clicks share one in-flight attempt, so the label is never raced.
@@ -53,6 +59,7 @@ async function open(): Promise<OpenResult> {
     return "focused";
   }
 
+  secondaryStartingUntil = Date.now() + SECONDARY_STARTUP_GRACE_MS;
   const created = new WebviewWindow(SECONDARY_LABEL, {
     url: "index.html",
     title: "Runtime Lab — secondary",
@@ -64,9 +71,10 @@ async function open(): Promise<OpenResult> {
 
   return new Promise<OpenResult>((resolve, reject) => {
     void created.once("tauri://created", () => resolve("created"));
-    void created.once<string>("tauri://error", (event) =>
-      reject(new Error(`Не удалось создать окно «${SECONDARY_LABEL}»: ${String(event.payload)}`)),
-    );
+    void created.once<string>("tauri://error", (event) => {
+      secondaryStartingUntil = 0;
+      reject(new Error(`Не удалось создать окно «${SECONDARY_LABEL}»: ${String(event.payload)}`));
+    });
   });
 }
 
@@ -152,6 +160,8 @@ interface SeriesDone extends SeriesCompletion {
 /** The minimum each environment provides for the handshake. */
 interface BridgePort {
   peerIsOpen(): Promise<boolean>;
+  /** true while a window this page just asked to create may not be visible to `peerIsOpen` yet. */
+  peerIsStarting(): boolean;
   sendToPeer(event: string, payload: unknown): Promise<void>;
   sendToMain(event: string, payload: unknown): Promise<void>;
   listen(event: string, handler: (payload: unknown) => void): Promise<() => void>;
@@ -167,6 +177,7 @@ function tauriPort(): BridgePort {
     async peerIsOpen() {
       return (await WebviewWindow.getByLabel(SECONDARY_LABEL)) !== null;
     },
+    peerIsStarting: () => Date.now() < secondaryStartingUntil,
     sendToPeer: (event, payload) => emitTo(SECONDARY_LABEL, event, payload),
     sendToMain: (event, payload) => emitTo(WINDOW_LABELS.main, event, payload),
     listen: (event, handler) => current.listen(event, (e) => handler(e.payload)),
@@ -179,6 +190,7 @@ function browserPort(): BridgePort {
   const post = async (type: string, payload: unknown) => channel.postMessage({ type, payload });
   return {
     peerIsOpen: async () => true,
+    peerIsStarting: () => false,
     sendToPeer: post,
     sendToMain: post,
     async listen(type, handler) {
@@ -199,7 +211,10 @@ function createHandshakeBridge(port: BridgePort, options: WindowBridgeOptions): 
 
   return {
     async requestSeriesInSecondary(request) {
-      if (!(await port.peerIsOpen())) throw notOpen();
+      // A window that is still being created counts as open; the handshake
+      // below waits for it, bounded by the confirmation timeout.
+      let seenOpen = await port.peerIsOpen();
+      if (!seenOpen && !port.peerIsStarting()) throw notOpen();
 
       const requestId = newRequestId();
       let confirm!: () => void;
@@ -239,9 +254,14 @@ function createHandshakeBridge(port: BridgePort, options: WindowBridgeOptions): 
                 "Серия в нём не запущена; дождитесь загрузки окна и повторите.",
             );
           }
-          await port.sendToPeer(SERIES_EVENT, message);
+          if (seenOpen) await port.sendToPeer(SERIES_EVENT, message);
           await Promise.race([confirmed, delay(Math.min(retryIntervalMs, Math.max(0, deadline - Date.now())))]);
-          if (!isConfirmed && !(await port.peerIsOpen())) throw notOpen();
+          if (isConfirmed) break;
+          const open = await port.peerIsOpen();
+          // Once seen, a window that disappears was closed; before that it may
+          // still be starting.
+          if (!open && (seenOpen || !port.peerIsStarting())) throw notOpen();
+          seenOpen ||= open;
         }
       } catch (error) {
         // Nothing was confirmed, so nobody waits for a completion.
