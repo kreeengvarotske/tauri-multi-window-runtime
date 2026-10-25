@@ -234,7 +234,8 @@ foreach ($source in $sources) {
         $expectedNames = New-Object System.Collections.Generic.List[string]
         foreach ($scenarioName in $familyScenarios) {
             for ($pairNumber = 1; $pairNumber -le $plannedPairs; $pairNumber++) {
-                foreach ($buildName in @('plain', 'runtime')) { $expectedNames.Add(('{0}-pair{1:D2}-{2}' -f $scenarioName, $pairNumber, $buildName)) }
+                $plannedBuildOrder = if ($pairNumber % 2 -eq 1) { @('plain', 'runtime') } else { @('runtime', 'plain') }
+                foreach ($buildName in $plannedBuildOrder) { $expectedNames.Add(('{0}-pair{1:D2}-{2}' -f $scenarioName, $pairNumber, $buildName)) }
             }
         }
         $missingFromSchedule = @($expectedNames | Where-Object { $scheduled -notcontains $_ })
@@ -244,6 +245,9 @@ foreach ($source in $sources) {
         }
         if ($scheduled.Count -ne $expectedNames.Count) {
             throw "Confirmatory schedule has $($scheduled.Count) entries; expected exactly $($expectedNames.Count)."
+        }
+        if (($scheduled -join ',') -ne ($expectedNames -join ',')) {
+            throw "Confirmatory schedule does not match the fixed alternated order for pairs 1..$plannedPairs."
         }
     }
 
