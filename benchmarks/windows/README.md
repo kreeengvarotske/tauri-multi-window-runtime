@@ -4,15 +4,22 @@ This directory contains a PowerShell script for sampling a Windows application's
 
 ## Metrics
 
-- `WorkingSetMB` — sum of working sets for included processes (memory currently resident in physical RAM).
-- `PrivateBytesMB` — sum of private memory for included processes. Review it alongside Working Set when comparing variants.
-- `CpuPercentAllCores` — approximate CPU usage normalized to the total capacity of all logical CPUs (0–100%). The first sample is blank because a previous sample is needed to calculate a delta.
+"MB" in column names means 2^20 bytes (PowerShell `1MB`, i.e. MiB).
+
+- `WorkingSetMB` — the **sum of the working sets** (`Win32_Process.WorkingSetSize`) of the included processes. Pages shared between processes (DLLs, shared memory, WebView2 shared sections) are counted once per process that has them resident, so this is not the amount of unique physical RAM the application uses. Use it as a footprint of the listed PIDs, always together with `ProcessTree`.
+- `PrivateBytesMB` — sum of `Win32_Process.PrivatePageCount` of the included processes, divided by 2^20. Despite its name, `PrivatePageCount` is in **bytes**: on Windows 10 22H2 (build 19045) with Windows PowerShell 5.1 it equalled `Get-Process` `PrivateMemorySize64` and `PageFileUsage × 1024` for all 9 sampled processes (median ratio 1.000000 idle and under load; the "pages" hypothesis gives 4096). The raw comparison is published in issue #13. Private bytes are committed memory that no other process shares, including pages that are not currently resident, so they are not a subset of the working set. The script re-checks the unit at startup (see below).
+- `CpuPercentAllCores` — `CpuDeltaSeconds` divided by the elapsed time and by the number of logical CPUs, as a percentage (0–100%, clamped). On a 16-logical-CPU system one fully busy core is 6.25%. The first sample is blank because a previous sample is needed to calculate a delta.
+- `CpuDeltaSeconds` — sum over the included processes of the increase in `Get-Process` `TotalProcessorTime` (user + kernel) since the previous sample. Only processes present in both samples contribute, so CPU used by a process that started or exited between two samples is not counted for that interval. Sum `CpuDeltaSeconds` over a run to get total CPU seconds.
 - `ProcessCount`, `ProcessIds`, `ProcessTree` — processes included in each sample.
-- `Timestamp`, `ElapsedSeconds`, `IntervalSeconds` — sample timing information.
+- `Timestamp`, `ElapsedSeconds`, `IntervalSeconds` — sample timing: `Timestamp` is the wall clock at the start of the sample, `ElapsedSeconds` the stopwatch after the processes were read.
+
+## Which processes are included
+
+The script walks `ParentProcessId` from the root process. This finds the WebView2 browser process and its children (GPU, renderers, utility) when they are descendants of the app. It cannot see processes that are not descendants: a process whose parent exited is reparented to nothing, and a WebView2 browser shared with another app is not counted. A reused PID can also attach an unrelated process. Before treating a sum as the application's total, check `ProcessTree`, or run with `-Diagnostics` (below), which lists WebView2 processes started for this executable that the walk missed.
 
 ## Requirements
 
-- Windows 11
+- Windows 10 or 11. Verified on Windows 10 22H2 (build 19045) with Windows PowerShell 5.1.19041; not yet verified on Windows 11 or PowerShell 7.
 - Windows PowerShell 5.1 or a compatible PowerShell version
 - No third-party modules
 
@@ -41,6 +48,18 @@ Get-CimInstance Win32_Process |
 ```
 
 Replace `12345` with the PID of the application's main process.
+
+## Unit check and diagnostics
+
+At startup the script compares `PrivatePageCount` with `Get-Process` `PrivateMemorySize64` for every process in the tree and prints the median ratio. If it is outside 0.9–1.1, the script stops instead of writing wrong `PrivateBytesMB` values.
+
+Add `-Diagnostics` to also write `<output>.diagnostics.csv` (or `-DiagnosticsPath`), with one row per process per sample:
+
+```powershell
+.\Measure-ProcessTree.ps1 -RootPid 12345 -DurationSeconds 60 -Diagnostics -OutputPath .\tauri-runtime.csv
+```
+
+Columns: `Pid`, `ParentPid`, `Name`, `InTree`, `CimWorkingSetSize`, `CimPrivatePageCount`, `CimPageFileUsageKB`, `ProcPrivateMemorySize64`, `ProcWorkingSet64`, `ProcTotalProcessorSeconds`, `RatioPrivatePageCountToPrivateMemorySize64`. Rows with `InTree=False` are WebView2 processes whose command line names this executable (`--webview-exe-name=`) but which are outside the `ParentProcessId` tree; they are not in the main CSV's sums. At the end the script prints the median ratio and any such processes. The CIM and `Get-Process` values are read a few milliseconds apart, so a process whose memory is changing can show a ratio slightly different from 1. Diagnostics read each process's command line and are slower; use them for checks, not for the measured runs.
 
 ## If PowerShell blocks script execution
 
