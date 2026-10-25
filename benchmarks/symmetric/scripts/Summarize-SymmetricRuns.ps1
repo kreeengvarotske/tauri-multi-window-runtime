@@ -172,23 +172,6 @@ if ($phase -eq 'Confirmatory') {
         }
     }
 }
-if ($ExtensionDirectory.Count -gt 0 -and $phase -ne 'Confirmatory') { throw 'An extension (look 2) exists only for Confirmatory results.' }
-foreach ($path in $ExtensionDirectory) {
-    $directory = (Resolve-Path -LiteralPath $path).Path
-    $extension = Read-Configuration $directory
-    $base = @($sources | Where-Object { $_.Look -eq 1 -and [string]$_.Configuration.profile -eq [string]$extension.profile })
-    if ($base.Count -ne 1) { throw "Extension $directory has profile '$($extension.profile)' without a look 1 directory for it." }
-    if (@($sources | Where-Object { $_.Look -eq 2 -and [string]$_.Configuration.profile -eq [string]$extension.profile }).Count -gt 0) { throw "Two extensions for profile '$($extension.profile)'." }
-    foreach ($name in @($identityFields + @('profile', 'phase', 'monitorSha256', 'sampleIntervalSeconds'))) {
-        if ([string](Get-ConfigValue $base[0].Configuration $name '') -ne [string](Get-ConfigValue $extension $name '')) {
-            throw "Extension differs from look 1 in '$name' ('$(Get-ConfigValue $base[0].Configuration $name '')' vs '$(Get-ConfigValue $extension $name '')'); it cannot be pooled."
-        }
-    }
-    if ([int](Get-ConfigValue $extension 'firstPair' 1) -ne $plannedPairsPerLook + 1 -or [int]$extension.pairs -ne $plannedPairsPerLook) {
-        throw "The extension must be pairs $($plannedPairsPerLook + 1)..$(2 * $plannedPairsPerLook) (-FirstPair $($plannedPairsPerLook + 1) -Pairs $plannedPairsPerLook)."
-    }
-    $sources.Add([pscustomobject]@{ Directory = $directory; Configuration = $extension; Look = 2 })
-}
 if (-not $OutputDirectory) {
     $OutputDirectory = Join-Path $sources[$sources.Count - 1].Directory ("analysis-{0}" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
 }
