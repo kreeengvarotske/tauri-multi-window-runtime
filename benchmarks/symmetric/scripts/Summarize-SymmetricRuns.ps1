@@ -106,7 +106,9 @@ $maxIntervalFactor = 5
 function ConvertTo-Number {
     param([AllowNull()][object]$Value)
     if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) { return $null }
-    return [double]::Parse([string]$Value, $culture)
+    $number = [double]::Parse([string]$Value, $culture)
+    if ([double]::IsNaN($number) -or [double]::IsInfinity($number)) { return $null }
+    return $number
 }
 
 function Get-Median {
@@ -258,7 +260,7 @@ foreach ($directory in $directories) {
             RequestsReceived = $null; OperationsExecuted = $null; CoalescedRequests = $null; CacheHits = $null; FailedRequests = $null
             RequestsPerSecond = $null; RoundMsP50 = $null; RoundMsP95 = $null
             MonitorRows = 0; LoadRows = 0; LoadRowsExpected = $null; LoadRowsWithMissingValues = $null
-            LoadRowsWithMissingPrivateValues = $null; LoadRowsWithUnreadableCpu = $null; LoadProcessCountMax = $null
+            LoadRowsWithMissingPrivateValues = $null; LoadRowsWithUnreadableCpu = $null; LoadRowsWithInvalidInterval = $null; LoadProcessCountMax = $null
             IntervalMedianSeconds = $null; IntervalMaxSeconds = $null; LoadIntervalMedianSeconds = $null; LoadIntervalMaxSeconds = $null
             MonitorCpuSeconds = $(if ($null -ne $log -and $log.PSObject.Properties['monitorCpuSeconds']) { $log.monitorCpuSeconds } else { $null })
         }
@@ -336,7 +338,8 @@ foreach ($directory in $directories) {
             $idleAfter = Select-Phase $samples $loadTo (Get-Time $report.phases.endedAt)
             $row.LoadRows = $load.Count
             $row.LoadRowsExpected = [Math]::Floor(($loadTo - $loadFrom).TotalSeconds / $nominalInterval)
-            $loadIntervals = @($load | Where-Object { $_.Sample -gt 0 -and $null -ne $_.Interval } | ForEach-Object { $_.Interval })
+            $row.LoadRowsWithInvalidInterval = @($load | Where-Object { $null -eq $_.Interval -or $_.Interval -le 0 }).Count
+            $loadIntervals = @($load | Where-Object { $_.Sample -gt 0 -and $null -ne $_.Interval -and $_.Interval -gt 0 } | ForEach-Object { $_.Interval })
             $row.LoadIntervalMedianSeconds = Get-Median $loadIntervals
             $row.LoadIntervalMaxSeconds = Get-Max $loadIntervals
             $row.IdleBeforePrivateMB = Get-Average @($idleBefore | ForEach-Object { $_.Private })
@@ -355,8 +358,9 @@ foreach ($directory in $directories) {
             $row.LoadProcessCountMax = Get-Max @($load | ForEach-Object { [double]$_.Processes })
 
             if ($row.LoadRowsExpected -gt 0 -and $row.LoadRows -lt $minLoadCoverage * $row.LoadRowsExpected) { $reasons.Add("load rows $($row.LoadRows) < $([int]($minLoadCoverage * 100))% of $($row.LoadRowsExpected)") }
-            if ($row.LoadRowsWithMissingPrivateValues -gt 0) { $reasons.Add("$($row.LoadRowsWithMissingPrivateValues) load rows with missing private-memory values") }
-            if ($monitorProfile -eq 'Cpu' -and $row.LoadRowsWithUnreadableCpu -gt 0) { $reasons.Add("$($row.LoadRowsWithUnreadableCpu) load rows with unreadable CPU values") }
+            if ($row.LoadRowsWithMissingPrivateValues -gt 0) { $reasons.Add("$($row.LoadRowsWithMissingPrivateValues) load rows with missing or non-finite private-memory values") }
+            if ($monitorProfile -eq 'Cpu' -and $row.LoadRowsWithUnreadableCpu -gt 0) { $reasons.Add("$($row.LoadRowsWithUnreadableCpu) load rows with missing or non-finite CPU values") }
+            if ($row.LoadRowsWithInvalidInterval -gt 0) { $reasons.Add("$($row.LoadRowsWithInvalidInterval) load rows with missing, non-finite, or non-positive sampling intervals") }
             if ($null -eq $row.LoadIntervalMedianSeconds -or [Math]::Abs($row.LoadIntervalMedianSeconds - $nominalInterval) -gt $maxIntervalDeviation * $nominalInterval) {
                 $reasons.Add("load interval median $(Format-Number $row.LoadIntervalMedianSeconds 3) s not within $([int]($maxIntervalDeviation * 100))% of nominal $nominalInterval s")
             }
