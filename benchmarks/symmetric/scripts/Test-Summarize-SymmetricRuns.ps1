@@ -278,7 +278,46 @@ try {
     Assert-True ([double]$nineSigns.PHolm -ge 0.025) '9/10 signs must not survive Holm correction when the other six hypotheses have insufficient data'
     Assert-True ($nineSigns.Decided -eq 'False') '9/10 result must remain undecided when correction includes the full family'
 
-    Write-Host 'PASS: summarizer preserves missing reports, checks monitor exit, validates load-only cadence, and applies Holm to the full family.'
+    # Look 2 must never silently re-test look 1 data if the extension omitted a
+    # scenario that still has undecided primary metrics.
+    $extensionRoot = Join-Path $root 'incomplete-extension'
+    $extensionRuns = Join-Path $extensionRoot 'runs'
+    $extensionAnalysis = Join-Path $extensionRoot 'analysis-test'
+    New-Item -ItemType Directory -Path $extensionRuns -Force | Out-Null
+    $extensionConfiguration = [ordered]@{}
+    foreach ($entry in $confirmConfiguration.GetEnumerator()) { $extensionConfiguration[$entry.Key] = $entry.Value }
+    $extensionConfiguration['firstPair'] = 11
+    $extensionConfiguration['pairs'] = 10
+    $extensionConfiguration['scenarios'] = @('S2')
+    $extensionConfiguration | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $extensionRoot 'configuration.json') -Encoding UTF8
+
+    $extensionSchedule = New-Object System.Collections.Generic.List[object]
+    foreach ($pairNumber in 11..20) {
+        $order = if ($pairNumber % 2 -eq 1) { @('plain', 'runtime') } else { @('runtime', 'plain') }
+        for ($position = 0; $position -lt 2; $position++) {
+            $build = $order[$position]
+            $extensionSchedule.Add([pscustomobject]@{
+                Seq = $extensionSchedule.Count + 1
+                Scenario = 'S2'
+                Pair = $pairNumber
+                PositionInPair = $position + 1
+                Build = $build
+                Name = ('S2-pair{0:D2}-{1}' -f $pairNumber, $build)
+            })
+        }
+    }
+    $extensionSchedule | Export-Csv -LiteralPath (Join-Path $extensionRoot 'schedule.csv') -NoTypeInformation -Encoding UTF8
+
+    $extensionError = $null
+    try {
+        & $summarizer -ResultsDirectory $confirmRoot -ExtensionDirectory $extensionRoot -OutputDirectory $extensionAnalysis
+    }
+    catch {
+        $extensionError = $_.Exception.Message
+    }
+    Assert-True ($extensionError -match 'extension scenarios must exactly match') 'look 2 must reject an extension that omits scenarios with undecided hypotheses'
+
+    Write-Host 'PASS: summarizer preserves failed runs, validates monitor data, applies full-family Holm, and refuses incomplete look-2 extensions.'
 }
 finally {
     if (Test-Path -LiteralPath $root) {
