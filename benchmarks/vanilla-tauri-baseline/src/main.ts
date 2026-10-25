@@ -1,6 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { WebviewWindow, getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { installPairedLoadBridge, runTimedPairedLoad, type PairedLoadReport } from "./paired-load";
+import { installPairedLoadBridge, noteSecondaryOpening, runTimedPairedLoad, type PairedLoadReport } from "./paired-load";
 import "./styles.css";
 
 interface ProjectMetadata {
@@ -121,6 +121,7 @@ async function openSecondaryWindow(): Promise<void> {
     return;
   }
 
+  const cancelOpening = noteSecondaryOpening();
   const created = new WebviewWindow("secondary", {
     url: "index.html",
     title: "Vanilla Tauri Baseline — secondary",
@@ -133,6 +134,7 @@ async function openSecondaryWindow(): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     void created.once("tauri://created", () => resolve());
     void created.once<string>("tauri://error", (event) => {
+      cancelOpening();
       reject(new Error(String(event.payload)));
     });
   });

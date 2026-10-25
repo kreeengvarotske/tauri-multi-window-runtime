@@ -92,6 +92,36 @@ const responseEvent = "baseline://paired-load-response";
 const confirmTimeoutMs = 5_000;
 const resendIntervalMs = 100;
 const rememberedRounds = 64;
+// After "Open secondary window", Tauri finds the new window only some time
+// later (~100-150 ms on Windows 10). Until then a missing window is not yet
+// a closed one.
+const openingGraceMs = 5_000;
+const windowPollIntervalMs = 50;
+let secondaryOpeningUntil = 0;
+
+/**
+ * Marks the secondary window as being created, so a paired load started right
+ * away waits for it. Returns a function to call if creating it failed.
+ */
+export function noteSecondaryOpening(): () => void {
+  const until = Date.now() + openingGraceMs;
+  secondaryOpeningUntil = until;
+  return () => {
+    if (secondaryOpeningUntil === until) secondaryOpeningUntil = 0;
+  };
+}
+
+function secondaryIsOpening(): boolean {
+  return Date.now() < secondaryOpeningUntil;
+}
+
+async function findSecondary(): Promise<WebviewWindow | null> {
+  for (;;) {
+    const secondary = await WebviewWindow.getByLabel("secondary");
+    if (secondary || !secondaryIsOpening()) return secondary;
+    await delay(windowPollIntervalMs);
+  }
+}
 
 interface PairedLoadAck {
   runId: string;
@@ -146,7 +176,7 @@ export async function runTimedPairedLoad(options?: {
     throw new Error("Project ID must contain between 1 and 128 characters.");
   }
 
-  const secondary = await WebviewWindow.getByLabel("secondary");
+  const secondary = await findSecondary();
   if (!secondary) {
     throw new Error("Open the secondary window before starting the paired load.");
   }
@@ -308,7 +338,7 @@ async function requestRoundInSecondary(request: PairedLoadRequest): Promise<void
       }
       await emitTo("secondary", requestEvent, request);
       await Promise.race([confirmation, delay(Math.min(resendIntervalMs, Math.max(0, deadline - Date.now())))]);
-      if (!confirmed && !(await WebviewWindow.getByLabel("secondary"))) {
+      if (!confirmed && !secondaryIsOpening() && !(await WebviewWindow.getByLabel("secondary"))) {
         throw new Error("The secondary window was closed before it confirmed benchmark round " + request.round + ".");
       }
     }
