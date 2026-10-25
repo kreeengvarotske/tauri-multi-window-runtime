@@ -52,7 +52,15 @@ Replace `12345` with the PID of the application's main process.
 
 ## Unit check and diagnostics
 
-At startup the script compares `PrivatePageCount` with `Get-Process` `PrivateMemorySize64` for every process in the tree and prints the median ratio. If it is outside 0.9–1.1, the script stops instead of writing wrong `PrivateBytesMB` values. It also stops if no valid ratio can be computed (for example, because process-memory access is denied or all candidate values are zero/missing); an unverified unit must not be presented as a verified measurement.
+At startup the script compares `PrivatePageCount` with `Get-Process` `PrivateMemorySize64` for every process in the tree and prints the median ratio. If it is outside 0.9–1.1, the script stops instead of writing wrong `PrivateBytesMB` values. It also stops if no finite valid ratio can be computed (for example, because process-memory access is denied or all candidate values are zero/missing); an unverified unit must not be presented as a verified measurement. The validation logic is isolated in `PrivateUnitValidation.psm1` so the empty-input and wrong-unit paths can be tested without relying on OS-specific protected processes.
+
+Run the deterministic PowerShell 5.1 regression checks with:
+
+```powershell
+.\Test-PrivateUnitValidation.ps1
+```
+
+The test covers an empty ratio list, a list containing only non-finite values, and ratios consistent with a page-count rather than byte-count interpretation. These are unit tests for fail-closed behavior; they do not replace a native end-to-end monitor run.
 
 Add `-Diagnostics` to also write `<output>.diagnostics.csv` (or `-DiagnosticsPath`), with one row per process per sample:
 
