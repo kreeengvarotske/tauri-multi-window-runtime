@@ -11,11 +11,31 @@ report and exits; Measure-ProcessTree.ps1 samples the whole process tree
 every second until the app exits. Nothing is discarded: every report, every
 monitor CSV and the console output of every run stay in -OutputDirectory.
 Summarize-SymmetricRuns.ps1 then computes the paired differences.
+
+Two monitoring profiles are kept apart, each in its own output directory:
+- Cpu (default): one sample per second. The CPU comparison uses only this
+  profile, so CPU results of different sampling rates are never mixed.
+- Ram: one sample every 0.2 s, to see more of the short memory peaks (it
+  still cannot guarantee catching every peak). WMI sampling this often costs
+  the observer more CPU, so its CPU numbers are not compared. Needs a
+  monitor that accepts fractional intervals (PR #19).
+The monitor's own CPU time is recorded for every run as its overhead.
+
+-Phase Pilot marks exploratory pairs: they are summarized descriptively and
+never pooled with Confirmatory pairs, which are judged by the rule fixed in
+README.md before they run.
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
     [string]$MonitorScript,
+
+    [ValidateSet('Cpu', 'Ram')]
+    [string]$MonitorProfile = 'Cpu',
+
+    [Parameter(Mandatory = $true)]
+    [ValidateSet('Pilot', 'Confirmatory')]
+    [string]$Phase,
 
     [string]$OutputDirectory = (Join-Path (Get-Location) ("symmetric-results-{0}" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))),
 
@@ -56,6 +76,11 @@ $ErrorActionPreference = 'Stop'
 $benchRoot = Split-Path -Parent $PSScriptRoot
 $repoRoot = Split-Path -Parent (Split-Path -Parent $benchRoot)
 $MonitorScript = (Resolve-Path -LiteralPath $MonitorScript).Path
+$sampleIntervalSeconds = if ($MonitorProfile -eq 'Ram') { 0.2 } else { 1 }
+$intervalType = (Get-Command -Name $MonitorScript).Parameters['SampleIntervalSeconds'].ParameterType
+if ($MonitorProfile -eq 'Ram' -and $intervalType -ne [double]) {
+    throw "The Ram profile samples every 0.2 s, but $MonitorScript takes SampleIntervalSeconds as $($intervalType.Name). Use a monitor that accepts fractional seconds (PR #19)."
+}
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 $OutputDirectory = (Resolve-Path -LiteralPath $OutputDirectory).Path
 $binDirectory = Join-Path $OutputDirectory 'bin'
@@ -145,6 +170,9 @@ $configuration = [ordered]@{
     plainExeBytes     = (Get-Item -LiteralPath $exe.plain).Length
     runtimeExeSha256  = (Get-FileHash -LiteralPath $exe.runtime -Algorithm SHA256).Hash
     runtimeExeBytes   = (Get-Item -LiteralPath $exe.runtime).Length
+    profile           = $MonitorProfile
+    phase             = $Phase
+    sampleIntervalSeconds = $sampleIntervalSeconds
     scenarios         = $Scenarios
     pairs             = $Pairs
     durationSeconds   = $DurationSeconds
@@ -187,7 +215,7 @@ foreach ($scenario in $Scenarios) {
             $null = $app.Handle
             $monitorArguments = @(
                 '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$MonitorScript`"", '-RootPid', $app.Id,
-                '-DurationSeconds', ($timeoutSeconds + 30), '-SampleIntervalSeconds', 1,
+                '-DurationSeconds', ($timeoutSeconds + 30), '-SampleIntervalSeconds', $sampleIntervalSeconds.ToString([System.Globalization.CultureInfo]::InvariantCulture),
                 '-OutputPath', "`"$monitorCsv`"", '-Diagnostics'
             )
             $monitor = Start-Process -FilePath 'powershell.exe' -ArgumentList $monitorArguments -PassThru -NoNewWindow -RedirectStandardOutput $monitorLog -RedirectStandardError "$monitorLog.err"
@@ -200,6 +228,9 @@ foreach ($scenario in $Scenarios) {
                 $app.WaitForExit()
             }
             $monitor.WaitForExit()
+            # Observer overhead: CPU time of the monitor process itself.
+            $monitorCpuSeconds = $null
+            try { $monitorCpuSeconds = [Math]::Round($monitor.TotalProcessorTime.TotalSeconds, 3) } catch { }
             $entry = [ordered]@{
                 name          = $name
                 scenario      = $scenario
@@ -212,6 +243,7 @@ foreach ($scenario in $Scenarios) {
                 exitCode      = $app.ExitCode
                 timedOut      = $timedOut
                 monitorExit   = $monitor.ExitCode
+                monitorCpuSeconds = $monitorCpuSeconds
                 reportExists  = Test-Path -LiteralPath $report
             }
             ($entry | ConvertTo-Json -Compress) | Add-Content -LiteralPath $runLog -Encoding UTF8
