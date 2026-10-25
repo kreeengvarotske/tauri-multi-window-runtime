@@ -52,7 +52,7 @@ Replace `12345` with the PID of the application's main process.
 
 ## Unit check and diagnostics
 
-At startup the script compares `PrivatePageCount` with `Get-Process` `PrivateMemorySize64` for every process in the tree and prints the median ratio. If it is outside 0.9–1.1, the script stops instead of writing wrong `PrivateBytesMB` values.
+At startup the script compares `PrivatePageCount` with `Get-Process` `PrivateMemorySize64` for every process in the tree and prints the median ratio. If it is outside 0.9–1.1, the script stops instead of writing wrong `PrivateBytesMB` values. It also stops if no valid ratio can be computed (for example, because process-memory access is denied or all candidate values are zero/missing); an unverified unit must not be presented as a verified measurement.
 
 Add `-Diagnostics` to also write `<output>.diagnostics.csv` (or `-DiagnosticsPath`), with one row per process per sample:
 
@@ -81,8 +81,9 @@ This does not permanently change the system execution policy.
 - Keep debug-stats polling consistent. Prefer an initial run with periodic stats polling disabled, followed by a separate run where all variants use the same polling frequency.
 - Run each scenario at least five times and save each run as a separate CSV file.
 - This script discovers child processes using Windows `ParentProcessId`. Some WebView2 or Electron broker/service processes may not be descendants of the main process and may be omitted. Inspect `ProcessTree` in the CSV. If relevant processes are missing, do not treat the sum as the application's complete memory usage; extend collection to group processes by command line or application profile identifier.
-- The sampler compensates for its collection and CSV-write overhead when scheduling the next sample. Real intervals may still vary because of Windows scheduling, so inspect `IntervalSeconds` in every run.
-- This is a first-pass comparison tool, not a replacement for Windows Performance Recorder/ETW. Sampling introduces a small amount of overhead, so avoid excessively short intervals.
+- The sampler compensates for its collection and CSV-write overhead when scheduling the next sample. `SampleIntervalSeconds` accepts fractional seconds down to 0.1 (for example, `-SampleIntervalSeconds 0.2`). The default remains 1 second. Real intervals may still vary because of Windows scheduling and the time needed to query each process; inspect `IntervalSeconds` in every run. If sampling itself takes longer than requested, the effective cadence will be slower than requested.
+- Use 0.1–0.25 s only as a separate, higher-frequency RAM-peak profile for short-lived allocations. It improves the chance of observing brief peaks but cannot guarantee that every peak is captured. Faster sampling can increase WMI/PowerShell overhead and affect CPU measurements; do not mix these CPU numbers with a 1-second profile. For the main CPU comparison, use a common interval with acceptable measured overhead for both variants.
+- This is a first-pass comparison tool, not a replacement for Windows Performance Recorder/ETW. Sampling introduces overhead, which can be material at short intervals.
 
 ## Inspect recent samples
 
