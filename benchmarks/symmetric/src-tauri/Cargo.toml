@@ -1,0 +1,27 @@
+[package]
+name = "symmetric-bench"
+version = "0.1.0"
+description = "Symmetric benchmark: the same app with and without runtime-core"
+edition = "2024"
+publish = false
+
+[lib]
+name = "symmetric_bench_lib"
+crate-type = ["rlib"]
+
+[features]
+# Without this feature every request runs the operation itself (plain Tauri).
+# With it, requests go through runtime_core::CachedService.
+runtime = ["dep:runtime-core"]
+
+[build-dependencies]
+tauri-build = { version = "2" }
+
+[dependencies]
+runtime-core = { path = "../../../crates/runtime-core", optional = true }
+serde = { version = "1", features = ["derive"] }
+tauri = { version = "2" }
+tokio = { version = "1", features = ["rt"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time"] }
