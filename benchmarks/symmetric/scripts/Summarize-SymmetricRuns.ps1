@@ -168,7 +168,8 @@ if ($ExtensionDirectory) {
     if ($phase -ne 'Confirmatory') { throw 'An extension (look 2) exists only for Confirmatory results.' }
     $extension = Read-Configuration $ExtensionDirectory
     foreach ($name in @('profile', 'phase', 'machine', 'gitHead', 'plainExeSha256', 'runtimeExeSha256', 'monitorSha256', 'sampleIntervalSeconds',
-            'durationSeconds', 'idleSeconds', 'pauseSeconds', 'iterations', 'bufferMb', 'requestsPerWindow', 'roundIntervalMs')) {
+            'durationSeconds', 'idleSeconds', 'pauseSeconds', 'iterations', 'bufferMb', 'requestsPerWindow', 'roundIntervalMs',
+            'runScriptSha256', 'summarizeScriptSha256', 'protocolSha256', 'order')) {
         if ([string](Get-ConfigValue $configuration $name '') -ne [string](Get-ConfigValue $extension $name '')) {
             throw "Extension differs from look 1 in '$name' ('$(Get-ConfigValue $configuration $name '')' vs '$(Get-ConfigValue $extension $name '')'); it cannot be pooled."
         }
@@ -523,14 +524,22 @@ function Invoke-Analysis {
             $rows.Add($row)
         }
     }
-    # Holm over the primary tests of this look.
-    $tested = @($rows | Where-Object { $null -ne $_.P } | Sort-Object P)
+    # Holm is applied to the entire predeclared family for the look.
+    # Hypotheses without enough valid data remain in the family with p=1;
+    # omitting them would make correction less conservative when runs fail.
+    $tested = @($rows |
+        Where-Object { $_.Role -eq 'primary' -and $TestedKeys -contains "$($_.Scenario)/$($_.Metric)" } |
+        ForEach-Object {
+            $inputP = if ($null -eq $_.P) { 1.0 } else { [double]$_.P }
+            [pscustomobject]@{ Row = $_; InputP = $inputP }
+        } |
+        Sort-Object InputP)
     $running = 0.0
     for ($k = 0; $k -lt $tested.Count; $k++) {
-        $adjusted = [Math]::Min(1.0, ($tested.Count - $k) * $tested[$k].P)
+        $adjusted = [Math]::Min(1.0, ($tested.Count - $k) * $tested[$k].InputP)
         if ($adjusted -lt $running) { $adjusted = $running }
         $running = $adjusted
-        $tested[$k].PHolm = $adjusted
+        $tested[$k].Row.PHolm = $adjusted
     }
     foreach ($row in $rows) {
         if ($row.ValidPairs -eq 0) { $row.Verdict = 'no valid data'; continue }
