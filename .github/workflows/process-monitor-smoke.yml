@@ -54,15 +54,24 @@ jobs:
               }
             }
 
+            $invariant = [System.Globalization.CultureInfo]::InvariantCulture
+            $intervals = @()
             foreach ($row in $rows) {
               if ([string]::IsNullOrWhiteSpace($row.IntervalSeconds) -or
                   [string]::IsNullOrWhiteSpace($row.WorkingSetMB) -or
                   [string]::IsNullOrWhiteSpace($row.PrivateBytesMB)) {
                 throw "Required measurement field was blank in sample $($row.Sample)."
               }
+              $intervals += [double]::Parse($row.IntervalSeconds, $invariant)
             }
 
-            Write-Host "Smoke test passed: $($rows.Count) samples written; requested interval 0.2 seconds."
+            $sortedIntervals = @($intervals | Sort-Object)
+            $medianInterval = $sortedIntervals[[int][Math]::Floor($sortedIntervals.Count / 2)]
+            if ($medianInterval -ge 0.75) {
+              throw "Fractional interval was not reflected in actual samples: median IntervalSeconds=$medianInterval, expected below 0.75."
+            }
+
+            Write-Host ("Smoke test passed: {0} samples; requested interval 0.2 s; median actual interval {1} s." -f $rows.Count, $medianInterval)
           }
           finally {
             if (Get-Process -Id $target.Id -ErrorAction SilentlyContinue) {
