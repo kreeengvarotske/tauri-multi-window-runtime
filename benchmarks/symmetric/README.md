@@ -40,15 +40,15 @@ A run: wait for the secondary page → compute expected checksums → idle (`--i
 cd benchmarks\symmetric
 npm ci
 npm test
-# Pilot: builds both variants, runs 5 alternating pairs per scenario with the process monitor.
+# Pilot: 5 exploratory pairs per scenario/profile, never used for confirmatory inference.
 .\scripts\Run-SymmetricPairs.ps1 -Phase Pilot -MonitorProfile Cpu -MonitorScript C:\path\to\Measure-ProcessTree.ps1 -OutputDirectory C:\results\pilot-cpu
+.\scripts\Run-SymmetricPairs.ps1 -Phase Pilot -MonitorProfile Ram -ExecutablesFrom C:\results\pilot-cpu -MonitorScript C:\path\to\Measure-ProcessTree.ps1 -OutputDirectory C:\results\pilot-ram
 .\scripts\Summarize-SymmetricRuns.ps1 -ResultsDirectory C:\results\pilot-cpu
-# Confirmatory, only after the rule below is agreed: look 1, then (if needed) the extension and look 2.
-.\scripts\Run-SymmetricPairs.ps1 -Phase Confirmatory -MonitorProfile Cpu -Pairs 10 -MonitorScript C:\path\to\Measure-ProcessTree.ps1 -OutputDirectory C:\results\confirm-cpu
-.\scripts\Run-SymmetricPairs.ps1 -Phase Confirmatory -MonitorProfile Ram -Pairs 10 -ExecutablesFrom C:\results\confirm-cpu -MonitorScript C:\path\to\Measure-ProcessTree.ps1 -OutputDirectory C:\results\confirm-ram
+.\scripts\Summarize-SymmetricRuns.ps1 -ResultsDirectory C:\results\pilot-ram
+# Confirmatory: one fixed series of 20 pairs in every scenario/profile; freeze the protocol first.
+.\scripts\Run-SymmetricPairs.ps1 -Phase Confirmatory -Pairs 20 -MonitorProfile Cpu -MonitorScript C:\path\to\Measure-ProcessTree.ps1 -OutputDirectory C:\results\confirm-cpu
+.\scripts\Run-SymmetricPairs.ps1 -Phase Confirmatory -Pairs 20 -MonitorProfile Ram -ExecutablesFrom C:\results\confirm-cpu -MonitorScript C:\path\to\Measure-ProcessTree.ps1 -OutputDirectory C:\results\confirm-ram
 .\scripts\Summarize-SymmetricRuns.ps1 -ResultsDirectory C:\results\confirm-cpu, C:\results\confirm-ram
-.\scripts\Run-SymmetricPairs.ps1 -Phase Confirmatory -MonitorProfile Cpu -FirstPair 11 -Pairs 10 -Scenarios S1,S3 -ExecutablesFrom C:\results\confirm-cpu -MonitorScript C:\path\to\Measure-ProcessTree.ps1 -OutputDirectory C:\results\confirm-cpu-ext
-.\scripts\Summarize-SymmetricRuns.ps1 -ResultsDirectory C:\results\confirm-cpu, C:\results\confirm-ram -ExtensionDirectory C:\results\confirm-cpu-ext
 ```
 
 One run by hand: `symmetric-bench.exe --scenario S2 --report out.json --duration 60` (`--iterations`, `--buffer-mb`, `--requests-per-window`, `--round-interval-ms`, `--idle-before`, `--idle-after`). Without `--report` the app starts interactively.
@@ -64,27 +64,24 @@ Each profile goes to its own output directory and is summarized on its own:
 | `-MonitorProfile` | Sampling | Compared | Why |
 |---|---|---|---|
 | `Cpu` (default) | 1 s | memory averages, CPU seconds, latency | the CPU comparison is made only at this one rate |
-| `Ram` | 0.2 s | memory (average and largest sample), latency | sees more short peaks, but cannot guarantee catching each one, so `LoadPrivateMBMaxSample` is the largest sampled value, not the true peak; WMI every 0.2 s costs the observer more CPU, so CPU is not compared here. Needs a monitor that accepts fractional intervals (PR #19) |
+| `Ram` | 0.2 s | memory (average and largest sample), latency | sees more short peaks, but cannot guarantee catching each one, so `LoadPrivateMBMaxSample` is the largest sampled value, not the true peak; WMI every 0.2 s costs the observer more CPU, so CPU is not compared here. Needs a monitor that accepts fractional intervals; the current clean-base follow-up is PR #24. |
 
 The monitor runs as a separate process, so its own CPU is not in the app's sums; it is recorded per run (`MonitorCpuSeconds`) as the observer overhead. The idle phase before the load gives an idle CPU baseline (`IdleBeforeCpuSeconds`).
 
-## Statistical rule (proposed, to be agreed before confirmatory runs)
+## Statistical rule (fixed-N proposal; approve before confirmatory runs)
 
-Fixed in `Summarize-SymmetricRuns.ps1` before any confirmatory pair runs; changing it afterwards would need a new, separately agreed series.
+This proposal removes the adaptive interim look. Do not start confirmatory measurements until Group 1 approves and freezes the exact protocol and CI-tested SHA; any changes after the first pair require a new, separately agreed series.
 
 - **Estimand:** the median paired difference, runtime − plain, per scenario and metric, over valid pairs. The test, the interval and the effect threshold all refer to this one median; no mean is used.
 - **Pilot:** the first 5 pairs per scenario and profile (`-Phase Pilot`). Summarized descriptively, marked "pilot: no conclusion", never pooled with confirmatory pairs. It checks the experiment (counters, overruns, validity, intervals, spread), not the effect.
 - **Primary hypotheses, one family over both profiles:** per scenario, "the median paired difference of `LoadCpuSeconds` is 0" in the `Cpu` profile and "the median paired difference of `LoadPrivateMBAvg` is 0" in the `Ram` profile: 2 × 4 = 8 tests. Any overall claim ("runtime changes CPU or RAM in scenario X") rests only on these 8, and the familywise error over all of them is held at 0.05, so a headline across both profiles is covered. CPU is judged only at the 1 s rate and memory only at the 0.2 s rate. Everything else (memory in the `Cpu` profile, `LoadPrivateMBMaxSample`, working set, latency) is secondary and descriptive. A confirmatory analysis therefore takes the `Cpu` and the `Ram` directory together (`-ResultsDirectory cpu,ram`) and refuses one profile alone.
 - **Test:** two-sided sign test of "the median of all valid paired differences is 0". Every valid pair stays in n; an exact zero counts as neither positive nor negative. If 0 is a median, P(d > 0) ≤ ½ and P(d < 0) ≤ ½, so each sign count is at most Binomial(n, ½) in distribution, and p = 2 · min(P(X ≥ positives), P(X ≥ negatives)) is valid. It is exact for continuous differences (then it equals the usual sign test) and conservative when there are zeros, so 10 positive differences and 10 zeros give p = 1, not 10/10 evidence. The zero count is shown (`ZeroDiffs`).
-- **Interval:** the closed order-statistic interval for the median over all differences, zeros included, at level 1 − α of the look. Its stated coverage is a guaranteed minimum for any distribution, ties included, and is exact only for continuous differences. The decision uses only the test; the interval is reported alongside.
+- **Interval:** the closed order-statistic 95% interval for the median over all differences, zeros included. Its stated coverage is a guaranteed minimum for any distribution, ties included, and is exact only for continuous differences. The decision uses the sign test plus the practical-effect threshold; the interval is reported alongside.
 - **No rounding before statistics:** values are used as read from the monitor and report files; `runs.csv`, `pairs.csv` and `summary.csv` are written at full precision, only `summary.md` is rounded for reading. `Test-SymmetricStats.ps1` checks the test, the interval (with a mix of positive, negative and zero differences), its coverage by simulation with and without ties, and an end-to-end summary of synthetic `Cpu` and `Ram` results as one family.
-- **Looks (interim analysis accounted for):** α = 0.05 for the joint family of 8 primary hypotheses (both profiles) is split in advance between two looks: 0.025 + 0.025 (Bonferroni over looks).
-  - Look 1: confirmatory pairs 1–10 of both profiles and all four scenarios (`-Phase Confirmatory`, `-FirstPair 1 -Pairs 10`). Holm over all 8 primary hypotheses at α = 0.025; a hypothesis without a p-value (fewer than 8 valid pairs) stays in the family with p = 1.
-  - A test rejected at look 1 is final. Only the undecided tests continue: pairs 11–20 run once, in a new directory (`-FirstPair 11 -Pairs 10`) with the same executables, monitor and settings, and only for the profiles and scenarios with an undecided test. The summarizer refuses look 2 unless each profile's extension holds exactly its undecided scenarios and every planned pair 11–20 of each of them once, so look 1 data is never re-tested as a second look.
-  - Look 2: pairs 1–20 together, Holm over all hypotheses still undecided at α = 0.025 (again p = 1 where none can be computed). What is not rejected is "no detectable difference". There is no third look and no other early stop.
+- **Confirmatory sample size:** exactly 20 planned pairs for each of S1–S4 in both profiles. One analysis occurs only after both complete schedules have been run; there is no analysis after pair 10, no interim stopping or extension, and no data-dependent selection of hypotheses. Holm is applied once at α = 0.05 to the fixed family of 8 primary hypotheses. A hypothesis with fewer than 8 valid pairs has p = 1 for the family correction and the report says "insufficient valid pairs"; failed/missing pairs are retained as invalid and never replaced.
 - **Decision:** a rejected test is "runtime lower" or "runtime higher" when |median difference| ≥ 2% of the plain median, otherwise "difference below 2% of plain". No winner is declared otherwise.
-- **Power, stated in advance:** with 8 tests, look 1 can reject only if all 10 pairs are valid, non-zero and have the same sign (smallest Holm-adjusted p = 8 × 2/1024 = 0.016; with 9 valid pairs it is 0.031, so nothing can be rejected); look 2 needs at least 17 of 20 valid differences in one direction (at most 3 opposite or exactly zero). Smaller or less consistent effects end as "no detectable difference".
-- **Minimum data:** a test needs at least 8 valid pairs in its look, otherwise "insufficient valid pairs". Invalid pairs are not replaced, so the order and the number of runs stay as planned.
+- **Power, stated in advance:** with a fixed family of 8 tests and 20 pairs, 17 or more valid differences in one direction (at most 3 in the other direction or zero) gives the worst-case Holm-adjusted p no larger than 8 × 2 × 1351/2^20 ≈ 0.0206. Sixteen in one direction is not enough for the worst-case Holm threshold. Smaller or less consistent effects end as "no detectable difference".
+- **Minimum data:** a primary test needs at least 8 valid pairs; otherwise it remains in the fixed family with p = 1 and is reported as "insufficient valid pairs". Invalid pairs are not replaced, so every scheduled series remains fixed at 20 pairs.
 
 ## Run validity
 

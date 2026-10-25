@@ -21,15 +21,16 @@ Two monitoring profiles are kept apart, each in its own output directory:
   monitor that accepts fractional intervals (PR #19).
 The monitor's own CPU time is recorded for every run as its overhead.
 
--Phase Pilot marks exploratory pairs: they are summarized descriptively and
-never pooled with Confirmatory pairs, which are judged by the rule fixed in
-README.md before they run.
+-Phase Pilot always means five exploratory pairs per scenario and profile;
+they are summarized descriptively and never pooled with Confirmatory pairs.
+-Phase Confirmatory always means one fixed series of 20 pairs per scenario
+and profile. There is no interim statistical look or confirmatory extension.
 
-The order of all runs is fixed before the first one: schedule.csv lists every
-planned run, and README.md is copied to protocol.md with the SHA256 of both
-scripts in configuration.json. An existing results directory is never reused.
-A confirmatory extension (look 2) goes to its own directory with
--FirstPair 11, so pair numbers and the alternation continue.
+The full order is fixed before the first run in schedule.csv, and README.md is
+copied to protocol.md with the SHA256 of both scripts in configuration.json.
+An existing results directory is never reused. To compare Cpu and Ram at
+different sampling rates, the second profile can reuse binaries from the first
+profile's result directory through -ExecutablesFrom.
 #>
 [CmdletBinding()]
 param(
@@ -51,7 +52,7 @@ param(
     [ValidateRange(1, 50)]
     [int]$Pairs = 5,
 
-    # Number of the first pair; 11 for the confirmatory extension.
+    # Fixed protocol always starts from pair 1; Confirmatory requires 20 pairs and Pilot requires 5.
     [ValidateRange(1, 50)]
     [int]$FirstPair = 1,
 
@@ -79,13 +80,23 @@ param(
     # Reuse plain.exe and runtime.exe already in <OutputDirectory>\bin.
     [switch]$SkipBuild,
 
-    # Copy bin\plain.exe and bin\runtime.exe from an earlier results directory instead of building
-    # (the confirmatory extension must use the same executables as look 1).
+    # Reuse byte-identical plain.exe and runtime.exe from the other monitor profile's results directory.
     [string]$ExecutablesFrom
 )
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
+
+$expectedScenarios = @('S1', 'S2', 'S3', 'S4')
+if (($Scenarios -join ',') -ne ($expectedScenarios -join ',')) {
+    throw "Phase $Phase must include scenarios in the fixed order S1,S2,S3,S4."
+}
+if ($Phase -eq 'Pilot' -and ($FirstPair -ne 1 -or $Pairs -ne 5)) {
+    throw 'Pilot protocol is fixed at pairs 1..5; use -FirstPair 1 -Pairs 5.'
+}
+if ($Phase -eq 'Confirmatory' -and ($FirstPair -ne 1 -or $Pairs -ne 20)) {
+    throw 'Confirmatory protocol is fixed at pairs 1..20 with one analysis; use -FirstPair 1 -Pairs 20. Extensions/interim looks are not part of this protocol.'
+}
 
 $benchRoot = Split-Path -Parent $PSScriptRoot
 $repoRoot = Split-Path -Parent (Split-Path -Parent $benchRoot)
