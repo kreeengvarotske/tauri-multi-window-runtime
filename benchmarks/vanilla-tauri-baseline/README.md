@@ -47,6 +47,8 @@ Bundling is disabled in this benchmark app so the executable can be measured wit
 
 Build and launch the Release executable, then open the secondary window from the main window. The main window now has a **Run paired load (60 seconds)** button. It starts 50 independent metadata requests in each window per round and repeats paired rounds until at least 60 seconds have elapsed and the final round completes. It downloads a JSON report containing request outcomes and Rust Core counter deltas.
 
+Each round's request carries the run id and round number. `main` re-sends it every 100 ms until `secondary` confirms that exact round (`baseline://paired-load-ack`), for at most 5 seconds; otherwise the run stops with an error saying the round was not started. `secondary` runs a round once however often the request arrives. Tauri events are not buffered, so a request sent while the secondary page is still loading would otherwise be lost.
+
 For a resource sample, start the root process monitor from the repository root before clicking the button:
 
 ```powershell
