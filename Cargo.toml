@@ -4,6 +4,7 @@ members = [
     "crates/runtime-core",
     "crates/runtime-ipc",
     "src-tauri",
+    "benchmarks/symmetric/src-tauri",
 ]
 
 [profile.release]

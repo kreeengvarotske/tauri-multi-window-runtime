@@ -35,8 +35,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      # tauri::generate_context! needs the frontendDist folder to exist.
-      - run: mkdir -p dist
+      # tauri::generate_context! needs the frontendDist folders to exist.
+      - run: mkdir -p dist benchmarks/symmetric/dist
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked

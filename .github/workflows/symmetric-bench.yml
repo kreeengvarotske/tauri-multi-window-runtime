@@ -1,0 +1,87 @@
+name: Symmetric benchmark
+
+on:
+  pull_request:
+    paths:
+      - "benchmarks/symmetric/**"
+      - "crates/runtime-core/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/symmetric-bench.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  # Builds and tests both variants. This is a build check on the Actions
+  # Windows Server runner, not a native Windows 10/11 measurement.
+  windows-release:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: benchmarks/symmetric
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: benchmarks/symmetric/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: Statistics tests, PowerShell 7 and Windows PowerShell 5.1
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File scripts/Test-SymmetricStats.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Test-SymmetricStats.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - run: cargo fmt --all -- --check
+      - name: Clippy, plain and runtime
+        run: |
+          cargo clippy -p symmetric-bench --locked --all-targets -- -D warnings
+          cargo clippy -p symmetric-bench --locked --all-targets --features runtime -- -D warnings
+      - name: Rust tests, plain and runtime
+        run: |
+          cargo test -p symmetric-bench --locked
+          cargo test -p symmetric-bench --locked --features runtime
+      - name: Release builds
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force bin | Out-Null
+          npm run tauri -- build --no-bundle -- --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item ..\..\target\release\symmetric-bench.exe bin\plain.exe
+          npm run tauri -- build --no-bundle --features runtime -- --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item ..\..\target\release\symmetric-bench.exe bin\runtime.exe
+          git diff --exit-code -- ../../Cargo.lock
+          Get-FileHash bin\*.exe | Format-Table -AutoSize | Out-String | Write-Host
+      - name: Short S2 run of each build
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force reports | Out-Null
+          foreach ($build in 'plain', 'runtime') {
+            $report = Join-Path (Resolve-Path reports) "S2-$build.json"
+            $app = Start-Process -FilePath "bin\$build.exe" -PassThru -ArgumentList @('--scenario', 'S2', '--report', "`"$report`"", '--duration', '10', '--idle-before', '1', '--idle-after', '1', '--iterations', '20')
+            $null = $app.Handle
+            if (-not $app.WaitForExit(120000)) { Stop-Process -Id $app.Id -Force; throw "$build did not finish within 120 s" }
+            if (-not (Test-Path $report)) { throw "$build wrote no report (exit code $($app.ExitCode))" }
+            $result = Get-Content $report -Raw | ConvertFrom-Json
+            Write-Host ("{0}: passed={1}, rounds {2}/{3}, executed {4}, coalesced {5}" -f $build, $result.passed, $result.summary.passedRounds, $result.summary.rounds, $result.totals.operationsExecuted, $result.totals.coalescedRequests)
+            if (-not $result.passed) { throw "$build report did not pass" }
+          }
+      - name: Upload reports and binaries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: symmetric-bench-ci-${{ github.sha }}
+          path: |
+            benchmarks/symmetric/reports/
+            benchmarks/symmetric/bin/
+          if-no-files-found: warn
