@@ -1,5 +1,25 @@
 # Prompt to start Codex on this repository
 
+## Before starting Codex
+
+This repository is private. The user must sign in to GitHub and have access to it; do not request or store a personal access token in the repository.
+
+For a local Codex CLI workflow, the user can clone the repository, check out this documentation branch, and start Codex from the repository root:
+
+```bash
+git clone https://github.com/kreeengvarotske/tauri-multi-window-runtime.git
+cd tauri-multi-window-runtime
+git fetch origin
+git switch --track origin/codex/handoff-20261025
+codex
+```
+
+If the repo is already cloned, run `git fetch origin` and switch to `codex/handoff-20261025`. Sign in to Codex with the user's ChatGPT account when prompted. Use `gh auth status` to check whether GitHub CLI can read PRs/issues/Actions; if it cannot, ask the user to connect/authorize GitHub instead of guessing. The root `AGENTS.md` is available to Codex once this branch is checked out.
+
+Codex Cloud can use GitHub-connected cloud environments on eligible plans/workspaces; do not assume it is available on every plan. If the current account cannot create a cloud environment, use the local app/CLI workflow.
+
+---
+
 Copy/paste the block below into a new Codex task after selecting the private repository and branch `codex/handoff-20261025`.
 
 ---
