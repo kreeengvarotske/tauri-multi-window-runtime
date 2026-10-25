@@ -34,7 +34,9 @@ A successful CI run verifies those checks on the commit that CI tested. A local 
 
 3. Open the `secondary` window from `main`. In the main window, use **Автоматическая проверка Task Coalescing** and click **Проверка: 5 пар / 500 запросов**.
 
-The runner repeats five rounds. Before each round it clears the shared cache, tells `secondary` to issue 50 concurrent requests for `project-42`, and starts 50 requests in `main`. It waits until Core has classified all 100 requests before continuing. Manual window switching is not required.
+The runner repeats five rounds. Before each round it waits until Core is idle (every received request classified, counters unchanged for three polls), clears the shared cache, asks `secondary` to issue 50 concurrent requests for `project-42`, and starts 50 requests in `main`. A round ends when both windows have reported that their series finished and Core has classified exactly 100 requests. Manual window switching is not required.
+
+`main` and `secondary` exchange frontend events only (`lab://run-series`, `lab://run-series-ack`, `lab://run-series-done`); no Rust command is involved. Each request carries an id: `main` re-sends it until `secondary` confirms that id (5 s limit), `secondary` starts the series once per id, and its completion report is matched by the same id. These events are not authenticated: any window may emit them, so they are a test harness channel, not a trusted one.
 
 A successful report is expected to contain:
 
@@ -44,7 +46,12 @@ A successful report is expected to contain:
 - 0 cache hits;
 - 0 failed requests.
 
-The report checks the per-round counter deltas and can be downloaded as JSON. If the secondary window does not receive a start event, the suite times out and reports an error instead of claiming success.
+The report checks the per-round counter deltas and can be downloaded as JSON. Each round records the id of the secondary series it counted (`secondaryRequestId`).
+
+When a round fails (the secondary does not confirm, either series fails, Core receives more requests than the round sent, or the round takes longer than 15 s), the run stops and no report is produced. The runner first waits up to 10 s for both series to end and Core to become idle, so the next run cannot count the tail of this one:
+
+- if everything ended, the error says so and the buttons are enabled again;
+- if something is still running, the status names it and both buttons stay disabled until it ends and Core is idle. Closing the `secondary` window ends its series for this purpose.
 
 ## Run a 60-second resource workload
 

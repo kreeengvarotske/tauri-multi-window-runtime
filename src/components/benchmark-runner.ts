@@ -1,9 +1,11 @@
 import type { RuntimeClient, RuntimeDebugStats } from "../lib/runtime";
-import type { WindowBridge } from "../lib/windows";
+import type { SecondarySeries, WindowBridge } from "../lib/windows";
 import { errorMessage, h, panel } from "./dom";
 
 export interface BenchmarkRoundResult {
   round: number;
+  /** Id of the series the secondary window confirmed for this round. */
+  secondaryRequestId: string;
   requestsExpected: number;
   durationMs: number;
   requestsReceived: number;
@@ -50,17 +52,60 @@ export interface RunPairedBenchmarkOptions {
   projectId?: string;
   size?: number;
   pollIntervalMs?: number;
+  /** Time a round may take before it is stopped. */
   timeoutMs?: number;
+  /** Time to wait for the tail of a stopped round before reporting it as still running. */
+  drainTimeoutMs?: number;
+  /** Consecutive identical polls with nothing in flight that count as "Core is idle". */
+  quietPolls?: number;
   now?: () => number;
   sleep?: (milliseconds: number) => Promise<void>;
   onRound?(result: BenchmarkRoundResult, roundsRequested: number | null): void;
 }
 
+/** Whether anything a stopped run started may still change Core counters. */
+export type BenchmarkCleanup = "clean" | "dirty";
+
+/**
+ * A run that stopped before finishing. No report is produced, so a partial run
+ * is never shown as passed.
+ */
+export class BenchmarkAbortedError extends Error {
+  readonly roundsCompleted: number;
+  /**
+   * "clean": everything the run started has finished and Core is idle.
+   * "dirty": something may still be running; do not start a new run until
+   * `settled` resolves and Core is idle again.
+   */
+  readonly cleanup: BenchmarkCleanup;
+  /** What was still running when the run gave up waiting. */
+  readonly outstanding: string[];
+  /** Resolves once both series of the stopped round have ended. */
+  readonly settled: Promise<void>;
+
+  constructor(
+    message: string,
+    details: { roundsCompleted: number; cleanup: BenchmarkCleanup; outstanding: string[]; settled: Promise<void> },
+  ) {
+    super(message);
+    this.name = "BenchmarkAbortedError";
+    this.roundsCompleted = details.roundsCompleted;
+    this.cleanup = details.cleanup;
+    this.outstanding = details.outstanding;
+    this.settled = details.settled;
+  }
+}
+
 /**
  * Repeats cache-cold paired runs without relying on manual window switching.
- * Each round clears the shared Core cache, starts 50 same-key requests in each
- * window, then waits until Core has classified every request before continuing.
+ * Each round waits until Core is idle, clears the shared Core cache, starts 50
+ * same-key requests in each window, then waits until both windows report their
+ * series finished and Core has classified exactly the expected requests.
  * The timed mode sustains this workload for a specified interval.
+ *
+ * A round that fails or times out stops the run: the runner waits (bounded)
+ * for whatever it started, then rejects with `BenchmarkAbortedError` saying
+ * whether that tail has ended. Counters are never read across that boundary.
  */
 export async function runPairedBenchmarkSuite({
   runtime,
@@ -72,8 +117,10 @@ export async function runPairedBenchmarkSuite({
   size = 50,
   pollIntervalMs = 50,
   timeoutMs = 15_000,
+  drainTimeoutMs = 10_000,
+  quietPolls = 3,
   now = () => performance.now(),
-  sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  sleep = delay,
   onRound,
 }: RunPairedBenchmarkOptions): Promise<BenchmarkSuiteReport> {
   const timed = durationSeconds !== undefined;
@@ -100,30 +147,80 @@ export async function runPairedBenchmarkSuite({
     // A generous safety cap protects against a faulty injected clock in tests.
     if (results.length >= 1000) throw new Error("Автотест превысил предел в 1000 раундов.");
 
+    const expectedPerRound = size * 2;
+    const abort = (message: string, cleanup: BenchmarkCleanup, outstanding: string[], settled = Promise.resolve()) =>
+      new BenchmarkAbortedError(message, { roundsCompleted: results.length, cleanup, outstanding, settled });
+
+    // Start only from an idle Core, so the tail of anything earlier (another
+    // series, a stopped run) cannot be counted in this round.
+    const idle = await waitForCoreIdle({ runtime, pollIntervalMs, timeoutMs: drainTimeoutMs, quietPolls, sleep });
+    if (!idle.idle) {
+      throw abort(
+        `Раунд ${results.length + 1} не начат: Core ещё обрабатывает ${idle.inFlight} запросов, не относящихся к раунду.`,
+        "dirty",
+        [`Core: ${idle.inFlight} запросов в обработке`],
+      );
+    }
+
     await runtime.cache.clear();
     const before = await runtime.diagnostics.getStats();
     const started = now();
 
-    // The secondary is signalled first; the main starts immediately after the
-    // event is dispatched. Core counters verify that both sets really overlap.
-    await bridge.requestSeriesInSecondary({ projectId, size });
-    const localRun = runLocalSeries(projectId, size);
-    const settledStats = waitForRoundClassification({
-      runtime,
-      before,
-      expectedRequests: size * 2,
-      pollIntervalMs,
-      timeoutMs,
-      sleep,
-    });
+    // The secondary is signalled first; the main starts immediately after it
+    // confirmed. Core counters verify that both sets really overlap.
+    let secondary: SecondarySeries;
+    try {
+      secondary = await bridge.requestSeriesInSecondary({ projectId, size });
+    } catch (error) {
+      // A request confirmed just after main gave up could still start: drain.
+      const drained = await drainRound({ runtime, pollIntervalMs, timeoutMs: drainTimeoutMs, quietPolls, sleep, pending: [] });
+      throw abort(errorMessage(error), drained.cleanup, drained.outstanding);
+    }
+    const local = track(runLocalSeries(projectId, size).then(() => undefined));
+    const remote = track(
+      secondary.completed.then((completion) => {
+        if (!completion.ok) throw new Error(completion.error ?? "серия во втором окне не завершилась");
+      }),
+    );
+    const pending = [
+      { label: "серия в main", state: local },
+      { label: `серия в secondary (${secondary.requestId})`, state: remote },
+    ];
 
-    await Promise.all([localRun, settledStats]);
-    const after = await runtime.diagnostics.getStats();
+    let failure: string | null = null;
+    let after: RuntimeDebugStats | null = null;
+    const roundDeadline = started + timeoutMs;
+    while (true) {
+      const current = await runtime.diagnostics.getStats();
+      const delta = statsDelta(before, current);
+      const classified = delta.operationsExecuted + delta.coalescedRequests + delta.cacheHits;
+      if (local.error) {
+        failure = `Серия в main завершилась с ошибкой: ${errorMessage(local.error)}`;
+      } else if (remote.error) {
+        failure = `Серия в secondary не завершилась: ${errorMessage(remote.error)}`;
+      } else if (delta.requestsReceived > expectedPerRound || classified > expectedPerRound) {
+        failure = `Core получил больше запросов, чем отправил раунд (${delta.requestsReceived} из ${expectedPerRound}).`;
+      } else if (local.done && remote.done && delta.requestsReceived === expectedPerRound && classified === expectedPerRound) {
+        after = current;
+      } else if (now() >= roundDeadline) {
+        failure =
+          `Раунд не завершился за ${timeoutMs} мс: Core получил ${delta.requestsReceived} и классифицировал ` +
+          `${classified} из ${expectedPerRound} запросов. Проверь, что окно secondary открыто.`;
+      }
+      if (failure !== null || after !== null) break;
+      await sleep(pollIntervalMs);
+    }
+
+    if (after === null) {
+      const drained = await drainRound({ runtime, pollIntervalMs, timeoutMs: drainTimeoutMs, quietPolls, sleep, pending });
+      throw abort(`Раунд ${results.length + 1}: ${failure}`, drained.cleanup, drained.outstanding, drained.settled);
+    }
+
     const deltas = statsDelta(before, after);
-    const expectedPerRound = size * 2;
     const durationMs = Math.round((now() - started) * 100) / 100;
     const result: BenchmarkRoundResult = {
       round: results.length + 1,
+      secondaryRequestId: secondary.requestId,
       requestsExpected: expectedPerRound,
       durationMs,
       requestsReceived: deltas.requestsReceived,
@@ -192,37 +289,91 @@ export async function runPairedBenchmarkSuite({
   };
 }
 
-async function waitForRoundClassification({
-  runtime,
-  before,
-  expectedRequests,
-  pollIntervalMs,
-  timeoutMs,
-  sleep,
-}: {
+interface Tracked {
+  done: boolean;
+  error: unknown;
+  promise: Promise<void>;
+}
+
+/** Remembers how a promise ended, so the round can poll it. Never rejects. */
+function track(promise: Promise<void>): Tracked {
+  const state: Tracked = { done: false, error: null, promise: Promise.resolve() };
+  state.promise = promise.then(
+    () => {
+      state.done = true;
+    },
+    (error: unknown) => {
+      state.done = true;
+      state.error = error ?? new Error("неизвестная ошибка");
+    },
+  );
+  return state;
+}
+
+interface IdleCheck {
   runtime: Pick<RuntimeClient, "diagnostics">;
-  before: RuntimeDebugStats;
-  expectedRequests: number;
   pollIntervalMs: number;
   timeoutMs: number;
+  quietPolls: number;
   sleep(milliseconds: number): Promise<void>;
-}): Promise<void> {
-  const maxAttempts = Math.max(1, Math.ceil(timeoutMs / pollIntervalMs));
+}
 
-  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+/**
+ * Core is idle when every received request has been classified and the
+ * counters stay the same for `quietPolls` polls in a row. A request still on
+ * its way to Core cannot be seen here, which is why the round also waits for
+ * both windows to report that their series ended.
+ */
+export async function waitForCoreIdle({
+  runtime,
+  pollIntervalMs,
+  timeoutMs,
+  quietPolls,
+  sleep,
+}: IdleCheck): Promise<{ idle: boolean; inFlight: number }> {
+  const maxPolls = Math.max(quietPolls, Math.ceil(timeoutMs / pollIntervalMs));
+  let previous: RuntimeDebugStats | null = null;
+  let quiet = 0;
+  let inFlight = 0;
+  for (let poll = 0; poll < maxPolls; poll += 1) {
     const current = await runtime.diagnostics.getStats();
-    const delta = statsDelta(before, current);
-    const classified = delta.operationsExecuted + delta.coalescedRequests + delta.cacheHits;
-
-    if (delta.requestsReceived >= expectedRequests && classified >= expectedRequests) {
-      return;
-    }
-    if (attempt + 1 < maxAttempts) await sleep(pollIntervalMs);
+    inFlight = current.requestsReceived - (current.operationsExecuted + current.coalescedRequests + current.cacheHits);
+    const unchanged = previous !== null && sameCounters(previous, current);
+    quiet = inFlight === 0 && (previous === null || unchanged) ? quiet + 1 : 0;
+    if (quiet >= quietPolls) return { idle: true, inFlight: 0 };
+    previous = current;
+    if (poll + 1 < maxPolls) await sleep(pollIntervalMs);
   }
+  return { idle: false, inFlight };
+}
 
-  throw new Error(
-    `Core не классифицировал все ${expectedRequests} запросов за ${timeoutMs} мс. ` +
-      "Проверь, что окно secondary открыто и обе серии завершились.",
+/** Waits, bounded, for a stopped round's series to end and Core to go idle. */
+async function drainRound({
+  pending,
+  ...check
+}: IdleCheck & { pending: { label: string; state: Tracked }[] }): Promise<{
+  cleanup: BenchmarkCleanup;
+  outstanding: string[];
+  settled: Promise<void>;
+}> {
+  const settled = Promise.all(pending.map(({ state }) => state.promise)).then(() => undefined);
+  const timedOut = Symbol("timeout");
+  const finished = await Promise.race([settled, check.sleep(check.timeoutMs).then(() => timedOut)]);
+  const outstanding = pending.filter(({ state }) => !state.done).map(({ label }) => label);
+  if (finished === timedOut && outstanding.length > 0) return { cleanup: "dirty", outstanding, settled };
+
+  const idle = await waitForCoreIdle(check);
+  if (!idle.idle) return { cleanup: "dirty", outstanding: [`Core: ${idle.inFlight} запросов в обработке`], settled };
+  return { cleanup: "clean", outstanding: [], settled };
+}
+
+function sameCounters(a: RuntimeDebugStats, b: RuntimeDebugStats): boolean {
+  return (
+    a.requestsReceived === b.requestsReceived &&
+    a.operationsExecuted === b.operationsExecuted &&
+    a.coalescedRequests === b.coalescedRequests &&
+    a.cacheHits === b.cacheHits &&
+    a.failedRequests === b.failedRequests
   );
 }
 
@@ -317,7 +468,17 @@ export function createBenchmarkRunner({
       report = null;
       output.textContent = errorMessage(error);
       status.className = "hint text-error";
-      status.textContent = "Автотест прерван. Подробности приведены ниже.";
+      if (error instanceof BenchmarkAbortedError && error.cleanup === "dirty") {
+        // Something from the stopped run may still change Core counters: keep
+        // the buttons locked until it has ended and Core is idle again.
+        status.textContent =
+          `Автотест прерван, но ещё выполняется: ${error.outstanding.join("; ")}. ` +
+          "Новый запуск станет доступен, когда это завершится (или закрой окно secondary).";
+        await waitUntilSafe(error);
+        status.textContent = "Автотест прерван. Хвост прерванного раунда завершился, можно запускать снова.";
+      } else {
+        status.textContent = "Автотест прерван. Подробности приведены ниже.";
+      }
     } finally {
       running = false;
       fixedButton.disabled = false;
@@ -325,6 +486,15 @@ export function createBenchmarkRunner({
     }
   }
 
+  async function waitUntilSafe(error: BenchmarkAbortedError): Promise<void> {
+    await error.settled;
+    const check = { runtime, pollIntervalMs: 250, timeoutMs: 5_000, quietPolls: 3, sleep: delay };
+    while (!(await waitForCoreIdle(check)).idle) {
+      // Keep the lock; a request that never finishes in Core needs a restart anyway.
+    }
+  }
+
+  // Clicks while a run or its cleanup is in progress are ignored by `running`.
   fixedButton.addEventListener("click", () => void execute("fixed-rounds"));
   timedButton.addEventListener("click", () => void execute("timed-load"));
 
@@ -349,4 +519,8 @@ export function createBenchmarkRunner({
     h("div", { class: "row" }, fixedButton, timedButton, downloadButton),
     output,
   );
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }

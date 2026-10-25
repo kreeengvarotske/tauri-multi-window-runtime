@@ -9,17 +9,18 @@ const SECONDARY: WindowIdentity = { label: "secondary", native: true };
 
 /** In-memory stand-in for window-to-window messaging. */
 function fakeBridge() {
-  let handler: ((request: SeriesRequest) => void) | null = null;
+  let handler: ((request: SeriesRequest) => unknown) | null = null;
   const bridge: WindowBridge & { sent: SeriesRequest[]; deliver(request: SeriesRequest): void } = {
     sent: [],
     requestSeriesInSecondary: vi.fn(async (request: SeriesRequest) => {
       bridge.sent.push(request);
+      return { requestId: `request-${bridge.sent.length}`, completed: Promise.resolve({ ok: true }) };
     }),
     async onSeriesRequest(h) {
       handler = h;
       return () => (handler = null);
     },
-    deliver: (request) => handler?.(request),
+    deliver: (request) => void handler?.(request),
   };
   return bridge;
 }

@@ -53,7 +53,11 @@ export function mountApp(root: HTMLElement, { setup, identity, openSecondary, br
     },
     onRefreshStats: () => stats.refresh(),
     allowCacheAdmin: runtime.mode === "tauri" && isMain,
-    onRunInBothWindows: isMain ? (request) => windows.requestSeriesInSecondary(request) : undefined,
+    onRunInBothWindows: isMain
+      ? async (request) => {
+          await windows.requestSeriesInSecondary(request);
+        }
+      : undefined,
   });
 
   // The automated suite is intentionally available only in the real main
@@ -73,7 +77,8 @@ export function mountApp(root: HTMLElement, { setup, identity, openSecondary, br
     void stats.refresh();
   });
   if (!isMain) {
-    void windows.onSeriesRequest(({ projectId, size }) => void requests.run(projectId, size, "По команде из main"));
+    // Returning the series lets main know when it has finished here.
+    void windows.onSeriesRequest(({ projectId, size }) => requests.run(projectId, size, "По команде из main"));
   }
 
   root.replaceChildren(
