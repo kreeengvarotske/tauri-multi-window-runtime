@@ -366,7 +366,7 @@ while ($watch.Elapsed.TotalSeconds -lt $DurationSeconds) {
         WorkingSetMB       = Format-InvariantDecimal -Value ([Math]::Round(($workingSetBytes / 1MB), 2)) -DecimalPlaces 2
         PrivateBytesMB     = Format-InvariantDecimal -Value ([Math]::Round(($privateBytes / 1MB), 2)) -DecimalPlaces 2
         CpuPercentAllCores = if ($null -ne $cpuPercent) { Format-InvariantDecimal -Value $cpuPercent -DecimalPlaces 2 } else { $null }
-        CpuDeltaSeconds    = if ($sampleNumber -gt 0) { Format-InvariantDecimal -Value ([Math]::Round($cpuDeltaSeconds, 4)) -DecimalPlaces 4 } else { $null }
+        CpuDeltaSeconds    = if ($sampleNumber -gt 0 -and $cpuDeltaKnown) { Format-InvariantDecimal -Value ([Math]::Round($cpuDeltaSeconds, 4)) -DecimalPlaces 4 } else { $null }
         LogicalCpuCount    = $logicalCpuCount
         # Processes left out of PrivateBytesMB / CpuDeltaSeconds in this row
         # because the value could not be read. Non-zero means the sum is low.
