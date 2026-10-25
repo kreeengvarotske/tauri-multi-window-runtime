@@ -278,6 +278,15 @@ try {
     Assert-True ([double]$nineSigns.PHolm -ge 0.025) '9/10 signs must not survive Holm correction when the other six hypotheses have insufficient data'
     Assert-True ($nineSigns.Decided -eq 'False') '9/10 result must remain undecided when correction includes the full family'
 
+    # Exact zeros stay in the denominator. Ten positive differences plus ten ties
+    # are not equivalent to ten positive signs after dropping the ten ties.
+    $zeroTieDiffs = [double[]]@(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    $zeroTieP = [SymmetricBenchStats]::SignTestP($zeroTieDiffs)
+    Assert-True ([Math]::Abs($zeroTieP - 1.0) -lt 0.000001) '10 positive differences plus 10 zero ties must not look like 10/10 signs'
+    $zeroTieInterval = [SymmetricBenchStats]::MedianInterval($zeroTieDiffs, 0.975)
+    Assert-True ($null -ne $zeroTieInterval) 'expected an order-statistic interval for the zero-tie fixture'
+    Assert-True ([double]$zeroTieInterval[0] -le 0 -and [double]$zeroTieInterval[1] -ge 0) 'zero-tie interval must include zero'
+
     # Look 2 must never silently re-test look 1 data if the extension omitted a
     # scenario that still has undecided primary metrics.
     $extensionRoot = Join-Path $root 'incomplete-extension'
