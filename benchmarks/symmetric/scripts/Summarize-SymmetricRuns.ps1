@@ -65,7 +65,10 @@ $maxIntervalFactor = 5
 function ConvertTo-Number {
     param([AllowNull()][object]$Value)
     if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) { return $null }
-    return [double]::Parse([string]$Value, $culture)
+    $number = 0.0
+    if (-not [double]::TryParse([string]$Value, [System.Globalization.NumberStyles]::Float, $culture, [ref]$number)) { return $null }
+    if ([double]::IsNaN($number) -or [double]::IsInfinity($number)) { return $null }
+    return $number
 }
 
 function Get-Median {
@@ -211,7 +214,8 @@ foreach ($source in $sources) {
         }
     }
 
-    # The order fixed before the first run, if the run script wrote one.
+    # Keep every planned/logged launch, including launches that never produce JSON.
+    $scheduled = @()
     $scheduleFile = Join-Path $directory 'schedule.csv'
     if (Test-Path -LiteralPath $scheduleFile) {
         $scheduled = @(Import-Csv -LiteralPath $scheduleFile | Sort-Object { [int]$_.Seq } | ForEach-Object { $_.Name })
@@ -231,15 +235,26 @@ foreach ($source in $sources) {
         $deviations.Add("$(Split-Path -Leaf $directory): no schedule.csv (run script before the fixed-order change); order taken from runs.log")
     }
 
-    foreach ($reportFile in @(Get-ChildItem -LiteralPath $runsDirectory -Filter '*.json' | Sort-Object Name)) {
-        $base = [System.IO.Path]::GetFileNameWithoutExtension($reportFile.Name)
+    $reportFilesByName = @{}
+    foreach ($reportFile in @(Get-ChildItem -LiteralPath $runsDirectory -Filter '*.json' -ErrorAction SilentlyContinue | Sort-Object Name)) {
+        $reportFilesByName[[System.IO.Path]::GetFileNameWithoutExtension($reportFile.Name)] = $reportFile
+    }
+    $runNames = New-Object System.Collections.Generic.List[string]
+    foreach ($candidateName in (@($scheduled) + @($logOrder) + @($reportFilesByName.Keys))) {
+        if ([string]::IsNullOrWhiteSpace([string]$candidateName) -or [string]$candidateName -notmatch '^(S[1-4])-pair(\d+)-(plain|runtime)$') { continue }
+        if (-not $runNames.Contains([string]$candidateName)) { $runNames.Add([string]$candidateName) }
+    }
+    foreach ($base in $runNames) {
         if ($base -notmatch '^(S[1-4])-pair(\d+)-(plain|runtime)$') { continue }
         $scenario = $Matches[1]; $pair = [int]$Matches[2]; $build = $Matches[3]
         $log = $logByRun[$base]
         $reasons = New-Object System.Collections.Generic.List[string]
         $report = $null
-        try { $report = Get-Content -LiteralPath $reportFile.FullName -Raw | ConvertFrom-Json }
-        catch { $reasons.Add('report is not valid JSON') }
+        if (-not $reportFilesByName.ContainsKey($base)) { $reasons.Add('JSON report missing') }
+        else {
+            try { $report = Get-Content -LiteralPath $reportFilesByName[$base].FullName -Raw | ConvertFrom-Json }
+            catch { $reasons.Add('report is not valid JSON') }
+        }
         $row = [ordered]@{
             Profile = $monitorProfile; Scenario = $scenario; Pair = $pair; Build = $build; Directory = Split-Path -Leaf $directory
             Valid = $false; InvalidReason = ''
@@ -257,8 +272,10 @@ foreach ($source in $sources) {
 
         if ($null -eq $log) { $reasons.Add('no runs.log entry') }
         else {
-            if ($log.exitCode -ne 0) { $reasons.Add("exit code $($log.exitCode)") }
+            if ($null -eq $log.exitCode -or [int]$log.exitCode -ne 0) { $reasons.Add("app exit code $($log.exitCode)") }
             if ($log.timedOut) { $reasons.Add('timed out') }
+            if ($null -eq $log.monitorExit) { $reasons.Add('monitor exit code missing from runs.log') }
+            elseif ([int]$log.monitorExit -ne 0) { $reasons.Add("monitor exit code $($log.monitorExit)") }
         }
         if ($null -ne $report) {
             $row.Passed = [bool]$report.passed
@@ -273,6 +290,9 @@ foreach ($source in $sources) {
             }
         }
         if ($null -eq $report -or -not $report.PSObject.Properties['summary']) {
+            if ($null -ne $report -and $report.PSObject.Properties['configError']) { $row.Error = [string]$report.configError }
+            elseif ($null -ne $report -and $report.PSObject.Properties['error']) { $row.Error = [string]$report.error }
+            if ($reasons.Count -eq 0) { $reasons.Add('no summary in report') }
             $row.InvalidReason = $reasons -join '; '
             $runs.Add([pscustomobject]$row)
             continue
