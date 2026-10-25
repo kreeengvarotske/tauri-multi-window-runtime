@@ -155,7 +155,130 @@ try {
         Assert-True ($pair.Valid -eq 'False') "$scenario pair must be invalid when either side is invalid"
     }
 
-    Write-Host 'PASS: summarizer preserves missing reports, checks monitor exit, and validates load-only cadence.'
+    # A missing primary hypothesis must remain in the predeclared Holm family with p=1.
+    # One S1 metric has 10/10 signs; the other has 9/10. If unavailable S2-S4
+    # hypotheses are incorrectly omitted, Holm over only two tests falsely declares both significant.
+    $confirmRoot = Join-Path $root 'confirmatory'
+    $confirmRuns = Join-Path $confirmRoot 'runs'
+    $confirmAnalysis = Join-Path $confirmRoot 'analysis-test'
+    New-Item -ItemType Directory -Path $confirmRuns -Force | Out-Null
+    $confirmConfiguration = [ordered]@{
+        profile = 'Cpu'
+        phase = 'Confirmatory'
+        sampleIntervalSeconds = 1
+        gitHead = 'synthetic-test'
+        os = 'Windows PowerShell summarizer test'
+        machine = 'fixture'
+        pairs = 10
+        firstPair = 1
+        durationSeconds = 10
+        idleSeconds = 10
+        pauseSeconds = 0
+        iterations = 1
+        bufferMb = 4
+        requestsPerWindow = 10
+        roundIntervalMs = 500
+        plainExeSha256 = 'plain'
+        runtimeExeSha256 = 'runtime'
+        monitorSha256 = 'monitor'
+        runScriptSha256 = 'runner'
+        summarizeScriptSha256 = 'summarizer'
+        protocolSha256 = 'protocol'
+        order = 'alternating'
+    }
+    $confirmConfiguration | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $confirmRoot 'configuration.json') -Encoding UTF8
+
+    $confirmSchedule = New-Object System.Collections.Generic.List[object]
+    $confirmLogs = New-Object System.Collections.Generic.List[object]
+    foreach ($scenario in @('S1', 'S2', 'S3', 'S4')) {
+        for ($pairNumber = 1; $pairNumber -le 10; $pairNumber++) {
+            $buildOrder = if ($pairNumber % 2 -eq 1) { @('plain', 'runtime') } else { @('runtime', 'plain') }
+            foreach ($buildName in $buildOrder) {
+                $name = '{0}-pair{1:D2}-{2}' -f $scenario, $pairNumber, $buildName
+                $confirmSchedule.Add([pscustomobject]@{
+                    Seq = $confirmSchedule.Count + 1
+                    Scenario = $scenario
+                    Pair = $pairNumber
+                    PositionInPair = $(if ($buildName -eq $buildOrder[0]) { 1 } else { 2 })
+                    Build = $buildName
+                    Name = $name
+                })
+                $validScenario = $scenario -eq 'S1'
+                $confirmLogs.Add([pscustomobject][ordered]@{
+                    name = $name
+                    scenario = $scenario
+                    pair = $pairNumber
+                    build = $buildName
+                    exitCode = $(if ($validScenario) { 0 } else { 1 })
+                    timedOut = $false
+                    monitorExit = 0
+                    monitorCpuSeconds = 0.1
+                    reportExists = $validScenario
+                })
+                if (-not $validScenario) { continue }
+
+                $privateMb = if ($buildName -eq 'plain') { 100.0 } elseif ($pairNumber -eq 10) { 110.0 } else { 90.0 }
+                $cpuEachSample = if ($buildName -eq 'plain') { 0.100 } else { 0.080 }
+                $confirmReport = [pscustomobject][ordered]@{
+                    schemaVersion = 1
+                    config = [pscustomobject]@{ scenario = $scenario; build = $buildName }
+                    phases = [pscustomobject]@{
+                        expectedReadyAt = $epoch.ToString('o')
+                        loadStartedAt = $epoch.AddSeconds(10).ToString('o')
+                        loadEndedAt = $epoch.AddSeconds(20).ToString('o')
+                        endedAt = $epoch.AddSeconds(30).ToString('o')
+                    }
+                    summary = [pscustomobject]@{
+                        rounds = 20
+                        passedRounds = 20
+                        overruns = 0
+                        requestsPerSecond = 20
+                        roundMs = [pscustomobject]@{ p50 = 100; p95 = 120; max = 150 }
+                    }
+                    totals = [pscustomobject]@{
+                        requestsReceived = 200
+                        operationsExecuted = $(if ($buildName -eq 'plain') { 200 } else { 20 })
+                        coalescedRequests = $(if ($buildName -eq 'plain') { 0 } else { 180 })
+                        cacheHits = 0
+                        failedRequests = 0
+                    }
+                    abort = $null
+                    passed = $true
+                }
+                $confirmReport | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $confirmRuns "$name.json") -Encoding UTF8
+
+                $confirmSamples = New-Object System.Collections.Generic.List[object]
+                for ($sampleIndex = 0; $sampleIndex -le 30; $sampleIndex++) {
+                    $confirmSamples.Add([pscustomobject][ordered]@{
+                        Timestamp = $epoch.AddSeconds($sampleIndex).ToString('o')
+                        RootPid = 456
+                        ProcessCount = 3
+                        WorkingSetMB = '120.000'
+                        PrivateBytesMB = $privateMb.ToString('F3', [System.Globalization.CultureInfo]::InvariantCulture)
+                        CpuDeltaSeconds = $cpuEachSample.ToString('F3', [System.Globalization.CultureInfo]::InvariantCulture)
+                        Sample = $sampleIndex
+                        IntervalSeconds = $(if ($sampleIndex -eq 0) { '0.000' } else { '1.000' })
+                        PrivateMissingCount = 0
+                        CpuUnreadableCount = 0
+                    })
+                }
+                $confirmSamples | Export-Csv -LiteralPath (Join-Path $confirmRuns "$name.monitor.csv") -NoTypeInformation -Encoding UTF8
+            }
+        }
+    }
+    $confirmSchedule | Export-Csv -LiteralPath (Join-Path $confirmRoot 'schedule.csv') -NoTypeInformation -Encoding UTF8
+    $confirmLogs | ForEach-Object { $_ | ConvertTo-Json -Compress } | Set-Content -LiteralPath (Join-Path $confirmRoot 'runs.log') -Encoding UTF8
+
+    & $summarizer -ResultsDirectory $confirmRoot -OutputDirectory $confirmAnalysis
+    $confirmSummary = @(Import-Csv -LiteralPath (Join-Path $confirmAnalysis 'summary.csv'))
+    $allSigns = @($confirmSummary | Where-Object { $_.Look -eq 'look1' -and $_.Scenario -eq 'S1' -and $_.Metric -eq 'LoadCpuSeconds' })[0]
+    $nineSigns = @($confirmSummary | Where-Object { $_.Look -eq 'look1' -and $_.Scenario -eq 'S1' -and $_.Metric -eq 'LoadPrivateMBAvg' })[0]
+    Assert-True ([double]$allSigns.PHolm -lt 0.025) '10/10 consistent signs must survive Holm correction over the full 8-test family'
+    Assert-True ($allSigns.Decided -eq 'True') '10/10 result should be decided at look 1 in the synthetic fixture'
+    Assert-True ([double]$nineSigns.PHolm -ge 0.025) '9/10 signs must not survive Holm correction when the other six hypotheses have insufficient data'
+    Assert-True ($nineSigns.Decided -eq 'False') '9/10 result must remain undecided when correction includes the full family'
+
+    Write-Host 'PASS: summarizer preserves missing reports, checks monitor exit, validates load-only cadence, and applies Holm to the full family.'
 }
 finally {
     if (Test-Path -LiteralPath $root) {
