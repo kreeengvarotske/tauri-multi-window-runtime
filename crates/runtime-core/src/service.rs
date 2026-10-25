@@ -87,6 +87,31 @@ where
 ///
 /// Errors are never cached. `invalidate` advances only the affected key's
 /// generation, while `clear` advances the service-wide generation.
+///
+/// Semantics for concurrent calls:
+///
+/// - A call is classified by its registration: the cache lookup and version
+///   capture in one `generation` critical section.
+/// - Once an operation has published its result, a later call never receives
+///   that result through the coalescer. It gets a cache hit if the policy
+///   stored the value, otherwise it starts a new operation. This covers
+///   errors, `NoStore` and an already expired TTL (decision V1).
+/// - `invalidate` and `clear` do not cancel operations in flight. Such an
+///   operation still returns its result to the callers that joined it, but
+///   it cannot write it to the cache, and calls registered after the
+///   invalidation do not join it (V2).
+/// - If the initializing caller is cancelled, a remaining waiter re-runs the
+///   operation with the versions captured at its own registration, so it
+///   caches nothing if an invalidation happened after it registered (V3).
+/// - A TTL is counted from the moment the value is inserted into the cache,
+///   not from the start of the request (V4).
+/// - A call that missed the cache just before an insertion and reaches the
+///   coalescer just after the operation completed starts one extra
+///   execution. Its result is fresh, not stale; only `operationsExecuted`
+///   may be one higher in that window (G6).
+/// - The cache key is the only identity. The caller's access context is not
+///   part of it, so per-user or private results must not share a service
+///   key (V6).
 pub struct CachedService<K, V, E> {
     cache: PolicyCache<K, V>,
     coalescer: TaskCoalescer<(K, u64, u64), CachedValue<V>, E>,
