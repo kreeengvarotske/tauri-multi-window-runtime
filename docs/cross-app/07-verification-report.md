@@ -33,9 +33,14 @@ One real defect was found and fixed during development: a call started after the
 
 Error caching is guarded by Core's own tests (#12/#14), plus `errors_are_never_cached_or_shared_late` here.
 
-## 4. CI
+## 4. CI on exact head `70fffe1c21b2a4b44754af61838b6e850691b187`
 
-Filled in after the Draft PR's first run. The workflow `cross-app-spike.yml` runs fmt, clippy `-D warnings`, the tests, and 5 repeats of the cross-process suite on ubuntu (stable, 1.89) and windows (stable).
+| Workflow / job | Result |
+|---|---|
+| Cross-app spike [40231206779](https://github.com/kreeengvarotske/tauri-multi-window-runtime/actions/runs/40231206779): `test (ubuntu-latest, stable)` | success |
+| same run: `test (ubuntu-latest, 1.89)` | success |
+| same run: `test (windows-latest, stable)`, which runs the named-pipe transport and the Windows exe-path identity check across real processes, plus 5 repeats | success (hosted runner, **not** a native Windows 10/11 machine) |
+| General CI [40231206673](https://github.com/kreeengvarotske/tauri-multi-window-runtime/actions/runs/40231206673): `rust`, `frontend` | success (root workspace unaffected) |
 
 ## 5. Not verified
 
