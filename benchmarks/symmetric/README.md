@@ -93,9 +93,11 @@ A run is valid only if all of these hold; a pair is valid only if both runs are.
 - the report exists, is `passed` (every round had the expected counters), has no `abort`, and names the expected build and scenario;
 - `runs.log` has the run with app exit code 0, no timeout and monitor exit code 0;
 - the monitor CSV exists and covers at least 80% of the expected load samples (load duration ÷ nominal interval);
-- no load row has a missing, NaN or infinite private-memory value; in the `Cpu` profile also no load row with unreadable or non-finite CPU (in the `Ram` profile CPU is not compared, so it does not invalidate the run);
+- in the `Cpu` profile, all load-phase CPU samples are readable and finite; in the `Ram` profile, all load-phase private-memory samples are readable and finite (CPU is not compared in the `Ram` profile);
 - every load row has a positive, finite interval; the median interval **within the load phase** is within ±20% of nominal and no load interval is longer than 5 × nominal (the whole-run median is reported for context only);
 - the profile's primary metric could be computed.
+
+Incomplete **secondary** metrics do not invalidate an otherwise valid primary run. Instead, that metric is excluded from any pairwise summary unless both builds have complete finite samples for that metric; the counts are shown as `MetricExcludedPairs` in `summary.csv` and `summary.md`. This avoids averaging only the readable samples and silently changing the measured quantity.
 
 The 80%, ±20% and 5× thresholds are checked against the pilot data before they are frozen. Overruns are not a validity criterion: if a build cannot keep up with the offered load, that is part of the result and is reported.
 
