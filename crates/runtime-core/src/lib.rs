@@ -142,6 +142,22 @@ where
     }
 }
 
+/// Test-only views of the in-flight table.
+#[cfg(test)]
+impl<K, V, E> TaskCoalescer<K, V, E> {
+    pub(crate) fn test_len(&self) -> usize {
+        self.tasks.lock().unwrap().len()
+    }
+    pub(crate) fn test_callers(&self) -> usize {
+        self.tasks
+            .lock()
+            .unwrap()
+            .values()
+            .map(|e| e.callers.load(Ordering::SeqCst))
+            .sum()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::TaskCoalescer;
