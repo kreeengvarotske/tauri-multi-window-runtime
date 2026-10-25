@@ -163,4 +163,39 @@ describe("paired-load window handshake", () => {
     expect(result.ok).toBe(false);
     expect((result as { error: string }).error).toMatch(/did not confirm/);
   });
+
+  it("waits for a secondary window that is still being created", async () => {
+    closeSecondary();
+    const main = await loadWindow("main");
+    // "Open secondary window" was just clicked: Tauri finds the window only
+    // ~100-150 ms later on Windows 10, and its page registers later still.
+    main.noteSecondaryOpening();
+    setTimeout(() => bus.openWindows.add("secondary"), 120);
+    const run = runShort(main);
+    bus.registrationDelayMs.set("secondary", 300);
+    await loadWindow("secondary");
+    bus.openWindows.delete("secondary");
+
+    const result = await settle(run, 30_000);
+    expect(result).toMatchObject({ ok: true, value: { passed: true } });
+  });
+
+  it("still fails when the window being created never appears", async () => {
+    closeSecondary();
+    const main = await loadWindow("main");
+    main.noteSecondaryOpening();
+    const result = await settle(runShort(main), 10_000);
+    expect(result.ok).toBe(false);
+    expect((result as { error: string }).error).toMatch(/Open the secondary window/);
+    expect(bus.emitted.filter((e) => e.event === "baseline://paired-load-request")).toHaveLength(0);
+  });
+
+  it("does not wait when the window failed to be created", async () => {
+    closeSecondary();
+    const main = await loadWindow("main");
+    main.noteSecondaryOpening()();
+    const result = await settle(runShort(main), 100);
+    expect(result.ok).toBe(false);
+    expect((result as { error: string }).error).toMatch(/Open the secondary window/);
+  });
 });
