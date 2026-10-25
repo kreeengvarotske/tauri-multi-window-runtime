@@ -187,7 +187,7 @@ try {
         'S1-pair07-runtime' = 'BadPrivate'
         'S1-pair08-runtime' = 'NaNWorkingSet'
     }
-    foreach ($pair in 1..10) { foreach ($build in 'plain', 'runtime') { $cpuMutations[('S3-pair{0:D2}-{1}' -f $pair, $build)] = 'AppExit' } }
+    foreach ($pair in 1..20) { foreach ($build in 'plain', 'runtime') { $cpuMutations[('S3-pair{0:D2}-{1}' -f $pair, $build)] = 'AppExit' } }
     New-SyntheticResults -Directory $cpuDirectory -MonitorProfile 'Cpu' -Interval 1 -Mutations $cpuMutations
     New-SyntheticResults -Directory $ramDirectory -MonitorProfile 'Ram' -Interval 0.2 -Mutations @{
         'S1-pair09-runtime' = 'NoReport'; 'S3-pair01-plain' = 'MonitorExit'; 'S3-pair02-runtime' = 'NaNPrivate'
@@ -201,15 +201,15 @@ try {
     Assert-True 'family: 8 primary hypotheses over both profiles' ($primary.Count -eq 8) "got $(($primary | ForEach-Object { "$($_.Profile)/$($_.Scenario)/$($_.Metric)" }) -join ', ')"
     Assert-True 'family: Cpu tests LoadCpuSeconds, Ram tests LoadPrivateMBAvg' (@($primary | Where-Object { -not (($_.Profile -eq 'Cpu' -and $_.Metric -eq 'LoadCpuSeconds') -or ($_.Profile -eq 'Ram' -and $_.Metric -eq 'LoadPrivateMBAvg')) }).Count -eq 0)
     foreach ($row in @($primary | Where-Object { @('S2', 'S4') -contains $_.Scenario })) {
-        Assert-Near "$($row.Profile) $($row.Scenario): p = 2/1024" (ConvertTo-Double $row.P) (2 / 1024)
-        Assert-Near "$($row.Profile) $($row.Scenario): Holm over all 8, the one without data included" (ConvertTo-Double $row.PHolm) (8 * 2 / 1024)
+        Assert-Near "$($row.Profile) $($row.Scenario): p = 2/2^20" (ConvertTo-Double $row.P) (2 / 1048576)
+        Assert-Near "$($row.Profile) $($row.Scenario): Holm over all 8, the one without data included" (ConvertTo-Double $row.PHolm) (8 * 2 / 1048576)
         Assert-True "$($row.Profile) $($row.Scenario): runtime lower" ($row.Verdict -eq 'runtime lower') "verdict '$($row.Verdict)'"
     }
     $cpuS3 = @($primary | Where-Object { $_.Profile -eq 'Cpu' -and $_.Scenario -eq 'S3' })[0]
     Assert-True 'Cpu S3 without valid pairs stays in the family' ($cpuS3.ValidPairs -eq '0' -and (ConvertTo-Double $cpuS3.PHolm) -eq 1) "valid $($cpuS3.ValidPairs), PHolm '$($cpuS3.PHolm)', verdict '$($cpuS3.Verdict)'"
     $ramS1 = @($primary | Where-Object { $_.Profile -eq 'Ram' -and $_.Scenario -eq 'S1' })[0]
-    Assert-True 'Ram S1: 9 valid pairs, 4 zero differences' ($ramS1.ValidPairs -eq '9' -and $ramS1.ZeroDiffs -eq '4') "valid $($ramS1.ValidPairs), zeros $($ramS1.ZeroDiffs)"
-    Assert-True 'Ram S1: not decided at look 1' ($ramS1.Verdict -like '*undecided*') "verdict '$($ramS1.Verdict)'"
+    Assert-True 'Ram S1: 19 valid pairs, 4 zero differences' ($ramS1.ValidPairs -eq '19' -and $ramS1.ZeroDiffs -eq '4') "valid $($ramS1.ValidPairs), zeros $($ramS1.ZeroDiffs)"
+    Assert-True 'Ram S1: final one-look confirmatory result' ($ramS1.Verdict -notlike '*undecided*') "verdict '$($ramS1.Verdict)'"
 
     $runRows = @(Import-Csv -LiteralPath (Join-Path $output 'runs.csv'))
     function Get-Run { param([string]$Profile, [string]$Scenario, [int]$Pair, [string]$Build) @($runRows | Where-Object { $_.Profile -eq $Profile -and $_.Scenario -eq $Scenario -and [int]$_.Pair -eq $Pair -and $_.Build -eq $Build }) }
@@ -222,10 +222,10 @@ try {
     Assert-True 'malformed numeric secondary sample does not crash or invalidate Cpu-primary run' ($cpuPrivateBad.Count -eq 1 -and $cpuPrivateBad[0].Valid -eq 'True') "reason '$(if ($cpuPrivateBad.Count) { $cpuPrivateBad[0].InvalidReason })'"
     $cpuWorkingSetBad = @(Get-Run 'Cpu' 'S1' 8 'runtime')
     Assert-True 'NaN working-set secondary sample does not invalidate Cpu-primary run' ($cpuWorkingSetBad.Count -eq 1 -and $cpuWorkingSetBad[0].Valid -eq 'True') "reason '$(if ($cpuWorkingSetBad.Count) { $cpuWorkingSetBad[0].InvalidReason })'"
-    $cpuPrivateSecondary = @($summary | Where-Object { $_.Look -eq 'look1' -and $_.Profile -eq 'Cpu' -and $_.Scenario -eq 'S1' -and $_.Metric -eq 'LoadPrivateMBAvg' })[0]
-    Assert-True 'private secondary metric excludes both malformed/non-finite pairs only' ($cpuPrivateSecondary.ValidPairs -eq '7' -and $cpuPrivateSecondary.MetricExcludedPairs -eq '2' -and $cpuPrivateSecondary.InvalidPairs -eq '1') "valid $($cpuPrivateSecondary.ValidPairs), metric-excluded $($cpuPrivateSecondary.MetricExcludedPairs), invalid $($cpuPrivateSecondary.InvalidPairs)"
-    $cpuWorkingSetSecondary = @($summary | Where-Object { $_.Look -eq 'look1' -and $_.Profile -eq 'Cpu' -and $_.Scenario -eq 'S1' -and $_.Metric -eq 'LoadWorkingSetMBAvg' })[0]
-    Assert-True 'working-set secondary metric excludes only the pair with bad samples' ($cpuWorkingSetSecondary.ValidPairs -eq '8' -and $cpuWorkingSetSecondary.MetricExcludedPairs -eq '1' -and $cpuWorkingSetSecondary.InvalidPairs -eq '1') "valid $($cpuWorkingSetSecondary.ValidPairs), metric-excluded $($cpuWorkingSetSecondary.MetricExcludedPairs), invalid $($cpuWorkingSetSecondary.InvalidPairs)"
+    $cpuPrivateSecondary = @($summary | Where-Object { $_.Look -eq 'confirmatory' -and $_.Profile -eq 'Cpu' -and $_.Scenario -eq 'S1' -and $_.Metric -eq 'LoadPrivateMBAvg' })[0]
+    Assert-True 'private secondary metric excludes both malformed/non-finite pairs only' ($cpuPrivateSecondary.ValidPairs -eq '17' -and $cpuPrivateSecondary.MetricExcludedPairs -eq '2' -and $cpuPrivateSecondary.InvalidPairs -eq '1' -and $cpuPrivateSecondary.PairsInLook -eq '20') "valid $($cpuPrivateSecondary.ValidPairs), metric-excluded $($cpuPrivateSecondary.MetricExcludedPairs), invalid $($cpuPrivateSecondary.InvalidPairs), in look $($cpuPrivateSecondary.PairsInLook)"
+    $cpuWorkingSetSecondary = @($summary | Where-Object { $_.Look -eq 'confirmatory' -and $_.Profile -eq 'Cpu' -and $_.Scenario -eq 'S1' -and $_.Metric -eq 'LoadWorkingSetMBAvg' })[0]
+    Assert-True 'working-set secondary metric excludes only the pair with bad samples' ($cpuWorkingSetSecondary.ValidPairs -eq '18' -and $cpuWorkingSetSecondary.MetricExcludedPairs -eq '1' -and $cpuWorkingSetSecondary.InvalidPairs -eq '1' -and $cpuWorkingSetSecondary.PairsInLook -eq '20') "valid $($cpuWorkingSetSecondary.ValidPairs), metric-excluded $($cpuWorkingSetSecondary.MetricExcludedPairs), invalid $($cpuWorkingSetSecondary.InvalidPairs), in look $($cpuWorkingSetSecondary.PairsInLook)"
 
     $noReport = @(Get-Run 'Ram' 'S1' 9 'runtime')
     Assert-True 'launch without JSON report is kept as an invalid run' ($noReport.Count -eq 1 -and $noReport[0].Valid -eq 'False' -and $noReport[0].InvalidReason -like '*JSON report missing*') "$($noReport.Count) rows"
@@ -243,33 +243,17 @@ try {
     $pairs = @(Import-Csv -LiteralPath (Join-Path $output 'pairs.csv') | Where-Object { $_.Profile -eq 'Ram' -and $_.Scenario -eq 'S1' -and $_.Pair -eq '6' })[0]
     Assert-Near 'pairs.csv keeps full precision (no rounding before statistics)' (ConvertTo-Double $pairs.LoadPrivateMBAvg) ((200.123456 + 0.004321) - 200.123456) 1e-9
 
-    # Look 2: extensions with exactly the undecided scenarios (S1 and S3 in both profiles), pairs 11-20.
-    $undecidedScenarios = @('S1', 'S3')
-    $cpuExtension = Join-Path $root 'cpu-ext'; $ramExtension = Join-Path $root 'ram-ext'
-    New-SyntheticResults -Directory $cpuExtension -MonitorProfile 'Cpu' -Interval 1 -Scenarios $undecidedScenarios -FirstPair 11
-    New-SyntheticResults -Directory $ramExtension -MonitorProfile 'Ram' -Interval 0.2 -Scenarios $undecidedScenarios -FirstPair 11
-    $output2 = Join-Path $root 'analysis-look2'
-    & $summarize -ResultsDirectory $cpuDirectory, $ramDirectory -ExtensionDirectory $cpuExtension, $ramExtension -OutputDirectory $output2 | Out-Null
-    $look2 = @(Import-Csv -LiteralPath (Join-Path $output2 'summary.csv') | Where-Object { $_.Look -eq 'look2' -and $_.Role -eq 'primary' })
-    Assert-True 'look 2: decided hypotheses are not tested again' (@($look2 | Where-Object { @('S2', 'S4') -contains $_.Scenario -and $_.Verdict -ne 'decided at look 1' }).Count -eq 0)
-    $cpuS3Look2 = @($look2 | Where-Object { $_.Profile -eq 'Cpu' -and $_.Scenario -eq 'S3' })[0]
-    Assert-True 'look 2: Cpu S3 uses the 10 new pairs' ($cpuS3Look2.ValidPairs -eq '10' -and $cpuS3Look2.PairsInLook -eq '20') "valid $($cpuS3Look2.ValidPairs) of $($cpuS3Look2.PairsInLook)"
-    Assert-Near 'look 2: Holm over the 4 undecided hypotheses' (ConvertTo-Double $cpuS3Look2.PHolm) 1
-
-    function Test-Refused {
-        param([string]$Name, [scriptblock]$Action, [string]$Pattern)
-        $message = ''
-        try { & $Action | Out-Null } catch { $message = $_.Exception.Message }
-        Assert-True $Name ($message -like $Pattern) "message '$message'"
-    }
-    $cpuShort = Join-Path $root 'cpu-ext-missing-scenario'
-    New-SyntheticResults -Directory $cpuShort -MonitorProfile 'Cpu' -Interval 1 -Scenarios @('S1') -FirstPair 11
-    Test-Refused 'look 2 refused when the extension omits an undecided scenario' { & $summarize -ResultsDirectory $cpuDirectory, $ramDirectory -ExtensionDirectory $cpuShort, $ramExtension -OutputDirectory (Join-Path $root 'x1') } '*exactly the scenarios undecided*'
-    $ramGap = Join-Path $root 'ram-ext-missing-pair'
-    New-SyntheticResults -Directory $ramGap -MonitorProfile 'Ram' -Interval 0.2 -Scenarios $undecidedScenarios -FirstPair 11 -SkipPairs @(15)
-    Test-Refused 'look 2 refused when a planned pair 11-20 is missing' { & $summarize -ResultsDirectory $cpuDirectory, $ramDirectory -ExtensionDirectory $cpuExtension, $ramGap -OutputDirectory (Join-Path $root 'x2') } '*planned pair 15*'
-    Test-Refused 'look 2 refused without an extension for a profile with undecided tests' { & $summarize -ResultsDirectory $cpuDirectory, $ramDirectory -ExtensionDirectory $cpuExtension -OutputDirectory (Join-Path $root 'x3') } '*exactly the scenarios undecided*'
-    Test-Refused 'confirmatory with one profile only is refused' { & $summarize -ResultsDirectory $cpuDirectory -OutputDirectory (Join-Path $root 'x4') } '*one Cpu and one Ram*'
+    # There is no adaptive second look: one analysis follows the 20 planned pairs.
+    $short = Join-Path $root 'confirm-short'
+    New-SyntheticResults -Directory $short -MonitorProfile 'Cpu' -Interval 1 -Scenarios @('S1', 'S2', 'S3', 'S4') -FirstPair 1 -Pairs 10
+    Test-Refused 'fixed-N confirmatory refuses only 10 pairs' { & $summarize -ResultsDirectory $short, $ramDirectory -OutputDirectory (Join-Path $root 'x-short') } '*pairs 1..20*'
+    $extensionOnly = Join-Path $root 'confirm-extension-only'
+    New-SyntheticResults -Directory $extensionOnly -MonitorProfile 'Cpu' -Interval 1 -Scenarios @('S1', 'S2', 'S3', 'S4') -FirstPair 11 -Pairs 10
+    Test-Refused 'fixed-N confirmatory refuses an extension starting at pair 11' { & $summarize -ResultsDirectory $extensionOnly, $ramDirectory -OutputDirectory (Join-Path $root 'x-ext') } '*pairs 1..20*'
+    $missingPlanned = Join-Path $root 'confirm-missing-planned'
+    New-SyntheticResults -Directory $missingPlanned -MonitorProfile 'Cpu' -Interval 1 -Pairs 20 -SkipPairs @(15)
+    Test-Refused 'fixed-N confirmatory refuses a schedule missing planned pair 15' { & $summarize -ResultsDirectory $missingPlanned, $ramDirectory -OutputDirectory (Join-Path $root 'x-missing') } '*pairs 1..20 exactly once*'
+    Test-Refused 'confirmatory with one profile only is refused'    Test-Refused 'confirmatory with one profile only is refused' { & $summarize -ResultsDirectory $cpuDirectory -OutputDirectory (Join-Path $root 'x4') } '*one Cpu and one Ram*'
 }
 finally {
     Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
