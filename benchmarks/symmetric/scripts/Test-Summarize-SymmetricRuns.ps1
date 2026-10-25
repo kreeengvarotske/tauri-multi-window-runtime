@@ -110,15 +110,19 @@ try {
             for ($i = 0; $i -lt $times.Count; $i++) {
                 $time = $times[$i]
                 $interval = if ($i -eq 0) { 0.0 } elseif ($scenario -eq 'S2' -and $build -eq 'plain' -and $time -ge 10 -and $time -lt 20) { 1.3 } elseif ($scenario -eq 'S2' -and $build -eq 'plain' -and $time -eq 21) { 1.6 } else { 1.0 }
+                $nonFiniteFixture = $scenario -eq 'S3' -and $build -eq 'plain' -and $time -eq 15
+                $intervalText = if ($nonFiniteFixture) { 'NaN' } else { $interval.ToString('F3', [System.Globalization.CultureInfo]::InvariantCulture) }
+                $privateText = if ($nonFiniteFixture) { 'NaN' } else { '100.000' }
+                $cpuText = if ($nonFiniteFixture) { 'NaN' } else { '0.100' }
                 $samples.Add([pscustomobject][ordered]@{
                     Timestamp = $epoch.AddSeconds($time).ToString('o')
                     RootPid = 123
                     ProcessCount = 1
                     WorkingSetMB = '120.000'
-                    PrivateBytesMB = '100.000'
-                    CpuDeltaSeconds = '0.100'
+                    PrivateBytesMB = $privateText
+                    CpuDeltaSeconds = $cpuText
                     Sample = $i
-                    IntervalSeconds = $interval.ToString('F3', [System.Globalization.CultureInfo]::InvariantCulture)
+                    IntervalSeconds = $intervalText
                     PrivateMissingCount = 0
                     CpuUnreadableCount = 0
                 })
@@ -149,6 +153,12 @@ try {
     Assert-True ($null -ne $missing) 'scheduled run with missing JSON must still appear in runs.csv'
     Assert-True ($missing.Valid -eq 'False') 'run with missing JSON must be invalid'
     Assert-True ($missing.InvalidReason -match 'JSON report missing') 'missing JSON reason must be explicit'
+
+    $nonFinite = @($runs | Where-Object { $_.Scenario -eq 'S3' -and $_.Build -eq 'plain' })[0]
+    Assert-True ($nonFinite.Valid -eq 'False') 'non-finite memory/CPU/interval fields must invalidate the run'
+    Assert-True ($nonFinite.InvalidReason -match 'non-finite private-memory values') 'non-finite private memory must be explicit'
+    Assert-True ($nonFinite.InvalidReason -match 'non-finite CPU values') 'non-finite CPU must be explicit in the Cpu profile'
+    Assert-True ($nonFinite.InvalidReason -match 'non-positive sampling intervals') 'non-finite interval must be explicit'
 
     foreach ($scenario in @('S1', 'S2', 'S3')) {
         $pair = @($pairs | Where-Object { $_.Scenario -eq $scenario })[0]
