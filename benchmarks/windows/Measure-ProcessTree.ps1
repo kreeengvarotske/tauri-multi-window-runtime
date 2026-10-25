@@ -25,6 +25,7 @@ param(
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
+Import-Module -Name (Join-Path $PSScriptRoot 'PrivateUnitValidation.psm1') -Force
 
 function Get-ProcessSnapshot {
     param([bool]$IncludeDiagnostics = $false)
@@ -223,16 +224,8 @@ foreach ($procInfo in @(Get-TreeProcesses -Snapshot $firstSnapshot -StartingPid 
         [void]$unitRatios.Add($ratio)
     }
 }
-$unitRatio = Get-Median -Values $unitRatios.ToArray()
-if ($null -eq $unitRatio) {
-    throw "Could not compare PrivatePageCount with Get-Process PrivateMemorySize64 for any process. The PrivateBytesMB unit is unverified; refusing to start a measurement that could report an unverified metric. Retry with appropriate process access or use -Diagnostics to investigate."
-}
-elseif ($unitRatio -lt 0.9 -or $unitRatio -gt 1.1) {
-    throw ("PrivatePageCount does not look like bytes on this system: its median ratio to Get-Process PrivateMemorySize64 is {0} over {1} processes (1 = bytes). PrivateBytesMB would be wrong. Run with -Diagnostics and report the output." -f (Format-InvariantDecimal -Value $unitRatio -DecimalPlaces 6), $unitRatios.Count)
-}
-else {
-    Write-Host ("PrivatePageCount unit check: median ratio to PrivateMemorySize64 = {0} over {1} processes (bytes)." -f (Format-InvariantDecimal -Value $unitRatio -DecimalPlaces 6), $unitRatios.Count)
-}
+$unitRatio = Get-VerifiedPrivateUnitRatio -Ratios $unitRatios.ToArray()
+Write-Host ("PrivatePageCount unit check: median ratio to PrivateMemorySize64 = {0} over {1} processes (bytes)." -f (Format-InvariantDecimal -Value $unitRatio -DecimalPlaces 6), $unitRatios.Count)
 
 $diagnosticsOutput = $null
 $rootExecutable = [string]$rootRecord.Name
