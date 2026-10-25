@@ -24,6 +24,12 @@ The monitor's own CPU time is recorded for every run as its overhead.
 -Phase Pilot marks exploratory pairs: they are summarized descriptively and
 never pooled with Confirmatory pairs, which are judged by the rule fixed in
 README.md before they run.
+
+The order of all runs is fixed before the first one: schedule.csv lists every
+planned run, and README.md is copied to protocol.md with the SHA256 of both
+scripts in configuration.json. An existing results directory is never reused.
+A confirmatory extension (look 2) goes to its own directory with
+-FirstPair 11, so pair numbers and the alternation continue.
 #>
 [CmdletBinding()]
 param(
@@ -44,6 +50,10 @@ param(
 
     [ValidateRange(1, 50)]
     [int]$Pairs = 5,
+
+    # Number of the first pair; 11 for the confirmatory extension.
+    [ValidateRange(1, 50)]
+    [int]$FirstPair = 1,
 
     [ValidateRange(5, 600)]
     [int]$DurationSeconds = 60,
@@ -67,7 +77,11 @@ param(
     [int]$RoundIntervalMs = 500,
 
     # Reuse plain.exe and runtime.exe already in <OutputDirectory>\bin.
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+
+    # Copy bin\plain.exe and bin\runtime.exe from an earlier results directory instead of building
+    # (the confirmatory extension must use the same executables as look 1).
+    [string]$ExecutablesFrom
 )
 
 Set-StrictMode -Version 2.0
@@ -85,6 +99,15 @@ New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 $OutputDirectory = (Resolve-Path -LiteralPath $OutputDirectory).Path
 $binDirectory = Join-Path $OutputDirectory 'bin'
 $runsDirectory = Join-Path $OutputDirectory 'runs'
+# Never mix or overwrite measurements: a results directory is used once.
+foreach ($existing in @('configuration.json', 'schedule.csv', 'runs.log')) {
+    if (Test-Path -LiteralPath (Join-Path $OutputDirectory $existing)) {
+        throw "$OutputDirectory already has $existing; use a new -OutputDirectory."
+    }
+}
+if ((Test-Path -LiteralPath $runsDirectory) -and @(Get-ChildItem -LiteralPath $runsDirectory).Count -gt 0) {
+    throw "$runsDirectory is not empty; use a new -OutputDirectory."
+}
 New-Item -ItemType Directory -Force -Path $binDirectory, $runsDirectory | Out-Null
 
 function Invoke-Checked {
@@ -126,7 +149,12 @@ $exe = @{
     runtime = Join-Path $binDirectory 'runtime.exe'
 }
 
-if (-not $SkipBuild) {
+if ($ExecutablesFrom) {
+    foreach ($build in @('plain', 'runtime')) {
+        Copy-Item -LiteralPath (Join-Path $ExecutablesFrom "bin\$build.exe") -Destination $exe[$build] -Force
+    }
+}
+elseif (-not $SkipBuild) {
     Push-Location $benchRoot
     try {
         Invoke-Checked 'npm ci' { npm ci }
@@ -175,6 +203,7 @@ $configuration = [ordered]@{
     sampleIntervalSeconds = $sampleIntervalSeconds
     scenarios         = $Scenarios
     pairs             = $Pairs
+    firstPair         = $FirstPair
     durationSeconds   = $DurationSeconds
     idleSeconds       = $IdleSeconds
     pauseSeconds      = $PauseSeconds
@@ -182,74 +211,88 @@ $configuration = [ordered]@{
     bufferMb          = $BufferMb
     requestsPerWindow = $RequestsPerWindow
     roundIntervalMs   = $RoundIntervalMs
-    order             = 'odd pairs plain then runtime, even pairs runtime then plain'
+    order             = 'scenarios in the given order; within a scenario pairs in order; odd pairs plain then runtime, even pairs runtime then plain (schedule.csv)'
+    runScriptSha256   = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash
+    summarizeScriptSha256 = (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'Summarize-SymmetricRuns.ps1') -Algorithm SHA256).Hash
+    protocolSha256    = (Get-FileHash -LiteralPath (Join-Path $benchRoot 'README.md') -Algorithm SHA256).Hash
 }
 $configuration | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'configuration.json') -Encoding UTF8
+Copy-Item -LiteralPath (Join-Path $benchRoot 'README.md') -Destination (Join-Path $OutputDirectory 'protocol.md')
+
+# The full order, written before the first run.
+$schedule = New-Object System.Collections.Generic.List[object]
+foreach ($scenario in $Scenarios) {
+    for ($pair = $FirstPair; $pair -lt $FirstPair + $Pairs; $pair++) {
+        $order = if ($pair % 2 -eq 1) { @('plain', 'runtime') } else { @('runtime', 'plain') }
+        for ($position = 1; $position -le 2; $position++) {
+            $build = $order[$position - 1]
+            $schedule.Add([pscustomobject][ordered]@{
+                    Seq = $schedule.Count + 1; Scenario = $scenario; Pair = $pair; PositionInPair = $position; Build = $build
+                    Name = ('{0}-pair{1:D2}-{2}' -f $scenario, $pair, $build)
+                })
+        }
+    }
+}
+$schedule | Export-Csv -LiteralPath (Join-Path $OutputDirectory 'schedule.csv') -NoTypeInformation -Encoding UTF8
 
 $runLog = Join-Path $OutputDirectory 'runs.log'
 $timeoutSeconds = $DurationSeconds + 2 * $IdleSeconds + 120
 
-foreach ($scenario in $Scenarios) {
-    for ($pair = 1; $pair -le $Pairs; $pair++) {
-        $order = if ($pair % 2 -eq 1) { @('plain', 'runtime') } else { @('runtime', 'plain') }
-        $position = 0
-        foreach ($build in $order) {
-            $position++
-            $name = '{0}-pair{1:D2}-{2}' -f $scenario, $pair, $build
-            $report = Join-Path $runsDirectory "$name.json"
-            $monitorCsv = Join-Path $runsDirectory "$name.monitor.csv"
-            $monitorLog = Join-Path $runsDirectory "$name.monitor.log"
-            if ($PauseSeconds -gt 0) {
-                Write-Host "Pause $PauseSeconds s before $name"
-                Start-Sleep -Seconds $PauseSeconds
-            }
-
-            $arguments = @(
-                '--scenario', $scenario, '--report', "`"$report`"", '--duration', $DurationSeconds,
-                '--idle-before', $IdleSeconds, '--idle-after', $IdleSeconds, '--iterations', $Iterations,
-                '--buffer-mb', $BufferMb, '--requests-per-window', $RequestsPerWindow, '--round-interval-ms', $RoundIntervalMs
-            )
-            $started = Get-Date
-            $app = Start-Process -FilePath $exe[$build] -ArgumentList $arguments -PassThru
-            # Windows PowerShell reports ExitCode only if the handle was opened before exit.
-            $null = $app.Handle
-            $monitorArguments = @(
-                '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$MonitorScript`"", '-RootPid', $app.Id,
-                '-DurationSeconds', ($timeoutSeconds + 30), '-SampleIntervalSeconds', $sampleIntervalSeconds.ToString([System.Globalization.CultureInfo]::InvariantCulture),
-                '-OutputPath', "`"$monitorCsv`"", '-Diagnostics'
-            )
-            $monitor = Start-Process -FilePath 'powershell.exe' -ArgumentList $monitorArguments -PassThru -NoNewWindow -RedirectStandardOutput $monitorLog -RedirectStandardError "$monitorLog.err"
-            $null = $monitor.Handle
-
-            $timedOut = -not $app.WaitForExit($timeoutSeconds * 1000)
-            if ($timedOut) {
-                Write-Warning "$name did not exit within $timeoutSeconds s; stopping it."
-                Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue
-                $app.WaitForExit()
-            }
-            $monitor.WaitForExit()
-            # Observer overhead: CPU time of the monitor process itself.
-            $monitorCpuSeconds = $null
-            try { $monitorCpuSeconds = [Math]::Round($monitor.TotalProcessorTime.TotalSeconds, 3) } catch { }
-            $entry = [ordered]@{
-                name          = $name
-                scenario      = $scenario
-                pair          = $pair
-                positionInPair = $position
-                build         = $build
-                startedAt     = $started.ToString('o')
-                endedAt       = (Get-Date).ToString('o')
-                pid           = $app.Id
-                exitCode      = $app.ExitCode
-                timedOut      = $timedOut
-                monitorExit   = $monitor.ExitCode
-                monitorCpuSeconds = $monitorCpuSeconds
-                reportExists  = Test-Path -LiteralPath $report
-            }
-            ($entry | ConvertTo-Json -Compress) | Add-Content -LiteralPath $runLog -Encoding UTF8
-            Write-Host ("{0}: exit {1}, report {2}" -f $name, $app.ExitCode, $(if ($entry.reportExists) { 'written' } else { 'MISSING' }))
-        }
+foreach ($planned in $schedule) {
+    $scenario = $planned.Scenario; $pair = $planned.Pair; $position = $planned.PositionInPair
+    $build = $planned.Build; $name = $planned.Name
+    $report = Join-Path $runsDirectory "$name.json"
+    $monitorCsv = Join-Path $runsDirectory "$name.monitor.csv"
+    $monitorLog = Join-Path $runsDirectory "$name.monitor.log"
+    if ($PauseSeconds -gt 0) {
+        Write-Host "Pause $PauseSeconds s before $name"
+        Start-Sleep -Seconds $PauseSeconds
     }
+
+    $arguments = @(
+        '--scenario', $scenario, '--report', "`"$report`"", '--duration', $DurationSeconds,
+        '--idle-before', $IdleSeconds, '--idle-after', $IdleSeconds, '--iterations', $Iterations,
+        '--buffer-mb', $BufferMb, '--requests-per-window', $RequestsPerWindow, '--round-interval-ms', $RoundIntervalMs
+    )
+    $started = Get-Date
+    $app = Start-Process -FilePath $exe[$build] -ArgumentList $arguments -PassThru
+    # Windows PowerShell reports ExitCode only if the handle was opened before exit.
+    $null = $app.Handle
+    $monitorArguments = @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$MonitorScript`"", '-RootPid', $app.Id,
+        '-DurationSeconds', ($timeoutSeconds + 30), '-SampleIntervalSeconds', $sampleIntervalSeconds.ToString([System.Globalization.CultureInfo]::InvariantCulture),
+        '-OutputPath', "`"$monitorCsv`"", '-Diagnostics'
+    )
+    $monitor = Start-Process -FilePath 'powershell.exe' -ArgumentList $monitorArguments -PassThru -NoNewWindow -RedirectStandardOutput $monitorLog -RedirectStandardError "$monitorLog.err"
+    $null = $monitor.Handle
+
+    $timedOut = -not $app.WaitForExit($timeoutSeconds * 1000)
+    if ($timedOut) {
+        Write-Warning "$name did not exit within $timeoutSeconds s; stopping it."
+        Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue
+        $app.WaitForExit()
+    }
+    $monitor.WaitForExit()
+    # Observer overhead: CPU time of the monitor process itself.
+    $monitorCpuSeconds = $null
+    try { $monitorCpuSeconds = [Math]::Round($monitor.TotalProcessorTime.TotalSeconds, 3) } catch { }
+    $entry = [ordered]@{
+        name          = $name
+        scenario      = $scenario
+        pair          = $pair
+        positionInPair = $position
+        build         = $build
+        startedAt     = $started.ToString('o')
+        endedAt       = (Get-Date).ToString('o')
+        pid           = $app.Id
+        exitCode      = $app.ExitCode
+        timedOut      = $timedOut
+        monitorExit   = $monitor.ExitCode
+        monitorCpuSeconds = $monitorCpuSeconds
+        reportExists  = Test-Path -LiteralPath $report
+    }
+    ($entry | ConvertTo-Json -Compress) | Add-Content -LiteralPath $runLog -Encoding UTF8
+    Write-Host ("{0}: exit {1}, report {2}" -f $name, $app.ExitCode, $(if ($entry.reportExists) { 'written' } else { 'MISSING' }))
 }
 
 Write-Host "Done. Results: $OutputDirectory"

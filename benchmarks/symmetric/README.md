@@ -43,13 +43,18 @@ npm test
 # Pilot: builds both variants, runs 5 alternating pairs per scenario with the process monitor.
 .\scripts\Run-SymmetricPairs.ps1 -Phase Pilot -MonitorProfile Cpu -MonitorScript C:\path\to\Measure-ProcessTree.ps1 -OutputDirectory C:\results\pilot-cpu
 .\scripts\Summarize-SymmetricRuns.ps1 -ResultsDirectory C:\results\pilot-cpu
+# Confirmatory, only after the rule below is agreed: look 1, then (if needed) the extension and look 2.
+.\scripts\Run-SymmetricPairs.ps1 -Phase Confirmatory -MonitorProfile Cpu -Pairs 10 -MonitorScript C:\path\to\Measure-ProcessTree.ps1 -OutputDirectory C:\results\confirm-cpu
+.\scripts\Summarize-SymmetricRuns.ps1 -ResultsDirectory C:\results\confirm-cpu
+.\scripts\Run-SymmetricPairs.ps1 -Phase Confirmatory -MonitorProfile Cpu -FirstPair 11 -Pairs 10 -Scenarios S1,S3 -ExecutablesFrom C:\results\confirm-cpu -MonitorScript C:\path\to\Measure-ProcessTree.ps1 -OutputDirectory C:\results\confirm-cpu-ext
+.\scripts\Summarize-SymmetricRuns.ps1 -ResultsDirectory C:\results\confirm-cpu -ExtensionDirectory C:\results\confirm-cpu-ext
 ```
 
 One run by hand: `symmetric-bench.exe --scenario S2 --report out.json --duration 60` (`--iterations`, `--buffer-mb`, `--requests-per-window`, `--round-interval-ms`, `--idle-before`, `--idle-after`). Without `--report` the app starts interactively.
 
 `Run-SymmetricPairs.ps1` pauses before every run (`-PauseSeconds`, default 30), starts each run from a fresh process, alternates the order (odd pairs plain first, even pairs runtime first) and keeps every report, monitor CSV, diagnostics CSV and log. It records the git SHA, the OS, WebView2, tool versions and the SHA256 of both executables and of the monitor script in `configuration.json`.
 
-`Summarize-SymmetricRuns.ps1` writes `runs.csv`, `pairs.csv` (runtime − plain per pair), `summary.csv` and `summary.md`, with correctness (counters) and resources in separate tables, and the actual monitor intervals and the monitor's own CPU time per run.
+`Summarize-SymmetricRuns.ps1` writes `runs.csv` (with validity), `pairs.csv` (runtime − plain per pair, with validity), `summary.csv` and `summary.md` into a new `analysis-<time>` directory, with correctness (counters) and resources in separate tables, and the actual monitor intervals and the monitor's own CPU time per run.
 
 ## Monitoring profiles
 
@@ -58,20 +63,41 @@ Each profile goes to its own output directory and is summarized on its own:
 | `-MonitorProfile` | Sampling | Compared | Why |
 |---|---|---|---|
 | `Cpu` (default) | 1 s | memory averages, CPU seconds, latency | the CPU comparison is made only at this one rate |
-| `Ram` | 0.2 s | memory (average and peak), latency | sees more short peaks, but cannot guarantee catching each one; WMI every 0.2 s costs the observer more CPU, so CPU is not compared here. Needs a monitor that accepts fractional intervals (PR #19) |
+| `Ram` | 0.2 s | memory (average and largest sample), latency | sees more short peaks, but cannot guarantee catching each one, so `LoadPrivateMBMaxSample` is the largest sampled value, not the true peak; WMI every 0.2 s costs the observer more CPU, so CPU is not compared here. Needs a monitor that accepts fractional intervals (PR #19) |
 
 The monitor runs as a separate process, so its own CPU is not in the app's sums; it is recorded per run (`MonitorCpuSeconds`) as the observer overhead. The idle phase before the load gives an idle CPU baseline (`IdleBeforeCpuSeconds`).
 
 ## Statistical rule (proposed, to be agreed before confirmatory runs)
 
-- **Pilot:** the first 5 pairs per scenario and profile (`-Phase Pilot`). Summarized descriptively, marked "pilot: no conclusion", never pooled with confirmatory pairs. The pilot is for checking the experiment (counters, overruns, missing values, intervals, run-to-run spread), not for conclusions.
-- **Confirmatory:** 10 new pairs per scenario and profile (`-Phase Confirmatory`), fresh processes, same alternating order, same machine and settings, recorded in `configuration.json`.
-- **Primary metrics** per scenario: `Cpu` profile — `LoadCpuSeconds` and `LoadPrivateMBAvg`; `Ram` profile — `LoadPrivateMBPeak` and `LoadPrivateMBAvg`. Everything else is descriptive.
-- **Test:** two-sided sign-flip permutation test of the paired differences (exact for up to 14 pairs, otherwise 20 000 random flips with a fixed seed), Holm correction over all primary tests of one results directory (2 metrics × 4 scenarios = 8).
-- **Uncertainty:** 95% bootstrap interval of the median paired difference (10 000 resamples, fixed seed).
-- **Decision:** "runtime lower" or "runtime higher" only if the Holm-adjusted p < 0.05, the interval excludes 0 and |median difference| ≥ 2% of the plain median. Otherwise "no detectable difference"; no winner is declared.
-- **Extension:** if a primary metric shows no detectable difference after 10 pairs, at most one extension by another 10 pairs, analyzed together with the first 10 (20 confirmatory pairs); no further extension, no stopping early on a good result.
-- Every pair is published. A failed or incomplete run stays in the data with its reason and is counted in `IncompletePairs`.
+Fixed in `Summarize-SymmetricRuns.ps1` before any confirmatory pair runs; changing it afterwards would need a new, separately agreed series.
+
+- **Estimand:** the median paired difference, runtime − plain, per scenario and metric, over valid pairs. The test, the interval and the effect threshold all refer to this one median; no mean is used.
+- **Pilot:** the first 5 pairs per scenario and profile (`-Phase Pilot`). Summarized descriptively, marked "pilot: no conclusion", never pooled with confirmatory pairs. It checks the experiment (counters, overruns, validity, intervals, spread), not the effect.
+- **Primary metrics** per scenario: `Cpu` profile `LoadCpuSeconds` and `LoadPrivateMBAvg`; `Ram` profile `LoadPrivateMBMaxSample` and `LoadPrivateMBAvg`. Everything else is descriptive. 2 metrics × 4 scenarios = 8 primary tests per profile; the two profiles are separate experiments.
+- **Test:** exact two-sided sign test of "median difference = 0" (zero differences dropped). **Interval:** the distribution-free interval for the median from order statistics, which is the sign test inverted, at level 1 − α of the look, with its exact coverage shown.
+- **Looks (interim analysis accounted for):** α = 0.05 per profile is split in advance between two looks (Bonferroni over looks: 0.025 + 0.025).
+  - Look 1: confirmatory pairs 1–10 (`-Phase Confirmatory`, `-FirstPair 1 -Pairs 10`). Holm over the 8 primary tests at α = 0.025.
+  - A test rejected at look 1 is final. Only the undecided tests continue: pairs 11–20 run once, in a new directory (`-FirstPair 11 -Pairs 10`) with the same executables, monitor and settings, and only for the scenarios with an undecided test.
+  - Look 2: pairs 1–20 together, Holm over the tests still undecided at α = 0.025. What is not rejected is "no detectable difference". There is no third look and no other early stop.
+- **Decision:** a rejected test is "runtime lower" or "runtime higher" when |median difference| ≥ 2% of the plain median, otherwise "difference below 2% of plain". No winner is declared otherwise.
+- **Power, stated in advance:** with 8 tests, look 1 can reject only if all 10 pairs are valid and have the same sign (smallest Holm-adjusted p = 8 × 2/1024 = 0.016; with 9 valid pairs it is 0.031, so nothing can be rejected); look 2 needs at most 3 of 20 pairs with the other sign. Smaller or less consistent effects end as "no detectable difference".
+- **Minimum data:** a test needs at least 8 valid pairs in its look, otherwise "insufficient valid pairs". Invalid pairs are not replaced, so the order and the number of runs stay as planned.
+
+## Run validity
+
+A run is valid only if all of these hold; a pair is valid only if both runs are. Invalid runs and pairs stay in `runs.csv` and `pairs.csv` with `InvalidReason` and are left out of every median, interval and p-value. Every raw report and monitor file is kept.
+
+- the report exists, is `passed` (every round had the expected counters), has no `abort`, and names the expected build and scenario;
+- `runs.log` has the run with exit code 0 and no timeout;
+- the monitor CSV exists, has no load row with missing values, and covers at least 80% of the expected load samples (load duration ÷ nominal interval);
+- the median actual interval is within ±20% of the nominal one, and no load interval is longer than 5 × nominal;
+- both primary metrics could be computed.
+
+The 80%, ±20% and 5× thresholds are checked against the pilot data before they are frozen. Overruns are not a validity criterion: if a build cannot keep up with the offered load, that is part of the result and is reported.
+
+## Run order and protocol
+
+`Run-SymmetricPairs.ps1` writes `schedule.csv` with every planned run before the first one: scenarios in the given order, pairs in order within a scenario, odd pairs plain first and even pairs runtime first. It copies this README to `protocol.md`, records the SHA256 of both scripts and of this README in `configuration.json`, and refuses to reuse a directory that already has results. `Summarize-SymmetricRuns.ps1` lists any run missing from, added to or out of order against the schedule under "Protocol deviations", and writes each analysis to a new `analysis-<time>` directory.
 
 Memory columns: `Private` is the sum of `PrivatePageCount` (bytes, checked by the monitor at startup) over the process tree; `ExePrivateMBLoadAvg` is the app process alone, `WebViewPrivateMBLoadAvg` the rest of the tree. Working set is a sum of working sets, not unique RAM.
 
