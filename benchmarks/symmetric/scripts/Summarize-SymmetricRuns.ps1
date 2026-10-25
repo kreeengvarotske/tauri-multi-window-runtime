@@ -230,6 +230,22 @@ foreach ($source in $sources) {
     else {
         $deviations.Add("$(Split-Path -Leaf $directory): no schedule.csv (run script before the fixed-order change); order taken from runs.log")
     }
+    if ($phase -eq 'Confirmatory') {
+        $expectedNames = New-Object System.Collections.Generic.List[string]
+        foreach ($scenarioName in $familyScenarios) {
+            for ($pairNumber = 1; $pairNumber -le $plannedPairs; $pairNumber++) {
+                foreach ($buildName in @('plain', 'runtime')) { $expectedNames.Add(('{0}-pair{1:D2}-{2}' -f $scenarioName, $pairNumber, $buildName)) }
+            }
+        }
+        $missingFromSchedule = @($expectedNames | Where-Object { $scheduled -notcontains $_ })
+        $extraInSchedule = @($scheduled | Where-Object { $expectedNames -notcontains $_ })
+        if ($missingFromSchedule.Count -gt 0 -or $extraInSchedule.Count -gt 0) {
+            throw "Confirmatory schedule must list every planned run for pairs 1..$plannedPairs exactly once. Missing: $($missingFromSchedule -join ', '); extra: $($extraInSchedule -join ', ')."
+        }
+        if ($scheduled.Count -ne $expectedNames.Count) {
+            throw "Confirmatory schedule has $($scheduled.Count) entries; expected exactly $($expectedNames.Count)."
+        }
+    }
 
     $seen = @{}
     foreach ($reportFile in @(Get-ChildItem -LiteralPath $runsDirectory -Filter '*.json' | Sort-Object Name)) {
@@ -532,7 +548,7 @@ function Invoke-Analysis {
                 $interval = [SymmetricBenchStats]::MedianInterval($diffs, 1 - $Alpha)
                 if ($null -ne $interval) { $row.CiLow = $interval[0]; $row.CiHigh = $interval[1]; $row.CiCoverageMin = $interval[2] }
             }
-            if ($primary -and $TestedKeys -contains $key -and $diffs.Count -ge $minValidPairsPerLook) {
+            if ($primary -and $TestedKeys -contains $key -and $diffs.Count -ge $minValidPairs) {
                 $row.P = [SymmetricBenchStats]::SignTestP($diffs)
             }
             $rows.Add($row)
@@ -551,28 +567,34 @@ function Invoke-Analysis {
         $tested[$k].Row.PHolm = $adjusted
     }
     foreach ($row in $rows) {
-        if ($row.ValidPairs -eq 0) { $row.Verdict = 'no valid data'; continue }
-        if ($row.Role -ne 'primary') { $row.Verdict = 'secondary: descriptive'; continue }
+        if ($row.Role -ne 'primary') {
+            $row.Verdict = $(if ($row.ValidPairs -eq 0) { 'no valid data' } else { 'secondary: descriptive' })
+            continue
+        }
         if ($TestedKeys -notcontains "$($row.Profile)/$($row.Scenario)/$($row.Metric)") { continue }
-        if ($null -eq $row.P) { $row.Verdict = "insufficient valid pairs (< $minValidPairsPerLook)"; continue }
+        if ($row.ValidPairs -lt $minValidPairs -or $null -eq $row.P) {
+            $row.Verdict = "insufficient valid pairs (< $minValidPairs)"
+            continue
+        }
         if ($row.PHolm -lt $Alpha) {
             $row.Decided = $true
             if ([Math]::Abs($row.DiffMedian) -lt $practicalThreshold * [Math]::Abs($row.PlainMedian)) { $row.Verdict = 'difference below 2% of plain' }
             elseif ($row.DiffMedian -lt 0) { $row.Verdict = 'runtime lower' }
             else { $row.Verdict = 'runtime higher' }
         }
+        else { $row.Verdict = 'no detectable difference' }
     }
     return , $rows.ToArray()
 }
 
-# Cells analysed: the declared family (Cpu and Ram x S1-S4) for confirmatory results, whatever
-# data exists; the cells present in the data for a pilot.
+# The confirmatory family is fixed in advance across Cpu/Ram x S1-S4;
+# every confirmatory run is analysed once after pairs 1..20. Failed runs remain
+# invalid in the family and are never replaced by new pairs.
 $cells = if ($phase -eq 'Confirmatory') {
     @(foreach ($profileName in @('Cpu', 'Ram')) { foreach ($scenario in $familyScenarios) { [pscustomobject]@{ Profile = $profileName; Scenario = $scenario } } })
 }
 else { @($pairRows | Select-Object Profile, Scenario -Unique | Sort-Object Profile, Scenario) }
 $allPrimaryKeys = @($cells | ForEach-Object { "$($_.Profile)/$($_.Scenario)/$($primaryByProfile[$_.Profile])" })
-$hasExtension = @($sources | Where-Object { $_.Look -eq 2 }).Count -gt 0
 $looks = New-Object System.Collections.Generic.List[object]
 if ($phase -eq 'Pilot') {
     $rows = Invoke-Analysis -MaxPair ([int]::MaxValue) -Alpha 0.05 -TestedKeys @()
@@ -580,40 +602,8 @@ if ($phase -eq 'Pilot') {
     $looks.Add([pscustomobject]@{ Name = 'pilot'; Rows = $rows })
 }
 else {
-    $look1 = Invoke-Analysis -MaxPair $plannedPairsPerLook -Alpha $lookAlpha -TestedKeys $allPrimaryKeys
-    $undecided = @($look1 | Where-Object { $_.Role -eq 'primary' -and -not $_.Decided } | ForEach-Object { "$($_.Profile)/$($_.Scenario)/$($_.Metric)" })
-    foreach ($row in $look1) {
-        if ($row.Role -eq 'primary' -and -not $row.Decided) {
-            $note = $(if ($hasExtension) { 'undecided, tested again at look 2' } else { 'undecided: extend to 20 pairs' })
-            $row.Verdict = $(if ($row.Verdict) { "$($row.Verdict); $note" } else { $note })
-        }
-    }
-    $looks.Add([pscustomobject]@{ Name = 'look1'; Rows = $look1 })
-    if ($hasExtension) {
-        # Fail closed: every undecided hypothesis needs its own planned pairs 11-20, and the
-        # extension holds exactly the undecided scenarios, so look 1 data is never re-tested as look 2.
-        foreach ($profileName in @('Cpu', 'Ram')) {
-            $required = @($undecided | Where-Object { $_.Split('/')[0] -eq $profileName } | ForEach-Object { $_.Split('/')[1] } | Sort-Object -Unique)
-            $extensionSource = @($sources | Where-Object { $_.Look -eq 2 -and [string]$_.Configuration.profile -eq $profileName })
-            $configured = if ($extensionSource.Count -eq 1) { @($extensionSource[0].Configuration.scenarios | ForEach-Object { [string]$_ } | Sort-Object -Unique) } else { @() }
-            if (($required -join ',') -ne ($configured -join ',')) {
-                throw "Profile ${profileName}: the extension must hold exactly the scenarios undecided at look 1 [$($required -join ', ')], got [$($configured -join ', ')]."
-            }
-            foreach ($scenario in $required) {
-                for ($pairNumber = $plannedPairsPerLook + 1; $pairNumber -le 2 * $plannedPairsPerLook; $pairNumber++) {
-                    $found = @($pairRows | Where-Object { $_.Profile -eq $profileName -and $_.Scenario -eq $scenario -and $_.Pair -eq $pairNumber }).Count
-                    if ($found -ne 1) { throw "Profile $profileName ${scenario}: planned pair $pairNumber appears $found times; look 2 needs each of pairs $($plannedPairsPerLook + 1)..$(2 * $plannedPairsPerLook) once." }
-                }
-            }
-        }
-        $look2 = Invoke-Analysis -MaxPair (2 * $plannedPairsPerLook) -Alpha $lookAlpha -TestedKeys $undecided
-        foreach ($row in $look2) {
-            if ($row.Role -ne 'primary') { continue }
-            if ($undecided -notcontains "$($row.Profile)/$($row.Scenario)/$($row.Metric)") { $row.Verdict = 'decided at look 1'; continue }
-            if (-not $row.Decided -and -not $row.Verdict) { $row.Verdict = 'no detectable difference' }
-        }
-        $looks.Add([pscustomobject]@{ Name = 'look2'; Rows = $look2 })
-    }
+    $rows = Invoke-Analysis -MaxPair $plannedPairs -Alpha $analysisAlpha -TestedKeys $allPrimaryKeys
+    $looks.Add([pscustomobject]@{ Name = 'confirmatory'; Rows = $rows })
 }
 
 $summaryRows = New-Object System.Collections.Generic.List[object]
@@ -636,10 +626,10 @@ $lines = New-Object System.Collections.Generic.List[string]
 $lines.Add(('Phase: {0}. Commit {1}. {2}. Analysis: {3}.' -f $phase, $firstConfiguration.gitHead, $firstConfiguration.os, (Split-Path -Leaf $OutputDirectory)))
 $lines.Add('')
 foreach ($source in $sources) {
-    $lines.Add(('- {0}: profile {1}, nominal monitor interval {2} s, look {3}' -f (Split-Path -Leaf $source.Directory), $source.Configuration.profile, $source.Configuration.sampleIntervalSeconds, $source.Look))
+    $lines.Add(('- {0}: profile {1}, nominal monitor interval {2} s, phase {3}, pairs {4}' -f (Split-Path -Leaf $source.Directory), $source.Configuration.profile, $source.Configuration.sampleIntervalSeconds, $source.Configuration.phase, $source.Configuration.pairs))
 }
 $lines.Add('')
-$lines.Add('Estimand: median paired difference (runtime - plain) over valid pairs. Primary family: LoadCpuSeconds (Cpu profile) and LoadPrivateMBAvg (Ram profile) per scenario, Holm over all of them. MaxSample columns are the largest sampled value, not a guaranteed true peak. CI coverage is a guaranteed minimum (exact only without ties).')
+$lines.Add('Estimand: median paired difference (runtime - plain) over valid pairs. Primary family: LoadCpuSeconds (Cpu profile) and LoadPrivateMBAvg (Ram profile) per scenario, Holm over all 8 hypotheses at alpha 0.05 in one fixed-N analysis. Confirmatory N=20 pairs per scenario/profile; no interim looks or data-dependent extension. MaxSample columns are the largest sampled value, not a guaranteed true peak. CI coverage is a guaranteed minimum (exact only without ties).')
 $lines.Add('')
 if ($deviations.Count -gt 0) {
     $lines.Add('## Protocol deviations')
