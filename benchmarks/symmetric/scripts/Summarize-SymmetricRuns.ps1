@@ -264,8 +264,11 @@ foreach ($source in $sources) {
             Rounds = $null; PassedRounds = $null; Overruns = $null
             RequestsReceived = $null; OperationsExecuted = $null; CoalescedRequests = $null; CacheHits = $null; FailedRequests = $null
             RequestsPerSecond = $null; RoundMsP50 = $null; RoundMsP95 = $null
-            MonitorRows = 0; LoadRows = 0; LoadRowsExpected = $null; LoadRowsWithMissingValues = $null; LoadProcessCountMax = $null
-            IntervalMedianSeconds = $null; IntervalMaxSeconds = $null; LoadIntervalMaxSeconds = $null
+            MonitorRows = 0; LoadRows = 0; LoadRowsExpected = $null; LoadRowsWithMissingValues = $null
+            LoadRowsWithMissingPrivateValues = $null; LoadRowsWithUnreadableCpu = $null; LoadRowsWithMissingWorkingSetValues = $null
+            LoadRowsWithInvalidInterval = $null; LoadProcessCountMax = $null
+            IntervalMedianSeconds = $null; IntervalMaxSeconds = $null; LoadIntervalMedianSeconds = $null; LoadIntervalMaxSeconds = $null
+            PrivateMetricsValid = $false; CpuMetricsValid = $false; WorkingSetMetricsValid = $false; DiagnosticsPrivateMetricsValid = $false
             MonitorCpuSeconds = $(if ($null -ne $log -and $log.PSObject.Properties['monitorCpuSeconds']) { $log.monitorCpuSeconds } else { $null })
         }
         foreach ($metric in $resourceMetrics) { $row[$metric] = $null }
@@ -328,7 +331,9 @@ foreach ($source in $sources) {
                         CpuDelta   = ConvertTo-Number $_.CpuDeltaSeconds
                         Sample     = [int]$_.Sample
                         Interval   = ConvertTo-Number $_.IntervalSeconds
-                        Missing    = [int](ConvertTo-Number $_.PrivateMissingCount) + [int](ConvertTo-Number $_.CpuUnreadableCount)
+                        PrivateMissing = ConvertTo-Number $_.PrivateMissingCount
+                        CpuUnreadable  = ConvertTo-Number $_.CpuUnreadableCount
+                        Missing    = [int]$(if ($null -eq (ConvertTo-Number $_.PrivateMissingCount)) { 1 } else { ConvertTo-Number $_.PrivateMissingCount }) + [int]$(if ($null -eq (ConvertTo-Number $_.CpuUnreadableCount)) { 1 } else { ConvertTo-Number $_.CpuUnreadableCount })
                     }
                 })
             $row.MonitorRows = $samples.Count
@@ -343,7 +348,16 @@ foreach ($source in $sources) {
             $idleAfter = Select-Phase $samples $loadTo (Get-Time $report.phases.endedAt)
             $row.LoadRows = $load.Count
             $row.LoadRowsExpected = [Math]::Floor(($loadTo - $loadFrom).TotalSeconds / $nominalInterval)
-            $row.LoadIntervalMaxSeconds = Get-Max @($load | Where-Object { $_.Sample -gt 0 -and $null -ne $_.Interval } | ForEach-Object { $_.Interval })
+            $validLoadIntervals = @($load | Where-Object { $_.Sample -gt 0 -and $null -ne $_.Interval -and $_.Interval -gt 0 } | ForEach-Object { $_.Interval })
+            $row.LoadIntervalMedianSeconds = Get-Median $validLoadIntervals
+            $row.LoadIntervalMaxSeconds = Get-Max $validLoadIntervals
+            $row.LoadRowsWithInvalidInterval = @($load | Where-Object { $_.Sample -gt 0 -and ($null -eq $_.Interval -or $_.Interval -le 0) }).Count
+            $row.LoadRowsWithMissingPrivateValues = @($load | Where-Object { $null -eq $_.PrivateMissing -or $_.PrivateMissing -gt 0 -or $null -eq $_.Private }).Count
+            $row.LoadRowsWithUnreadableCpu = @($load | Where-Object { $null -eq $_.CpuUnreadable -or $_.CpuUnreadable -gt 0 -or $null -eq $_.CpuDelta }).Count
+            $row.LoadRowsWithMissingWorkingSetValues = @($load | Where-Object { $null -eq $_.WorkingSet }).Count
+            $row.PrivateMetricsValid = $load.Count -gt 0 -and $row.LoadRowsWithMissingPrivateValues -eq 0
+            $row.CpuMetricsValid = $load.Count -gt 0 -and $row.LoadRowsWithUnreadableCpu -eq 0
+            $row.WorkingSetMetricsValid = $load.Count -gt 0 -and $row.LoadRowsWithMissingWorkingSetValues -eq 0
             $row.IdleBeforePrivateMB = Get-Average @($idleBefore | ForEach-Object { $_.Private })
             $row.LoadPrivateMBAvg = Get-Average @($load | ForEach-Object { $_.Private })
             $row.LoadPrivateMBMaxSample = Get-Max @($load | ForEach-Object { $_.Private })
@@ -358,13 +372,15 @@ foreach ($source in $sources) {
             $row.LoadProcessCountMax = Get-Max @($load | ForEach-Object { [double]$_.Processes })
 
             if ($row.LoadRowsExpected -gt 0 -and $row.LoadRows -lt $minLoadCoverage * $row.LoadRowsExpected) { $reasons.Add("load rows $($row.LoadRows) < $([int]($minLoadCoverage * 100))% of $($row.LoadRowsExpected)") }
-            if ($row.LoadRowsWithMissingValues -gt 0) { $reasons.Add("$($row.LoadRowsWithMissingValues) load rows with missing values") }
-            if ($null -eq $row.IntervalMedianSeconds -or [Math]::Abs($row.IntervalMedianSeconds - $nominalInterval) -gt $maxIntervalDeviation * $nominalInterval) {
-                $reasons.Add("interval median $(Format-Number $row.IntervalMedianSeconds 3) s not within $([int]($maxIntervalDeviation * 100))% of $nominalInterval s")
+            if ($row.LoadRowsWithInvalidInterval -gt 0) { $reasons.Add("$($row.LoadRowsWithInvalidInterval) load rows have missing, non-finite, or non-positive sampling intervals") }
+            if ($null -eq $row.LoadIntervalMedianSeconds -or [Math]::Abs($row.LoadIntervalMedianSeconds - $nominalInterval) -gt $maxIntervalDeviation * $nominalInterval) {
+                $reasons.Add("load interval median $(Format-Number $row.LoadIntervalMedianSeconds 3) s not within $([int]($maxIntervalDeviation * 100))% of nominal $nominalInterval s")
             }
             if ($null -ne $row.LoadIntervalMaxSeconds -and $row.LoadIntervalMaxSeconds -gt $maxIntervalFactor * $nominalInterval) {
                 $reasons.Add("load gap $(Format-Number $row.LoadIntervalMaxSeconds 3) s > $maxIntervalFactor x $nominalInterval s")
             }
+            if ($monitorProfile -eq 'Cpu' -and -not $row.CpuMetricsValid) { $reasons.Add("$($row.LoadRowsWithUnreadableCpu) load rows have missing/non-finite CPU values") }
+            if ($monitorProfile -eq 'Ram' -and -not $row.PrivateMetricsValid) { $reasons.Add("$($row.LoadRowsWithMissingPrivateValues) load rows have missing/non-finite private-memory values") }
 
             $diagnosticsFile = Join-Path $runsDirectory "$base.monitor.diagnostics.csv"
             if ((Test-Path -LiteralPath $diagnosticsFile) -and $samples.Count -gt 0) {
