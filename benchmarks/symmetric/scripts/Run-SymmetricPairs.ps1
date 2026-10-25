@@ -53,7 +53,7 @@ param(
     [ValidateRange(1, 50)]
     [int]$Pairs = 5,
 
-    # Number of the first pair; 11 for the confirmatory extension.
+    # Fixed protocol always starts from pair 1; Confirmatory requires 20 pairs and Pilot requires 5.
     [ValidateRange(1, 50)]
     [int]$FirstPair = 1,
 
