@@ -257,6 +257,8 @@ $previousSampleTime = $watch.Elapsed.TotalSeconds
 $previousCpuByPid = @{}
 $firstRow = $true
 $sampleNumber = 0
+$rowsWithMissingPrivate = 0
+$rowsWithUnreadableCpu = 0
 
 while ($watch.Elapsed.TotalSeconds -lt $DurationSeconds) {
     $sampleStartedAt = $watch.Elapsed.TotalSeconds
@@ -274,6 +276,8 @@ while ($watch.Elapsed.TotalSeconds -lt $DurationSeconds) {
 
     [long]$workingSetBytes = 0
     [long]$privateBytes = 0
+    $privateMissingCount = 0
+    $cpuUnreadableCount = 0
     $treeDescriptions = New-Object System.Collections.Generic.List[string]
     $diagnosticRows = New-Object System.Collections.Generic.List[object]
     $sampleTimestamp = (Get-Date).ToString('o')
@@ -283,6 +287,9 @@ while ($watch.Elapsed.TotalSeconds -lt $DurationSeconds) {
         $workingSetBytes += [long]$procInfo.WorkingSetSize
         if ($null -ne $procInfo.PrivatePageCount) {
             $privateBytes += [long]$procInfo.PrivatePageCount
+        }
+        else {
+            $privateMissingCount++
         }
         [void]$treeDescriptions.Add("$procId`:$($procInfo.Name)")
 
@@ -294,6 +301,10 @@ while ($watch.Elapsed.TotalSeconds -lt $DurationSeconds) {
                 [void]$diagnosticRatios.Add($ratio)
             }
             [void]$diagnosticRows.Add((New-DiagnosticRow -Timestamp $sampleTimestamp -Sample $sampleNumber -ProcessInfo $procInfo -Process $process -InTree $true -Ratio $ratio))
+        }
+        if ($null -eq $cpuNow) {
+            # Exited since the snapshot, or not readable by this user.
+            $cpuUnreadableCount++
         }
         if ($null -ne $cpuNow) {
             $currentCpuByPid[$procId] = [double]$cpuNow
@@ -357,7 +368,13 @@ while ($watch.Elapsed.TotalSeconds -lt $DurationSeconds) {
         CpuPercentAllCores = if ($null -ne $cpuPercent) { Format-InvariantDecimal -Value $cpuPercent -DecimalPlaces 2 } else { $null }
         CpuDeltaSeconds    = if ($sampleNumber -gt 0) { Format-InvariantDecimal -Value ([Math]::Round($cpuDeltaSeconds, 4)) -DecimalPlaces 4 } else { $null }
         LogicalCpuCount    = $logicalCpuCount
+        # Processes left out of PrivateBytesMB / CpuDeltaSeconds in this row
+        # because the value could not be read. Non-zero means the sum is low.
+        PrivateMissingCount = $privateMissingCount
+        CpuUnreadableCount  = $cpuUnreadableCount
     }
+    if ($privateMissingCount -gt 0) { $rowsWithMissingPrivate++ }
+    if ($cpuUnreadableCount -gt 0) { $rowsWithUnreadableCpu++ }
 
     if ($firstRow) {
         $row | Export-Csv -LiteralPath $resolvedOutput -NoTypeInformation -Encoding UTF8
@@ -389,6 +406,12 @@ $watch.Stop()
 Write-Progress -Activity 'Measuring process resources' -Completed
 Write-Host "Done. Rows written: $sampleNumber"
 Write-Host "Output file: $resolvedOutput"
+if ($rowsWithMissingPrivate -gt 0 -or $rowsWithUnreadableCpu -gt 0) {
+    Write-Warning ("{0} row(s) left out a process from PrivateBytesMB and {1} row(s) from CpuDeltaSeconds because its value could not be read; those sums are low. See PrivateMissingCount and CpuUnreadableCount." -f $rowsWithMissingPrivate, $rowsWithUnreadableCpu)
+}
+else {
+    Write-Host "Every process in every row had readable PrivatePageCount and CPU time."
+}
 if ($Diagnostics) {
     $medianRatio = Get-Median -Values $diagnosticRatios.ToArray()
     Write-Host ("Diagnostics: median PrivatePageCount/PrivateMemorySize64 = {0} over {1} process samples." -f $(if ($null -eq $medianRatio) { 'n/a' } else { Format-InvariantDecimal -Value $medianRatio -DecimalPlaces 6 }), $diagnosticRatios.Count)
