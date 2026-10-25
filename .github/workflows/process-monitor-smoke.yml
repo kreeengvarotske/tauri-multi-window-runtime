@@ -23,6 +23,10 @@ jobs:
       - name: Check out source
         uses: actions/checkout@v4
 
+      - name: Test private-memory unit validation fail-closed
+        shell: powershell
+        run: .\benchmarks\windows\Test-PrivateUnitValidation.ps1
+
       - name: Run monitor with fractional sample interval
         shell: powershell
         run: |
