@@ -19,3 +19,13 @@ tauri-build = "=2.7.4"
 serde = { version = "=1.0.229", features = ["derive"] }
 tauri = "=2.12.5"
 tokio = { version = "=1.54.1", features = ["time"] }
+
+# Same release profile as the Runtime Lab workspace root (`Cargo.toml`), so
+# the two executables are built with identical optimisation settings. This
+# crate has its own `[workspace]`, so the root profile does not apply here.
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true

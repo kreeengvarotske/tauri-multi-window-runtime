@@ -81,39 +81,78 @@ interface BatchResult {
 
 interface PairedLoadResponse extends PairedLoadRequest, BatchResult {}
 
+// Tauri events are not buffered: one sent before the other window has
+// registered its listener is lost. So main re-sends each round's request until
+// secondary confirms that exact (runId, round); secondary runs a round once
+// however often the request arrives, and main accepts only its own
+// confirmation and response.
 const requestEvent = "baseline://paired-load-request";
+const ackEvent = "baseline://paired-load-ack";
 const responseEvent = "baseline://paired-load-response";
-const readyEvent = "baseline://paired-load-ready";
+const confirmTimeoutMs = 5_000;
+const resendIntervalMs = 100;
+const rememberedRounds = 64;
+// After "Open secondary window", Tauri finds the new window only some time
+// later (~100-150 ms on Windows 10). Until then a missing window is not yet
+// a closed one.
+const openingGraceMs = 5_000;
+const windowPollIntervalMs = 50;
+let secondaryOpeningUntil = 0;
 
-let secondaryReady = false;
-const readyWaiters = new Set<() => void>();
+/**
+ * Marks the secondary window as being created, so a paired load started right
+ * away waits for it. Returns a function to call if creating it failed.
+ */
+export function noteSecondaryOpening(): () => void {
+  const until = Date.now() + openingGraceMs;
+  secondaryOpeningUntil = until;
+  return () => {
+    if (secondaryOpeningUntil === until) secondaryOpeningUntil = 0;
+  };
+}
+
+function secondaryIsOpening(): boolean {
+  return Date.now() < secondaryOpeningUntil;
+}
+
+async function findSecondary(): Promise<WebviewWindow | null> {
+  for (;;) {
+    const secondary = await WebviewWindow.getByLabel("secondary");
+    if (secondary || !secondaryIsOpening()) return secondary;
+    await delay(windowPollIntervalMs);
+  }
+}
+
+interface PairedLoadAck {
+  runId: string;
+  round: number;
+}
 
 /** Installs the event bridge used only by the manual, paired-window benchmark. */
 export function installPairedLoadBridge(windowLabel: string, tauri: boolean): void {
-  if (!tauri) return;
+  if (!tauri || windowLabel !== "secondary") return;
 
-  if (windowLabel === "main") {
-    void listen(readyEvent, () => {
-      secondaryReady = true;
-      for (const resolve of readyWaiters) resolve();
-      readyWaiters.clear();
-    }).catch((error: unknown) => {
-      console.error("Could not listen for the secondary benchmark window:", error);
-    });
-    return;
-  }
-
-  if (windowLabel !== "secondary") return;
-
-  void listen<PairedLoadRequest>(requestEvent, async (event) => {
+  const accepted: string[] = [];
+  void listen<PairedLoadRequest>(requestEvent, (event) => {
     const request = event.payload;
-    const result = await runIndependentBatch(request.projectId, request.size);
-    const response: PairedLoadResponse = { ...request, ...result };
-    await emitTo("main", responseEvent, response);
-  }).then(() => emitTo("main", readyEvent, { windowLabel: "secondary" }))
-    .catch((error: unknown) => {
-      console.error("Could not install the secondary benchmark listener:", error);
-    });
+    if (typeof request?.runId !== "string" || !Number.isInteger(request.round)) return;
+    const ack: PairedLoadAck = { runId: request.runId, round: request.round };
+    const key = request.runId + ":" + request.round;
+    if (!accepted.includes(key)) {
+      accepted.push(key);
+      if (accepted.length > rememberedRounds) accepted.shift();
+      void runIndependentBatch(request.projectId, request.size)
+        .then((result) => emitTo("main", responseEvent, { ...request, ...result } satisfies PairedLoadResponse))
+        .catch((error: unknown) => {
+          console.error("Could not report a secondary benchmark round:", error);
+        });
+    }
+    // Confirm every delivery, so main stops re-sending even if an earlier
+    // confirmation was lost.
+    void emitTo("main", ackEvent, ack).catch(() => {});
+  }).catch((error: unknown) => {
+    console.error("Could not install the secondary benchmark listener:", error);
+  });
 }
 
 /** Runs the same number of independent metadata invocations as the runtime variant. */
@@ -137,11 +176,10 @@ export async function runTimedPairedLoad(options?: {
     throw new Error("Project ID must contain between 1 and 128 characters.");
   }
 
-  const secondary = await WebviewWindow.getByLabel("secondary");
+  const secondary = await findSecondary();
   if (!secondary) {
     throw new Error("Open the secondary window before starting the paired load.");
   }
-  await waitForSecondaryReady();
 
   const startedAt = new Date().toISOString();
   const runId = createRunId();
@@ -162,7 +200,7 @@ export async function runTimedPairedLoad(options?: {
     const secondaryResult = await prepareSecondaryResultWaiter(runId, round);
 
     try {
-      await emitTo("secondary", requestEvent, request);
+      await requestRoundInSecondary(request);
       const [main, secondaryBatch] = await Promise.all([
         runIndependentBatch(projectId, requestsPerWindow),
         secondaryResult.promise,
@@ -277,22 +315,40 @@ async function runIndependentBatch(projectId: string, size: number): Promise<Bat
   };
 }
 
-async function waitForSecondaryReady(timeoutMs = 15_000): Promise<void> {
-  if (secondaryReady) return;
-
-  await new Promise<void>((resolve, reject) => {
-    let timer = 0;
-    const onReady = () => {
-      window.clearTimeout(timer);
-      readyWaiters.delete(onReady);
-      resolve();
-    };
-    timer = window.setTimeout(() => {
-      readyWaiters.delete(onReady);
-      reject(new Error("The secondary window did not register its benchmark listener within 15 seconds."));
-    }, timeoutMs);
-    readyWaiters.add(onReady);
+/** Resolves once secondary confirmed this round; it then runs the round exactly once. */
+async function requestRoundInSecondary(request: PairedLoadRequest): Promise<void> {
+  let confirmed = false;
+  let confirm!: () => void;
+  const confirmation = new Promise<void>((resolve) => (confirm = resolve));
+  // Listen before the first send, so a fast confirmation cannot be missed.
+  const unlisten = await listen<PairedLoadAck>(ackEvent, (event) => {
+    if (event.payload?.runId === request.runId && event.payload.round === request.round) {
+      confirmed = true;
+      confirm();
+    }
   });
+  try {
+    const deadline = Date.now() + confirmTimeoutMs;
+    while (!confirmed) {
+      if (Date.now() >= deadline) {
+        throw new Error(
+          "The secondary window did not confirm benchmark round " + request.round + " within " +
+            confirmTimeoutMs + " ms. The round was not started there; wait for the window to load and retry.",
+        );
+      }
+      await emitTo("secondary", requestEvent, request);
+      await Promise.race([confirmation, delay(Math.min(resendIntervalMs, Math.max(0, deadline - Date.now())))]);
+      if (!confirmed && !secondaryIsOpening() && !(await WebviewWindow.getByLabel("secondary"))) {
+        throw new Error("The secondary window was closed before it confirmed benchmark round " + request.round + ".");
+      }
+    }
+  } finally {
+    unlisten();
+  }
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 }
 
 async function prepareSecondaryResultWaiter(

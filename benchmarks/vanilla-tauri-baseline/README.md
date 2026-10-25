@@ -17,7 +17,7 @@ The demo project IDs are `project-42`, `demo`, `alpha`, and `beta`. The ID `flak
 - Rust stable toolchain and the Windows build prerequisites for Tauri v2
 - npm
 
-The npm dependency versions are pinned by the committed `package-lock.json`. Direct Rust dependencies are pinned in `src-tauri/Cargo.toml`; first build generates a Cargo lockfile, which should be kept with experiment results for exact transitive dependency versions.
+The npm dependency versions are pinned by the committed `package-lock.json`. Direct Rust dependencies are pinned in `src-tauri/Cargo.toml`, and transitive versions by the committed `src-tauri/Cargo.lock`. That lockfile was seeded from the Runtime Lab root `Cargo.lock`, so both apps build with the same versions of every shared crate (the only difference is `tokio-macros`, which only Runtime Lab uses). Build with `--locked` so a build fails instead of silently changing them. `src-tauri/Cargo.toml` uses the same `[profile.release]` as the Runtime Lab workspace root.
 
 ## Install and run in development
 
@@ -31,14 +31,14 @@ npm.cmd run tauri dev
 
 The Vite dev server uses port 1430 to avoid colliding with Runtime Lab's port 1420. Open the secondary window with the button in the main window.
 
-The source icon is `src-tauri/icons/vanilla-baseline.svg`. The npm `dev` and `build` scripts generate Tauri's platform-specific icons (including the Windows `icon.ico`) into `src-tauri/icons` before starting Vite or building the frontend. This avoids depending on generated binary assets being present in a fresh checkout.
+The source icon is `src-tauri/icons/vanilla-baseline.svg`. The npm `dev` and `build` scripts generate Tauri's platform-specific icons (including the Windows `icon.ico`) into `src-tauri/icons` before starting Vite or building the frontend. This avoids depending on generated binary assets being present in a fresh checkout. Running `cargo test` or `cargo clippy` directly in `src-tauri` on a fresh checkout needs those icons too (`tauri-build` requires `icons/icon.ico`), so run `npm run icons:generate` first; CI does this through `npm run build`.
 
 ## Build a release executable
 
 ```powershell
 cd .\benchmarks\vanilla-tauri-baseline
 npm ci
-npm.cmd run tauri build
+npm.cmd run tauri -- build -- --locked
 ```
 
 Bundling is disabled in this benchmark app so the executable can be measured without creating an installer. The exact output path should be taken from the build log; it is normally under the nested Rust target directory.
@@ -46,6 +46,8 @@ Bundling is disabled in this benchmark app so the executable can be measured wit
 ## Automated 60-second paired load
 
 Build and launch the Release executable, then open the secondary window from the main window. The main window now has a **Run paired load (60 seconds)** button. It starts 50 independent metadata requests in each window per round and repeats paired rounds until at least 60 seconds have elapsed and the final round completes. It downloads a JSON report containing request outcomes and Rust Core counter deltas.
+
+Each round's request carries the run id and round number. `main` re-sends it every 100 ms until `secondary` confirms that exact round (`baseline://paired-load-ack`), for at most 5 seconds; otherwise the run stops with an error saying the round was not started. `secondary` runs a round once however often the request arrives. Tauri events are not buffered, so a request sent while the secondary page is still loading would otherwise be lost.
 
 For a resource sample, start the root process monitor from the repository root before clicking the button:
 
