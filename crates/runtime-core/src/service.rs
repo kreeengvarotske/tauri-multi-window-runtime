@@ -1445,3 +1445,198 @@ mod concurrency {
         assert_eq!((svc.in_flight_tasks(), svc.in_flight_keys()), (0, 0));
     }
 }
+
+#[cfg(test)]
+mod completed_operation {
+    use super::{CachedService, ServiceRunKind, probe};
+    use crate::{cache_policy::CachePolicy, coalescer_probe};
+    use std::{
+        cell::Cell,
+        future::Future,
+        pin::Pin,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+        task::{Context, Poll, Waker},
+        time::Duration,
+    };
+    use tokio::sync::Notify;
+
+    fn poll_once<F: Future>(f: Pin<&mut F>) -> Poll<F::Output> {
+        f.poll(&mut Context::from_waker(Waker::noop()))
+    }
+
+    /// A finishes while the joined waiter W is registered but not polled again.
+    async fn finished_with_lingering_waiter(policy: CachePolicy, fail: bool) {
+        let svc = CachedService::<u8, u64, String>::new(policy);
+        let gate = Arc::new(Notify::new());
+        let g = gate.clone();
+        let mut a = Box::pin(svc.run_with_metadata(1, move || async move {
+            g.notified().await;
+            if fail { Err("boom".to_owned()) } else { Ok(1) }
+        }));
+        assert!(poll_once(a.as_mut()).is_pending());
+        let mut w = Box::pin(svc.run_with_metadata(1, || async { Ok(2) }));
+        assert!(poll_once(w.as_mut()).is_pending());
+        assert_eq!(svc.in_flight_callers(), 2);
+        gate.notify_one();
+        let a = a.await;
+        assert_eq!(a.kind, ServiceRunKind::Executed);
+        assert_eq!(a.result.is_err(), fail);
+
+        let executions = AtomicUsize::new(0);
+        let n = svc
+            .run_with_metadata(1, || async {
+                executions.fetch_add(1, Ordering::SeqCst);
+                Ok(3)
+            })
+            .await;
+        assert_eq!(
+            n.kind,
+            ServiceRunKind::Executed,
+            "new request reused the finished operation ({policy:?}, fail={fail})"
+        );
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+        assert_eq!(*n.result.unwrap(), 3);
+
+        // the waiter that joined before completion still gets the result of its operation
+        let w = w.await;
+        assert_eq!(w.kind, ServiceRunKind::Coalesced);
+        match w.result {
+            Ok(v) => {
+                assert!(!fail);
+                assert_eq!(*v, 1)
+            }
+            Err(e) => {
+                assert!(fail);
+                assert_eq!(e.as_str(), "boom")
+            }
+        }
+        assert_eq!((svc.in_flight_tasks(), svc.in_flight_keys()), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn t7_finished_error_not_reused_by_new_request() {
+        finished_with_lingering_waiter(CachePolicy::Forever, true).await;
+    }
+
+    #[tokio::test]
+    async fn t8_no_store_not_reused() {
+        finished_with_lingering_waiter(CachePolicy::NoStore, false).await;
+    }
+
+    #[tokio::test]
+    async fn t8_expired_ttl_not_reused() {
+        finished_with_lingering_waiter(CachePolicy::Ttl(Duration::ZERO), false).await;
+    }
+
+    #[derive(Debug, Clone)]
+    struct Rec {
+        id: u64,
+        join: u64,
+        done: u64,
+        kind: ServiceRunKind,
+        exec: u64,
+    }
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn t10b_no_join_after_completion() {
+        let seed: u64 = std::env::var("STRESS_SEED")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0xABCDEF);
+        let iters: usize = std::env::var("STRESS_ITERS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(300);
+        let svc = Arc::new(CachedService::<u8, (u8, u64), (u8, u64)>::new(
+            CachePolicy::NoStore,
+        ));
+        let ids = Arc::new(std::sync::atomic::AtomicU64::new(1));
+        let recs = Arc::new(Mutex::new(Vec::<Rec>::new()));
+        let mut hs = Vec::new();
+        for w in 0..16u64 {
+            let (svc, ids, recs) = (svc.clone(), ids.clone(), recs.clone());
+            hs.push(tokio::spawn(async move {
+                let mut rng = Rng(seed ^ (w + 1).wrapping_mul(0x2545_F491_4F6C_DD1D));
+                for _ in 0..iters {
+                    let key = (rng.next() % 2) as u8;
+                    let id = ids.fetch_add(1, Ordering::SeqCst);
+                    let yields = rng.next() % 4;
+                    let fail = (rng.next() & 1) == 0;
+                    let (out, join, done) = coalescer_probe::JOIN
+                        .scope(
+                            Cell::new(0),
+                            coalescer_probe::DONE.scope(Cell::new(0), async {
+                                let out = svc
+                                    .run_with_metadata(key, move || async move {
+                                        for _ in 0..yields {
+                                            tokio::task::yield_now().await;
+                                        }
+                                        if fail { Err((key, id)) } else { Ok((key, id)) }
+                                    })
+                                    .await;
+                                (
+                                    out,
+                                    coalescer_probe::JOIN.with(Cell::get),
+                                    coalescer_probe::DONE.with(Cell::get),
+                                )
+                            }),
+                        )
+                        .await;
+                    let (k, exec) = match &out.result {
+                        Ok(v) => **v,
+                        Err(e) => **e,
+                    };
+                    assert_eq!(k, key, "cross-key result");
+                    recs.lock().unwrap().push(Rec {
+                        id,
+                        join,
+                        done,
+                        kind: out.kind,
+                        exec,
+                    });
+                }
+            }));
+        }
+        for h in hs {
+            h.await.unwrap();
+        }
+        let recs = recs.lock().unwrap();
+        let by_id: std::collections::HashMap<u64, &Rec> = recs.iter().map(|r| (r.id, r)).collect();
+        let mut violations = 0usize;
+        for r in recs.iter() {
+            assert_ne!(r.join, 0, "join tick missing");
+            let e = by_id[&r.exec];
+            assert_eq!(e.kind, ServiceRunKind::Executed);
+            assert_ne!(e.done, 0, "completion tick missing for executor");
+            if r.id != e.id && r.join > e.done {
+                violations += 1;
+                if violations <= 3 {
+                    println!("JOINED AFTER COMPLETION: req={r:?} executor={e:?}");
+                }
+            }
+        }
+        let executed = recs
+            .iter()
+            .filter(|r| r.kind == ServiceRunKind::Executed)
+            .count();
+        println!(
+            "T10b seed={seed} iters={iters} requests={} executed={executed} violations={violations}",
+            recs.len()
+        );
+        assert_eq!(violations, 0);
+        assert_eq!((svc.in_flight_tasks(), svc.in_flight_keys()), (0, 0));
+        let _ = probe::now();
+    }
+}
