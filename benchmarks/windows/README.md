@@ -9,7 +9,7 @@ This directory contains a PowerShell script for sampling a Windows application's
 - `WorkingSetMB` — the **sum of the working sets** (`Win32_Process.WorkingSetSize`) of the included processes. Pages shared between processes (DLLs, shared memory, WebView2 shared sections) are counted once per process that has them resident, so this is not the amount of unique physical RAM the application uses. Use it as a footprint of the listed PIDs, always together with `ProcessTree`.
 - `PrivateBytesMB` — sum of `Win32_Process.PrivatePageCount` of the included processes, divided by 2^20. Despite its name, `PrivatePageCount` is in **bytes**: on Windows 10 22H2 (build 19045) with Windows PowerShell 5.1 it equalled `Get-Process` `PrivateMemorySize64` and `PageFileUsage × 1024` for all 9 sampled processes (median ratio 1.000000 idle and under load; the "pages" hypothesis gives 4096). The raw comparison is published in issue #13. Private bytes are committed memory that no other process shares, including pages that are not currently resident, so they are not a subset of the working set. The script re-checks the unit at startup (see below).
 - `CpuPercentAllCores` — `CpuDeltaSeconds` divided by the elapsed time and by the number of logical CPUs, as a percentage (0–100%, clamped). On a 16-logical-CPU system one fully busy core is 6.25%. The first sample is blank because a previous sample is needed to calculate a delta.
-- `CpuDeltaSeconds` — sum over the included processes of the increase in `Get-Process` `TotalProcessorTime` (user + kernel) since the previous sample. Only processes present in both samples contribute, so CPU used by a process that started or exited between two samples is not counted for that interval. It is empty, like `CpuPercentAllCores`, when no process of the row had a readable CPU time in both samples, so an unknown value never looks like a real 0. Sum `CpuDeltaSeconds` over a run to get total CPU seconds.
+- `CpuDeltaSeconds` — sum over the included processes of the increase in `Get-Process` `TotalProcessorTime` (user + kernel) since the previous sample. Only processes present in both samples contribute, so CPU used by a process that started or exited between two samples is not counted for that interval. It is empty, like `CpuPercentAllCores`, when no process of the row had readable CPU time in both samples, so an unknown value never looks like a real zero. Sum `CpuDeltaSeconds` over a run to get total CPU seconds.
 - `PrivateMissingCount`, `CpuUnreadableCount` — how many processes of the row were left out of `PrivateBytesMB` or `CpuDeltaSeconds` because `PrivatePageCount` was empty or `Get-Process` could not read the process (it exited after the snapshot, or access was denied). A missing value is never counted as zero silently: a non-zero count means that row's sum is low, and the script prints a warning at the end. If `Win32_Process` itself cannot be queried (WMI error), the script stops with that error; the rows written so far stay in the CSV.
 - `ProcessCount`, `ProcessIds`, `ProcessTree` — processes included in each sample.
 - `Timestamp`, `ElapsedSeconds`, `IntervalSeconds` — sample timing: `Timestamp` is the wall clock at the start of the sample, `ElapsedSeconds` the stopwatch after the processes were read.
@@ -52,7 +52,15 @@ Replace `12345` with the PID of the application's main process.
 
 ## Unit check and diagnostics
 
-At startup the script compares `PrivatePageCount` with `Get-Process` `PrivateMemorySize64` for every process in the tree and prints the median ratio. If it is outside 0.9–1.1, the script stops instead of writing wrong `PrivateBytesMB` values.
+At startup the script compares `PrivatePageCount` with `Get-Process` `PrivateMemorySize64` for every process in the tree and prints the median ratio. If it is outside 0.9–1.1, the script stops instead of writing wrong `PrivateBytesMB` values. It also stops if no finite valid ratio can be computed (for example, because process-memory access is denied or all candidate values are zero/missing); an unverified unit must not be presented as a verified measurement. The validation logic is isolated in `PrivateUnitValidation.psm1` so the empty-input and wrong-unit paths can be tested without relying on OS-specific protected processes.
+
+Run the deterministic PowerShell 5.1 regression checks with:
+
+```powershell
+.\Test-PrivateUnitValidation.ps1
+```
+
+The test covers an empty ratio list, a list containing only non-finite values, and ratios consistent with a page-count rather than byte-count interpretation. These are unit tests for fail-closed behavior; they do not replace a native end-to-end monitor run.
 
 Add `-Diagnostics` to also write `<output>.diagnostics.csv` (or `-DiagnosticsPath`), with one row per process per sample:
 
@@ -81,8 +89,9 @@ This does not permanently change the system execution policy.
 - Keep debug-stats polling consistent. Prefer an initial run with periodic stats polling disabled, followed by a separate run where all variants use the same polling frequency.
 - Run each scenario at least five times and save each run as a separate CSV file.
 - This script discovers child processes using Windows `ParentProcessId`. Some WebView2 or Electron broker/service processes may not be descendants of the main process and may be omitted. Inspect `ProcessTree` in the CSV. If relevant processes are missing, do not treat the sum as the application's complete memory usage; extend collection to group processes by command line or application profile identifier.
-- The sampler compensates for its collection and CSV-write overhead when scheduling the next sample. Real intervals may still vary because of Windows scheduling, so inspect `IntervalSeconds` in every run.
-- This is a first-pass comparison tool, not a replacement for Windows Performance Recorder/ETW. Sampling introduces a small amount of overhead, so avoid excessively short intervals.
+- The sampler compensates for its collection and CSV-write overhead when scheduling the next sample. `SampleIntervalSeconds` accepts fractional seconds down to 0.1 (for example, `-SampleIntervalSeconds 0.2`). The default remains 1 second. Real intervals may still vary because of Windows scheduling and the time needed to query each process; inspect `IntervalSeconds` in every run. If sampling itself takes longer than requested, the effective cadence will be slower than requested.
+- Use 0.1–0.25 s only as a separate, higher-frequency RAM-peak profile for short-lived allocations. It improves the chance of observing brief peaks but cannot guarantee that every peak is captured. Faster sampling can increase WMI/PowerShell overhead and affect CPU measurements; do not mix these CPU numbers with a 1-second profile. For the main CPU comparison, use a common interval with acceptable measured overhead for both variants.
+- This is a first-pass comparison tool, not a replacement for Windows Performance Recorder/ETW. Sampling introduces overhead, which can be material at short intervals.
 
 ## Inspect recent samples
 
