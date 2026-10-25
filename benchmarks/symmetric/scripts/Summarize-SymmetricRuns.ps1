@@ -229,6 +229,23 @@ foreach ($source in $sources) {
     else {
         $deviations.Add("$(Split-Path -Leaf $directory): no schedule.csv (run script before the fixed-order change); order taken from runs.log")
     }
+    if ($phase -eq 'Confirmatory') {
+        $expectedNames = New-Object System.Collections.Generic.List[string]
+        foreach ($scenarioName in $familyScenarios) {
+            for ($pairNumber = 1; $pairNumber -le $plannedPairs; $pairNumber++) {
+                $plannedBuildOrder = if ($pairNumber % 2 -eq 1) { @('plain', 'runtime') } else { @('runtime', 'plain') }
+                foreach ($buildName in $plannedBuildOrder) { $expectedNames.Add(('{0}-pair{1:D2}-{2}' -f $scenarioName, $pairNumber, $buildName)) }
+            }
+        }
+        $missingFromSchedule = @($expectedNames | Where-Object { $scheduled -notcontains $_ })
+        $extraInSchedule = @($scheduled | Where-Object { $expectedNames -notcontains $_ })
+        if ($missingFromSchedule.Count -gt 0 -or $extraInSchedule.Count -gt 0 -or $scheduled.Count -ne $expectedNames.Count) {
+            throw "Confirmatory schedule must list all planned runs for pairs 1..$plannedPairs exactly once. Missing: $($missingFromSchedule -join ', '); extra: $($extraInSchedule -join ', ')."
+        }
+        if (($scheduled -join ',') -ne ($expectedNames -join ',')) {
+            throw "Confirmatory schedule does not match the fixed alternated order for pairs 1..$plannedPairs."
+        }
+    }
 
     $seen = @{}
     foreach ($reportFile in @(Get-ChildItem -LiteralPath $runsDirectory -Filter '*.json' | Sort-Object Name)) {
