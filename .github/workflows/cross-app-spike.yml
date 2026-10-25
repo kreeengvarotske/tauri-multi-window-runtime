@@ -1,0 +1,47 @@
+name: Cross-app spike
+
+# Only the isolated experiment (and the Core crate it reuses unchanged).
+on:
+  pull_request:
+    paths:
+      - "experiments/cross-app-spike/**"
+      - "crates/runtime-core/**"
+      - ".github/workflows/cross-app-spike.yml"
+
+concurrency:
+  group: cross-app-spike-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: experiments/cross-app-spike
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            toolchain: stable
+          - os: ubuntu-latest
+            toolchain: "1.89"
+          - os: windows-latest
+            toolchain: stable
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: experiments/cross-app-spike
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+      # Repeat the multi-process tests to surface ordering flakiness.
+      - name: Repeat cross-process tests
+        shell: bash
+        run: for i in 1 2 3 4 5; do cargo test --locked --test cross_process -q; done
