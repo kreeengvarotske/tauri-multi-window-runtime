@@ -90,7 +90,7 @@ describe("window bridge handshake", () => {
     sent.catch(() => {});
 
     await vi.advanceTimersByTimeAsync(1_000);
-    await expect(sent).resolves.toBeUndefined();
+    await expect(sent).resolves.toMatchObject({ requestId: expect.any(String) });
     expect(handler).toHaveBeenCalledTimes(1);
     expect(handler).toHaveBeenCalledWith(REQUEST);
   });
@@ -184,5 +184,52 @@ describe("window bridge handshake", () => {
     const main = bridgeFor("main");
     await expect(main.requestSeriesInSecondary(REQUEST)).rejects.toThrow(/не открыто/);
     expect(bus.emitted).toHaveLength(0);
+  });
+
+  it("reports completion of exactly the confirmed series", async () => {
+    const main = bridgeFor("main");
+    const secondary = bridgeFor("secondary");
+    let finishSeries!: () => void;
+    bus.currentLabel = "secondary";
+    await secondary.onSeriesRequest(() => new Promise<void>((resolve) => (finishSeries = resolve)));
+    bus.currentLabel = "main";
+
+    const series = await main.requestSeriesInSecondary(REQUEST);
+    let completion: unknown = null;
+    void series.completed.then((value) => (completion = value));
+    // A report about another request must not settle this one.
+    bus.deliver("main", "lab://run-series-done", { requestId: "older-request", ok: true });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(completion).toBeNull();
+
+    finishSeries();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(completion).toEqual({ ok: true });
+    expect(bus.listeners.get("main/lab://run-series-done")?.size ?? 0).toBe(0);
+  });
+
+  it("reports a series that failed in the secondary", async () => {
+    const main = bridgeFor("main");
+    const secondary = bridgeFor("secondary");
+    bus.currentLabel = "secondary";
+    await secondary.onSeriesRequest(async () => {
+      throw new Error("series broke");
+    });
+    bus.currentLabel = "main";
+    const series = await main.requestSeriesInSecondary(REQUEST);
+    await vi.advanceTimersByTimeAsync(10);
+    await expect(series.completed).resolves.toEqual({ ok: false, error: "series broke" });
+  });
+
+  it("settles completion when the secondary closes before reporting", async () => {
+    const main = bridgeFor("main", { closedCheckIntervalMs: 200 });
+    const secondary = bridgeFor("secondary");
+    bus.currentLabel = "secondary";
+    await secondary.onSeriesRequest(() => new Promise<void>(() => {}));
+    bus.currentLabel = "main";
+    const series = await main.requestSeriesInSecondary(REQUEST);
+    bus.openWindows.delete("secondary");
+    await vi.advanceTimersByTimeAsync(250);
+    await expect(series.completed).resolves.toMatchObject({ ok: false, error: expect.stringMatching(/закрыто/) });
   });
 });

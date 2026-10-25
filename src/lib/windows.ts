@@ -76,6 +76,25 @@ export interface SeriesRequest {
   size: number;
 }
 
+/** How a series that the secondary window accepted has ended. */
+export interface SeriesCompletion {
+  /** false when the series failed to run or the window closed before it reported. */
+  ok: boolean;
+  /** Why the series did not finish normally. */
+  error?: string;
+}
+
+/** A series that the secondary window has confirmed it started. */
+export interface SecondarySeries {
+  readonly requestId: string;
+  /**
+   * Settles once the secondary reports that this series has finished, or once
+   * the window is found closed. It never rejects, and a report about another
+   * request id does not settle it.
+   */
+  readonly completed: Promise<SeriesCompletion>;
+}
+
 /** Window-to-window channel for running one series in both windows. */
 export interface WindowBridge {
   /**
@@ -83,9 +102,13 @@ export interface WindowBridge {
    * confirmed that it accepted the request. Rejects if it is not open, closes
    * meanwhile, or does not confirm in time.
    */
-  requestSeriesInSecondary(request: SeriesRequest): Promise<void>;
-  /** Runs `handler` once per request when the main window asks this window to start a series. */
-  onSeriesRequest(handler: (request: SeriesRequest) => void): Promise<() => void>;
+  requestSeriesInSecondary(request: SeriesRequest): Promise<SecondarySeries>;
+  /**
+   * Runs `handler` once per request when the main window asks this window to
+   * start a series. When the handler returns a promise, main is told the series
+   * has finished after it settles.
+   */
+  onSeriesRequest(handler: (request: SeriesRequest) => void | Promise<unknown>): Promise<() => void>;
 }
 
 export interface WindowBridgeOptions {
@@ -93,6 +116,8 @@ export interface WindowBridgeOptions {
   confirmTimeoutMs?: number;
   /** How often main re-sends a request that has not been confirmed yet. */
   retryIntervalMs?: number;
+  /** How often main checks that the secondary is still open while a series runs there. */
+  closedCheckIntervalMs?: number;
 }
 
 // Frontend-only events between our own windows; Core is not involved.
@@ -100,12 +125,15 @@ export interface WindowBridgeOptions {
 // listener is lost, and `tauri://created` fires before that window's page has
 // loaded. So main re-sends a request until the secondary confirms it, and each
 // request carries an id: the secondary starts a series once per id, and main
-// accepts only the confirmation of the request it is waiting for.
+// accepts only the confirmation of the request it is waiting for. When the
+// series ends, the secondary reports it under the same id.
 const SERIES_EVENT = "lab://run-series";
 const SERIES_ACK_EVENT = "lab://run-series-ack";
+const SERIES_DONE_EVENT = "lab://run-series-done";
 const BROWSER_CHANNEL = "runtime-lab";
 const DEFAULT_CONFIRM_TIMEOUT_MS = 5_000;
 const DEFAULT_RETRY_INTERVAL_MS = 100;
+const DEFAULT_CLOSED_CHECK_INTERVAL_MS = 500;
 const REMEMBERED_REQUESTS = 64;
 
 interface SeriesMessage {
@@ -114,6 +142,10 @@ interface SeriesMessage {
 }
 
 interface SeriesAck {
+  requestId: string;
+}
+
+interface SeriesDone extends SeriesCompletion {
   requestId: string;
 }
 
@@ -162,6 +194,7 @@ function browserPort(): BridgePort {
 function createHandshakeBridge(port: BridgePort, options: WindowBridgeOptions): WindowBridge {
   const confirmTimeoutMs = options.confirmTimeoutMs ?? DEFAULT_CONFIRM_TIMEOUT_MS;
   const retryIntervalMs = options.retryIntervalMs ?? DEFAULT_RETRY_INTERVAL_MS;
+  const closedCheckIntervalMs = options.closedCheckIntervalMs ?? DEFAULT_CLOSED_CHECK_INTERVAL_MS;
   const notOpen = () => new Error(`Окно «${SECONDARY_LABEL}» не открыто. Сначала нажмите «Открыть второе окно».`);
 
   return {
@@ -171,18 +204,35 @@ function createHandshakeBridge(port: BridgePort, options: WindowBridgeOptions): 
       const requestId = newRequestId();
       let confirm!: () => void;
       const confirmed = new Promise<void>((resolve) => (confirm = resolve));
-      let done = false;
-      // Listen before the first send, so a fast confirmation cannot be missed.
-      const unlisten = await port.listen(SERIES_ACK_EVENT, (payload) => {
+      let isConfirmed = false;
+      let finish!: (completion: SeriesCompletion) => void;
+      let isFinished = false;
+      const completed = new Promise<SeriesCompletion>((resolve) => (finish = resolve));
+
+      // Listen before the first send, so a fast confirmation or completion
+      // cannot be missed.
+      const unlistenAck = await port.listen(SERIES_ACK_EVENT, (payload) => {
         if ((payload as SeriesAck | null)?.requestId === requestId) {
-          done = true;
+          isConfirmed = true;
           confirm();
         }
       });
+      let unlistenDone: () => void = () => {};
+      const settle = (completion: SeriesCompletion) => {
+        if (isFinished) return;
+        isFinished = true;
+        unlistenDone();
+        finish(completion);
+      };
       try {
+        unlistenDone = await port.listen(SERIES_DONE_EVENT, (payload) => {
+          const done = payload as SeriesDone | null;
+          if (done?.requestId !== requestId) return;
+          settle(done.ok === true ? { ok: true } : { ok: false, error: String(done.error ?? "серия завершилась с ошибкой") });
+        });
         const deadline = Date.now() + confirmTimeoutMs;
         const message: SeriesMessage = { requestId, request };
-        while (!done) {
+        while (!isConfirmed) {
           if (Date.now() >= deadline) {
             throw new Error(
               `Окно «${SECONDARY_LABEL}» не подтвердило запуск серии за ${confirmTimeoutMs} мс. ` +
@@ -191,11 +241,28 @@ function createHandshakeBridge(port: BridgePort, options: WindowBridgeOptions): 
           }
           await port.sendToPeer(SERIES_EVENT, message);
           await Promise.race([confirmed, delay(Math.min(retryIntervalMs, Math.max(0, deadline - Date.now())))]);
-          if (!done && !(await port.peerIsOpen())) throw notOpen();
+          if (!isConfirmed && !(await port.peerIsOpen())) throw notOpen();
         }
+      } catch (error) {
+        // Nothing was confirmed, so nobody waits for a completion.
+        isFinished = true;
+        unlistenDone();
+        throw error;
       } finally {
-        unlisten();
+        unlistenAck();
       }
+
+      // A closed window never reports; its requests that already reached Core
+      // still finish there, which the benchmark checks through Core counters.
+      void (async () => {
+        while (!isFinished) {
+          await delay(closedCheckIntervalMs);
+          if (!isFinished && !(await port.peerIsOpen().catch(() => false))) {
+            settle({ ok: false, error: `окно «${SECONDARY_LABEL}» закрыто до завершения серии` });
+          }
+        }
+      })();
+      return { requestId, completed };
     },
 
     onSeriesRequest(handler) {
@@ -203,16 +270,21 @@ function createHandshakeBridge(port: BridgePort, options: WindowBridgeOptions): 
       return port.listen(SERIES_EVENT, (payload) => {
         const message = payload as SeriesMessage | null;
         if (typeof message?.requestId !== "string" || !message.request) return;
-        if (!accepted.includes(message.requestId)) {
+        const { requestId } = message;
+        if (!accepted.includes(requestId)) {
           // A handler that throws has not started the series: no confirmation,
           // so main reports the failure instead of assuming it is running.
-          handler(message.request);
-          accepted.push(message.requestId);
+          const started = handler(message.request);
+          accepted.push(requestId);
           if (accepted.length > REMEMBERED_REQUESTS) accepted.shift();
+          void Promise.resolve(started).then(
+            () => ({ requestId, ok: true }),
+            (error: unknown) => ({ requestId, ok: false, error: error instanceof Error ? error.message : String(error) }),
+          ).then((done: SeriesDone) => port.sendToMain(SERIES_DONE_EVENT, done)).catch(() => {});
         }
         // Confirm every delivery, so main stops re-sending even if an earlier
         // confirmation was lost.
-        const ack: SeriesAck = { requestId: message.requestId };
+        const ack: SeriesAck = { requestId };
         void port.sendToMain(SERIES_ACK_EVENT, ack).catch(() => {});
       });
     },
