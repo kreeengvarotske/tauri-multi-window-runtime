@@ -385,11 +385,15 @@ foreach ($source in $sources) {
             $diagnosticsFile = Join-Path $runsDirectory "$base.monitor.diagnostics.csv"
             if ((Test-Path -LiteralPath $diagnosticsFile) -and $samples.Count -gt 0) {
                 $rootPid = $samples[0].RootPid
-                $exeBytes = @(Import-Csv -LiteralPath $diagnosticsFile | Where-Object {
-                        [int]$_.Pid -eq $rootPid -and $_.InTree -eq 'True' -and -not [string]::IsNullOrWhiteSpace($_.CimPrivatePageCount)
-                    } | Where-Object {
+                $diagnosticLoadRows = @(Import-Csv -LiteralPath $diagnosticsFile | Where-Object { $_.InTree -eq 'True' } | Where-Object {
                         $time = Get-Time $_.Timestamp; $time -ge $loadFrom -and $time -lt $loadTo
-                    } | ForEach-Object { [double]$_.CimPrivatePageCount / 1MB })
+                    })
+                $diagnosticBytes = @($diagnosticLoadRows | ForEach-Object { ConvertTo-Number $_.CimPrivatePageCount })
+                $row.DiagnosticsPrivateMetricsValid = $diagnosticLoadRows.Count -gt 0 -and @($diagnosticBytes | Where-Object { $null -eq $_ }).Count -eq 0
+                $exeBytes = @($diagnosticLoadRows | Where-Object { [int]$_.Pid -eq $rootPid } | ForEach-Object {
+                        $value = ConvertTo-Number $_.CimPrivatePageCount
+                        if ($null -ne $value) { $value / 1MB }
+                    } | Where-Object { $null -ne $_ })
                 $row.ExePrivateMBLoadAvg = Get-Average $exeBytes
                 if ($null -ne $row.ExePrivateMBLoadAvg -and $null -ne $row.LoadPrivateMBAvg) {
                     $row.WebViewPrivateMBLoadAvg = $row.LoadPrivateMBAvg - $row.ExePrivateMBLoadAvg
@@ -432,7 +436,14 @@ foreach ($group in @($runs | Group-Object Profile, Scenario, Pair | Sort-Object 
     if ($runtime.Count -ne 1) { $reasons.Add("runtime runs: $($runtime.Count)") }
     foreach ($run in @($plain + $runtime)) { if (-not $run.Valid) { $reasons.Add("$($run.Build): $($run.InvalidReason)") } }
     $first = $group.Group[0]
-    $pairRow = [ordered]@{ Profile = $first.Profile; Scenario = $first.Scenario; Pair = $first.Pair; Valid = $reasons.Count -eq 0; InvalidReason = $reasons -join '; ' }
+    $pairRow = [ordered]@{
+        Profile = $first.Profile; Scenario = $first.Scenario; Pair = $first.Pair
+        Valid = $reasons.Count -eq 0; InvalidReason = $reasons -join '; '
+        PrivateMetricsValid = $plain.Count -eq 1 -and $runtime.Count -eq 1 -and $plain[0].PrivateMetricsValid -and $runtime[0].PrivateMetricsValid
+        CpuMetricsValid = $plain.Count -eq 1 -and $runtime.Count -eq 1 -and $plain[0].CpuMetricsValid -and $runtime[0].CpuMetricsValid
+        WorkingSetMetricsValid = $plain.Count -eq 1 -and $runtime.Count -eq 1 -and $plain[0].WorkingSetMetricsValid -and $runtime[0].WorkingSetMetricsValid
+        DiagnosticsPrivateMetricsValid = $plain.Count -eq 1 -and $runtime.Count -eq 1 -and $plain[0].DiagnosticsPrivateMetricsValid -and $runtime[0].DiagnosticsPrivateMetricsValid
+    }
     foreach ($metric in $numberColumns) {
         $pairRow["Plain$metric"] = $null; $pairRow["Runtime$metric"] = $null; $pairRow[$metric] = $null
         if ($plain.Count -eq 1 -and $runtime.Count -eq 1 -and $null -ne $plain[0].$metric -and $null -ne $runtime[0].$metric) {
@@ -444,7 +455,11 @@ foreach ($group in @($runs | Group-Object Profile, Scenario, Pair | Sort-Object 
     $pairRows.Add([pscustomobject]$pairRow)
 }
 $pairRows | ForEach-Object {
-    $out = [ordered]@{ Profile = $_.Profile; Scenario = $_.Scenario; Pair = $_.Pair; Valid = $_.Valid; InvalidReason = $_.InvalidReason }
+    $out = [ordered]@{
+        Profile = $_.Profile; Scenario = $_.Scenario; Pair = $_.Pair; Valid = $_.Valid; InvalidReason = $_.InvalidReason
+        PrivateMetricsValid = $_.PrivateMetricsValid; CpuMetricsValid = $_.CpuMetricsValid
+        WorkingSetMetricsValid = $_.WorkingSetMetricsValid; DiagnosticsPrivateMetricsValid = $_.DiagnosticsPrivateMetricsValid
+    }
     foreach ($metric in $numberColumns) {
         $out["Plain$metric"] = Format-Raw $_."Plain$metric"; $out["Runtime$metric"] = Format-Raw $_."Runtime$metric"; $out[$metric] = Format-Raw $_.$metric
     }
@@ -460,7 +475,16 @@ function Invoke-Analysis {
         $inLook = @($pairRows | Where-Object { $_.Profile -eq $monitorProfile -and $_.Scenario -eq $scenario -and $_.Pair -le $MaxPair })
         $valid = @($inLook | Where-Object { $_.Valid })
         foreach ($metric in $comparedByProfile[$monitorProfile]) {
-            $usable = @($valid | Where-Object { $null -ne $_.$metric })
+            $usable = @($valid | Where-Object {
+                $metricQualityValid = $true
+                if ($metric -match 'CpuSeconds') { $metricQualityValid = $_.CpuMetricsValid }
+                elseif ($metric -match 'PrivateMB') {
+                    if ($metric -match '^(ExePrivate|WebViewPrivate)') { $metricQualityValid = $_.DiagnosticsPrivateMetricsValid }
+                    else { $metricQualityValid = $_.PrivateMetricsValid }
+                }
+                elseif ($metric -match 'WorkingSetMB') { $metricQualityValid = $_.WorkingSetMetricsValid }
+                $metricQualityValid -and $null -ne $_.$metric
+            })
             $diffs = [double[]]@($usable | ForEach-Object { [double]$_.$metric })
             $plainValues = [double[]]@($usable | ForEach-Object { [double]$_."Plain$metric" })
             $runtimeValues = [double[]]@($usable | ForEach-Object { [double]$_."Runtime$metric" })
@@ -588,10 +612,10 @@ foreach ($run in @($runs | Sort-Object Profile, Scenario, Pair, Build)) {
 $lines.Add('')
 $lines.Add('## Run validity and monitoring')
 $lines.Add('')
-$lines.Add('| Run | Valid | Load rows / expected | Interval median / load max (s) | Monitor CPU s | Reason |')
-$lines.Add('|---|---|---|---|---|---|')
+$lines.Add('| Run | Valid | Load rows / expected | Session median / load median / load max (s) | CPU-missing / Private-missing rows | Monitor CPU s | Reason |')
+$lines.Add('|---|---|---|---|---|---|---|')
 foreach ($run in @($runs | Sort-Object Profile, Scenario, Pair, Build)) {
-    $lines.Add(('| {10} {0}-{1}-{2} | {3} | {4} / {5} | {6} / {7} | {8} | {9} |' -f $run.Scenario, $run.Pair, $run.Build, $run.Valid, $run.LoadRows, $run.LoadRowsExpected, (Format-Number $run.IntervalMedianSeconds 3), (Format-Number $run.LoadIntervalMaxSeconds 3), $run.MonitorCpuSeconds, $run.InvalidReason, $run.Profile))
+    $lines.Add(('| {10} {0}-{1}-{2} | {3} | {4} / {5} | {6} / {7} / {8} | {9} / {11} | {12} | {13} |' -f $run.Scenario, $run.Pair, $run.Build, $run.Valid, $run.LoadRows, $run.LoadRowsExpected, (Format-Number $run.IntervalMedianSeconds 3), (Format-Number $run.LoadIntervalMedianSeconds 3), (Format-Number $run.LoadIntervalMaxSeconds 3), $run.LoadRowsWithUnreadableCpu, $run.Profile, $run.LoadRowsWithMissingPrivateValues, $run.MonitorCpuSeconds, $run.InvalidReason))
 }
 $lines.Add('')
 $invalidPairs = @($pairRows | Where-Object { -not $_.Valid })
