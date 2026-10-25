@@ -19,13 +19,15 @@ The rule is the one in README.md ("Statistical rule"); in short:
   ("Run validity"); a pair is valid only if both of its runs are. Invalid
   runs and pairs stay in runs.csv and pairs.csv with their reasons and are
   left out of every median, interval and p-value.
-- Test: two-sided sign test that keeps zero differences in n (exact without
-  ties, conservative with them), Holm within a look over every hypothesis of
-  the declared family, with p = 1 where no p-value can be computed. Interval: closed order-statistic interval for
-  the median over all differences, with a guaranteed minimum coverage
-  (exact only without ties; see SymmetricBenchStats.cs).
-- Confirmatory looks: look 1 after 10 pairs at alpha 0.025; look 2, only for
-  tests undecided at look 1, after 20 pairs at alpha 0.025.
+- Test: two-sided conservative sign test that keeps zero differences in n,
+  with Holm across the fixed family of eight hypotheses at alpha 0.05;
+  hypotheses with fewer than 8 valid pairs receive p = 1 for Holm and a
+  verdict of "insufficient valid pairs". Interval: closed order-statistic
+  interval for the median over all differences, with guaranteed minimum
+  coverage (exact only without ties; see SymmetricBenchStats.cs).
+- Confirmatory analysis occurs once, after the predeclared 20 pairs for all
+  four scenarios in both profiles. No interim analysis, data-dependent
+  extension, or replacement of invalid pairs.
 - Pilot results get "pilot: no conclusion" whatever the numbers.
 
 Analysis files go to a new directory (default <last results directory>\
@@ -39,10 +41,6 @@ param(
     [Parameter(Mandatory = $true)]
     [string[]]$ResultsDirectory,
 
-    # Look 2: the directories of the 10 extension pairs (Run-SymmetricPairs.ps1 -FirstPair 11),
-    # one per profile that still has an undecided test after look 1.
-    [string[]]$ExtensionDirectory = @(),
-
     [string]$OutputDirectory
 )
 
@@ -55,9 +53,9 @@ if (-not ('SymmetricBenchStats' -as [type])) {
 }
 
 # Fixed protocol values (README.md, "Statistical rule" and "Run validity").
-$plannedPairsPerLook = 10
-$minValidPairsPerLook = 8
-$lookAlpha = 0.025
+$plannedPairs = 20
+$minValidPairs = 8
+$analysisAlpha = 0.05
 $practicalThreshold = 0.02
 $minLoadCoverage = 0.8
 $maxIntervalDeviation = 0.2
@@ -147,7 +145,7 @@ $familyScenarios = @('S1', 'S2', 'S3', 'S4')
 $sources = New-Object System.Collections.Generic.List[object]
 foreach ($path in $ResultsDirectory) {
     $directory = (Resolve-Path -LiteralPath $path).Path
-    $sources.Add([pscustomobject]@{ Directory = $directory; Configuration = (Read-Configuration $directory); Look = 1 })
+    $sources.Add([pscustomobject]@{ Directory = $directory; Configuration = (Read-Configuration $directory) })
 }
 $phases = @($sources | ForEach-Object { [string]$_.Configuration.phase } | Select-Object -Unique)
 if ($phases.Count -ne 1) { throw "All results directories must have the same phase (got $($phases -join ', '))." }
@@ -167,30 +165,13 @@ foreach ($source in $sources) {
 if ($phase -eq 'Confirmatory') {
     if ((($profiles | Sort-Object) -join ',') -ne 'Cpu,Ram') { throw 'Confirmatory analysis needs one Cpu and one Ram results directory: the family covers both profiles.' }
     foreach ($source in $sources) {
-        if ([int](Get-ConfigValue $source.Configuration 'firstPair' 1) -ne 1 -or [int]$source.Configuration.pairs -ne $plannedPairsPerLook) {
-            throw "Confirmatory look 1 must be pairs 1..$plannedPairsPerLook (got firstPair $(Get-ConfigValue $source.Configuration 'firstPair' 1), pairs $($source.Configuration.pairs))."
+        if ([int](Get-ConfigValue $source.Configuration 'firstPair' 1) -ne 1 -or [int]$source.Configuration.pairs -ne $plannedPairs) {
+            throw "Confirmatory analysis requires the predeclared pairs 1..$plannedPairs in one series (got firstPair $(Get-ConfigValue $source.Configuration 'firstPair' 1), pairs $($source.Configuration.pairs))."
         }
         if ((@($source.Configuration.scenarios | ForEach-Object { [string]$_ } | Sort-Object) -join ',') -ne ($familyScenarios -join ',')) {
-            throw "Confirmatory look 1 must run all of $($familyScenarios -join ', ') (got $(@($source.Configuration.scenarios) -join ', ')): the family is declared over all of them."
+            throw "Confirmatory analysis must schedule all of $($familyScenarios -join ', ') (got $(@($source.Configuration.scenarios) -join ', ')): the family is fixed over all scenarios."
         }
     }
-}
-if ($ExtensionDirectory.Count -gt 0 -and $phase -ne 'Confirmatory') { throw 'An extension (look 2) exists only for Confirmatory results.' }
-foreach ($path in $ExtensionDirectory) {
-    $directory = (Resolve-Path -LiteralPath $path).Path
-    $extension = Read-Configuration $directory
-    $base = @($sources | Where-Object { $_.Look -eq 1 -and [string]$_.Configuration.profile -eq [string]$extension.profile })
-    if ($base.Count -ne 1) { throw "Extension $directory has profile '$($extension.profile)' without a look 1 directory for it." }
-    if (@($sources | Where-Object { $_.Look -eq 2 -and [string]$_.Configuration.profile -eq [string]$extension.profile }).Count -gt 0) { throw "Two extensions for profile '$($extension.profile)'." }
-    foreach ($name in @($identityFields + @('profile', 'phase', 'monitorSha256', 'sampleIntervalSeconds'))) {
-        if ([string](Get-ConfigValue $base[0].Configuration $name '') -ne [string](Get-ConfigValue $extension $name '')) {
-            throw "Extension differs from look 1 in '$name' ('$(Get-ConfigValue $base[0].Configuration $name '')' vs '$(Get-ConfigValue $extension $name '')'); it cannot be pooled."
-        }
-    }
-    if ([int](Get-ConfigValue $extension 'firstPair' 1) -ne $plannedPairsPerLook + 1 -or [int]$extension.pairs -ne $plannedPairsPerLook) {
-        throw "The extension must be pairs $($plannedPairsPerLook + 1)..$(2 * $plannedPairsPerLook) (-FirstPair $($plannedPairsPerLook + 1) -Pairs $plannedPairsPerLook)."
-    }
-    $sources.Add([pscustomobject]@{ Directory = $directory; Configuration = $extension; Look = 2 })
 }
 if (-not $OutputDirectory) {
     $OutputDirectory = Join-Path $sources[$sources.Count - 1].Directory ("analysis-{0}" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
