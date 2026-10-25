@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
-Builds the plain and runtime variants of the symmetric benchmark and runs
-alternating pairs of each scenario with the process monitor (issue #13, stage 9).
+Builds (or reuses) the plain and runtime variants and runs a fixed, predeclared
+set of alternating pairs with the process monitor (issue #13, stage 9).
 
 .DESCRIPTION
 For every scenario and pair, both builds run once, in alternating order
@@ -21,15 +21,17 @@ Two monitoring profiles are kept apart, each in its own output directory:
   monitor that accepts fractional intervals (PR #19).
 The monitor's own CPU time is recorded for every run as its overhead.
 
--Phase Pilot marks exploratory pairs: they are summarized descriptively and
-never pooled with Confirmatory pairs, which are judged by the rule fixed in
-README.md before they run.
+-Phase Pilot always means five exploratory pairs per scenario and profile;
+they are summarized descriptively and never pooled with Confirmatory pairs.
+-Phase Confirmatory always means one fixed series of 20 pairs per scenario
+and profile. There is no interim statistical look and no confirmatory extension.
 
-The order of all runs is fixed before the first one: schedule.csv lists every
+The order of all 20 pairs is fixed before the first one: schedule.csv lists every
 planned run, and README.md is copied to protocol.md with the SHA256 of both
 scripts in configuration.json. An existing results directory is never reused.
-A confirmatory extension (look 2) goes to its own directory with
--FirstPair 11, so pair numbers and the alternation continue.
+To keep the two monitor profiles comparable, the second profile can reuse the
+same plain/runtime binaries via -ExecutablesFrom from the first profile's
+results directory.
 #>
 [CmdletBinding()]
 param(
@@ -79,13 +81,24 @@ param(
     # Reuse plain.exe and runtime.exe already in <OutputDirectory>\bin.
     [switch]$SkipBuild,
 
-    # Copy bin\plain.exe and bin\runtime.exe from an earlier results directory instead of building
-    # (the confirmatory extension must use the same executables as look 1).
+    # Reuse plain.exe and runtime.exe from the other monitor profile's results directory,
+    # so Cpu and Ram measurements use byte-identical executables.
     [string]$ExecutablesFrom
 )
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
+
+$expectedScenarios = @('S1', 'S2', 'S3', 'S4')
+if (($Scenarios -join ',') -ne ($expectedScenarios -join ',')) {
+    throw "Phase $Phase must include scenarios in the fixed order S1,S2,S3,S4."
+}
+if ($Phase -eq 'Pilot' -and ($FirstPair -ne 1 -or $Pairs -ne 5)) {
+    throw 'Pilot protocol is fixed at pairs 1..5; use -FirstPair 1 -Pairs 5.'
+}
+if ($Phase -eq 'Confirmatory' -and ($FirstPair -ne 1 -or $Pairs -ne 20)) {
+    throw 'Confirmatory protocol is fixed at pairs 1..20 with one analysis; use -FirstPair 1 -Pairs 20. Extensions/interim looks are not part of this protocol.'
+}
 
 $benchRoot = Split-Path -Parent $PSScriptRoot
 $repoRoot = Split-Path -Parent (Split-Path -Parent $benchRoot)
