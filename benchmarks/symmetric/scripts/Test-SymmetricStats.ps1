@@ -273,6 +273,17 @@ finally {
     Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+# Runner rejects an adaptive/short series before resolving monitor paths or building binaries.
+$runner = Join-Path $PSScriptRoot 'Run-SymmetricPairs.ps1'
+$runnerMessage = ''
+try { & $runner -MonitorScript 'unused-monitor.ps1' -Phase Confirmatory -Pairs 10 2>&1 | Out-Null }
+catch { $runnerMessage = $_.Exception.Message }
+Assert-True 'runner refuses a 10-pair confirmatory run before resolving monitor path' ($runnerMessage -like '*pairs 1..20*') $runnerMessage
+$runnerMessage = ''
+try { & $runner -MonitorScript 'unused-monitor.ps1' -Phase Pilot -Pairs 20 2>&1 | Out-Null }
+catch { $runnerMessage = $_.Exception.Message }
+Assert-True 'runner fixes pilot at 5 pairs' ($runnerMessage -like '*Pilot protocol is fixed at pairs 1..5*') $runnerMessage
+
 if ($failures.Count -gt 0) {
     foreach ($failure in $failures) { Write-Host "FAIL $failure" }
     exit 1
