@@ -33,6 +33,9 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      - name: Summarizer regression tests (Windows PowerShell 5.1)
+        shell: powershell
+        run: .\scripts\Test-Summarize-SymmetricRuns.ps1
       - run: npm run build
       - run: cargo fmt --all -- --check
       - name: Clippy, plain and runtime
