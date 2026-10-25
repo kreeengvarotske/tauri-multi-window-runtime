@@ -9,8 +9,10 @@ param(
     [ValidateRange(1, 3600)]
     [int]$DurationSeconds = 300,
 
-    [ValidateRange(1, 60)]
-    [int]$SampleIntervalSeconds = 1,
+    # The default remains 1 second. For peak-RAM profiling, 0.1–0.25 s
+    # can improve visibility, but increases sampler overhead; inspect IntervalSeconds.
+    [ValidateRange(0.1, 60.0)]
+    [double]$SampleIntervalSeconds = 1,
 
     [string]$OutputPath = (Join-Path (Get-Location) ("process-tree-{0}.csv" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))),
 
@@ -223,7 +225,7 @@ foreach ($procInfo in @(Get-TreeProcesses -Snapshot $firstSnapshot -StartingPid 
 }
 $unitRatio = Get-Median -Values $unitRatios.ToArray()
 if ($null -eq $unitRatio) {
-    Write-Warning "Could not compare PrivatePageCount with Get-Process PrivateMemorySize64; the PrivateBytesMB unit is unverified for this run."
+    throw "Could not compare PrivatePageCount with Get-Process PrivateMemorySize64 for any process. The PrivateBytesMB unit is unverified; refusing to start a measurement that could report an unverified metric. Retry with appropriate process access or use -Diagnostics to investigate."
 }
 elseif ($unitRatio -lt 0.9 -or $unitRatio -gt 1.1) {
     throw ("PrivatePageCount does not look like bytes on this system: its median ratio to Get-Process PrivateMemorySize64 is {0} over {1} processes (1 = bytes). PrivateBytesMB would be wrong. Run with -Diagnostics and report the output." -f (Format-InvariantDecimal -Value $unitRatio -DecimalPlaces 6), $unitRatios.Count)
