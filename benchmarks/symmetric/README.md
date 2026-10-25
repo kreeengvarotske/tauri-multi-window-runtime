@@ -45,9 +45,10 @@ npm test
 .\scripts\Summarize-SymmetricRuns.ps1 -ResultsDirectory C:\results\pilot-cpu
 # Confirmatory, only after the rule below is agreed: look 1, then (if needed) the extension and look 2.
 .\scripts\Run-SymmetricPairs.ps1 -Phase Confirmatory -MonitorProfile Cpu -Pairs 10 -MonitorScript C:\path\to\Measure-ProcessTree.ps1 -OutputDirectory C:\results\confirm-cpu
-.\scripts\Summarize-SymmetricRuns.ps1 -ResultsDirectory C:\results\confirm-cpu
+.\scripts\Run-SymmetricPairs.ps1 -Phase Confirmatory -MonitorProfile Ram -Pairs 10 -ExecutablesFrom C:\results\confirm-cpu -MonitorScript C:\path\to\Measure-ProcessTree.ps1 -OutputDirectory C:\results\confirm-ram
+.\scripts\Summarize-SymmetricRuns.ps1 -ResultsDirectory C:\results\confirm-cpu, C:\results\confirm-ram
 .\scripts\Run-SymmetricPairs.ps1 -Phase Confirmatory -MonitorProfile Cpu -FirstPair 11 -Pairs 10 -Scenarios S1,S3 -ExecutablesFrom C:\results\confirm-cpu -MonitorScript C:\path\to\Measure-ProcessTree.ps1 -OutputDirectory C:\results\confirm-cpu-ext
-.\scripts\Summarize-SymmetricRuns.ps1 -ResultsDirectory C:\results\confirm-cpu -ExtensionDirectory C:\results\confirm-cpu-ext
+.\scripts\Summarize-SymmetricRuns.ps1 -ResultsDirectory C:\results\confirm-cpu, C:\results\confirm-ram -ExtensionDirectory C:\results\confirm-cpu-ext
 ```
 
 One run by hand: `symmetric-bench.exe --scenario S2 --report out.json --duration 60` (`--iterations`, `--buffer-mb`, `--requests-per-window`, `--round-interval-ms`, `--idle-before`, `--idle-after`). Without `--report` the app starts interactively.
@@ -73,11 +74,13 @@ Fixed in `Summarize-SymmetricRuns.ps1` before any confirmatory pair runs; changi
 
 - **Estimand:** the median paired difference, runtime − plain, per scenario and metric, over valid pairs. The test, the interval and the effect threshold all refer to this one median; no mean is used.
 - **Pilot:** the first 5 pairs per scenario and profile (`-Phase Pilot`). Summarized descriptively, marked "pilot: no conclusion", never pooled with confirmatory pairs. It checks the experiment (counters, overruns, validity, intervals, spread), not the effect.
-- **Primary metrics** per scenario: `Cpu` profile `LoadCpuSeconds` and `LoadPrivateMBAvg`; `Ram` profile `LoadPrivateMBMaxSample` and `LoadPrivateMBAvg`. Everything else is descriptive. 2 metrics × 4 scenarios = 8 primary tests per profile; the two profiles are separate experiments.
-- **Test:** exact two-sided sign test of "median difference = 0" (zero differences dropped). **Interval:** the distribution-free interval for the median from order statistics, which is the sign test inverted, at level 1 − α of the look, with its exact coverage shown.
+- **Primary hypotheses, one family over both profiles:** per scenario, "the median paired difference of `LoadCpuSeconds` is 0" in the `Cpu` profile and "the median paired difference of `LoadPrivateMBAvg` is 0" in the `Ram` profile: 2 × 4 = 8 tests. Any overall claim ("runtime changes CPU or RAM in scenario X") rests only on these 8, and the familywise error over all of them is held at 0.05, so a headline across both profiles is covered. CPU is judged only at the 1 s rate and memory only at the 0.2 s rate. Everything else (memory in the `Cpu` profile, `LoadPrivateMBMaxSample`, working set, latency) is secondary and descriptive. A confirmatory analysis therefore takes the `Cpu` and the `Ram` directory together (`-ResultsDirectory cpu,ram`) and refuses one profile alone.
+- **Test:** exact two-sided sign test of "median difference = 0". Zero differences carry no sign and are dropped, so the test is conditional on the non-zero ones; their count is shown (`ZeroDiffs`).
+- **Interval:** the closed order-statistic interval for the median over all differences, zeros included, at level 1 − α of the look. Its stated coverage is a guaranteed minimum for any distribution, ties included, and is exact only for continuous differences. With zero differences it is not exactly the inversion of the sign test, so the decision uses only the test; the interval is reported alongside.
+- **No rounding before statistics:** values are used as read from the monitor and report files; `runs.csv`, `pairs.csv` and `summary.csv` are written at full precision, only `summary.md` is rounded for reading. `Test-SymmetricStats.ps1` checks the test, the interval (with a mix of positive, negative and zero differences), its coverage by simulation with and without ties, and an end-to-end summary of synthetic `Cpu` and `Ram` results as one family.
 - **Looks (interim analysis accounted for):** α = 0.05 per profile is split in advance between two looks (Bonferroni over looks: 0.025 + 0.025).
-  - Look 1: confirmatory pairs 1–10 (`-Phase Confirmatory`, `-FirstPair 1 -Pairs 10`). Holm over the 8 primary tests at α = 0.025.
-  - A test rejected at look 1 is final. Only the undecided tests continue: pairs 11–20 run once, in a new directory (`-FirstPair 11 -Pairs 10`) with the same executables, monitor and settings, and only for the scenarios with an undecided test.
+  - Look 1: confirmatory pairs 1–10 of both profiles (`-Phase Confirmatory`, `-FirstPair 1 -Pairs 10`). Holm over the 8 primary tests at α = 0.025.
+  - A test rejected at look 1 is final. Only the undecided tests continue: pairs 11–20 run once, in a new directory (`-FirstPair 11 -Pairs 10`) with the same executables, monitor and settings, and only for the profiles and scenarios with an undecided test.
   - Look 2: pairs 1–20 together, Holm over the tests still undecided at α = 0.025. What is not rejected is "no detectable difference". There is no third look and no other early stop.
 - **Decision:** a rejected test is "runtime lower" or "runtime higher" when |median difference| ≥ 2% of the plain median, otherwise "difference below 2% of plain". No winner is declared otherwise.
 - **Power, stated in advance:** with 8 tests, look 1 can reject only if all 10 pairs are valid and have the same sign (smallest Holm-adjusted p = 8 × 2/1024 = 0.016; with 9 valid pairs it is 0.031, so nothing can be rejected); look 2 needs at most 3 of 20 pairs with the other sign. Smaller or less consistent effects end as "no detectable difference".

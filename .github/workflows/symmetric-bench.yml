@@ -34,6 +34,13 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      - name: Statistics tests, PowerShell 7 and Windows PowerShell 5.1
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File scripts/Test-SymmetricStats.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Test-SymmetricStats.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - run: cargo fmt --all -- --check
       - name: Clippy, plain and runtime
         run: |

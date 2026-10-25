@@ -1,38 +1,46 @@
 <#
 .SYNOPSIS
 Summarizes Run-SymmetricPairs.ps1 results: one row per run with its validity,
-the paired differences (runtime - plain) and, per scenario and metric, the
-medians, the range of the differences and a verdict.
+the paired differences (runtime - plain) and, per profile, scenario and
+metric, the medians, the range of the differences and a verdict.
 
 .DESCRIPTION
 Correctness (counters) and resources (memory, CPU) are reported separately:
 coalescing or cache hits alone are not evidence of lower RAM or CPU use.
 
 The rule is the one in README.md ("Statistical rule"); in short:
-- Estimand: the median paired difference (runtime - plain). The test
-  statistic, the interval and the 2% threshold all use this median.
+- One family of confirmatory hypotheses over both profiles: per scenario,
+  LoadCpuSeconds from the Cpu profile and LoadPrivateMBAvg from the Ram
+  profile (8 tests). Everything else is secondary and descriptive.
+- Estimand: the median paired difference (runtime - plain). The test, the
+  interval and the 2% threshold all refer to it. Statistics use the values
+  as read from the raw files; nothing is rounded before them.
 - Validity: a run is valid only if it passes every check listed in README.md
   ("Run validity"); a pair is valid only if both of its runs are. Invalid
   runs and pairs stay in runs.csv and pairs.csv with their reasons and are
   left out of every median, interval and p-value.
-- Test: exact two-sided sign test of "median difference = 0", Holm
-  correction within a look. Interval: the distribution-free interval for the
-  median from order statistics (the sign test inverted), with its exact
-  coverage.
+- Test: exact two-sided sign test (zero differences dropped), Holm over the
+  whole family within a look. Interval: closed order-statistic interval for
+  the median over all differences, with a guaranteed minimum coverage
+  (exact only without ties; see SymmetricBenchStats.cs).
 - Confirmatory looks: look 1 after 10 pairs at alpha 0.025; look 2, only for
   tests undecided at look 1, after 20 pairs at alpha 0.025.
 - Pilot results get "pilot: no conclusion" whatever the numbers.
 
-Analysis files go to a new directory (default <ResultsDirectory>\analysis-
-<timestamp>), so the raw data and earlier analyses are never overwritten.
+Analysis files go to a new directory (default <last results directory>\
+analysis-<timestamp>), so the raw data and earlier analyses are never
+overwritten.
 #>
 [CmdletBinding()]
 param(
+    # One directory per profile. Confirmatory analysis needs both a Cpu and a Ram directory,
+    # because the hypotheses form one family over both profiles.
     [Parameter(Mandatory = $true)]
-    [string]$ResultsDirectory,
+    [string[]]$ResultsDirectory,
 
-    # Look 2: the directory of the 10 extension pairs (Run-SymmetricPairs.ps1 -FirstPair 11).
-    [string]$ExtensionDirectory,
+    # Look 2: the directories of the 10 extension pairs (Run-SymmetricPairs.ps1 -FirstPair 11),
+    # one per profile that still has an undecided test after look 1.
+    [string[]]$ExtensionDirectory = @(),
 
     [string]$OutputDirectory
 )
@@ -42,51 +50,7 @@ $ErrorActionPreference = 'Stop'
 $culture = [System.Globalization.CultureInfo]::InvariantCulture
 
 if (-not ('SymmetricBenchStats' -as [type])) {
-    Add-Type -TypeDefinition @'
-using System;
-public static class SymmetricBenchStats {
-    public static double Median(double[] values) {
-        double[] sorted = (double[])values.Clone();
-        Array.Sort(sorted);
-        int n = sorted.Length;
-        return n % 2 == 1 ? sorted[n / 2] : (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0;
-    }
-
-    // P(X <= k) for X ~ Binomial(n, 1/2).
-    public static double BinomialHalfCdf(int n, int k) {
-        if (k < 0) return 0.0;
-        double term = Math.Pow(0.5, n), sum = 0.0;
-        for (int i = 0; i <= Math.Min(k, n); i++) {
-            sum += term;
-            term = term * (n - i) / (i + 1);
-        }
-        return Math.Min(1.0, sum);
-    }
-
-    // Exact two-sided sign test of "median paired difference = 0"; zero differences are dropped.
-    public static double SignTestP(double[] diffs) {
-        int positive = 0, negative = 0;
-        foreach (double d in diffs) { if (d > 0) positive++; else if (d < 0) negative++; }
-        int n = positive + negative;
-        if (n == 0) return 1.0;
-        return Math.Min(1.0, 2.0 * BinomialHalfCdf(n, Math.Min(positive, negative)));
-    }
-
-    // Distribution-free interval for the median from order statistics (the sign test inverted):
-    // [d(k), d(n-k+1)] with the largest k such that P(X <= k-1) <= (1-level)/2.
-    // Returns {low, high, coverage}, or null when n is too small for the level.
-    public static double[] MedianInterval(double[] diffs, double level) {
-        int n = diffs.Length;
-        double tail = (1.0 - level) / 2.0;
-        int k = 0;
-        while (k + 1 <= n / 2 && BinomialHalfCdf(n, k) <= tail) k++;
-        if (k == 0) return null;
-        double[] sorted = (double[])diffs.Clone();
-        Array.Sort(sorted);
-        return new double[] { sorted[k - 1], sorted[n - k], 1.0 - 2.0 * BinomialHalfCdf(n, k - 1) };
-    }
-}
-'@
+    Add-Type -Path (Join-Path $PSScriptRoot 'SymmetricBenchStats.cs')
 }
 
 # Fixed protocol values (README.md, "Statistical rule" and "Run validity").
@@ -128,6 +92,13 @@ function Format-Number {
     return ([double]$Value).ToString(("F{0}" -f $Digits), $culture)
 }
 
+# Full precision for CSV files, so a recomputation from them gives the same statistics.
+function Format-Raw {
+    param([AllowNull()][object]$Value)
+    if ($null -eq $Value -or '' -eq $Value) { return '' }
+    return ([double]$Value).ToString('R', $culture)
+}
+
 function Get-Time {
     param([string]$Text)
     return [DateTimeOffset]::Parse($Text, $culture)
@@ -155,34 +126,56 @@ function Get-ConfigValue {
     return $Default
 }
 
-$ResultsDirectory = (Resolve-Path -LiteralPath $ResultsDirectory).Path
-$configuration = Read-Configuration $ResultsDirectory
-$monitorProfile = [string]$configuration.profile
-$phase = [string]$configuration.phase
-$nominalInterval = [double]$configuration.sampleIntervalSeconds
 $deviations = New-Object System.Collections.Generic.List[string]
-
-$directories = @($ResultsDirectory)
-if ($ExtensionDirectory) {
-    $ExtensionDirectory = (Resolve-Path -LiteralPath $ExtensionDirectory).Path
-    if ($phase -ne 'Confirmatory') { throw 'An extension (look 2) exists only for Confirmatory results.' }
-    $extension = Read-Configuration $ExtensionDirectory
-    foreach ($name in @('profile', 'phase', 'machine', 'gitHead', 'plainExeSha256', 'runtimeExeSha256', 'monitorSha256', 'sampleIntervalSeconds',
-            'durationSeconds', 'idleSeconds', 'pauseSeconds', 'iterations', 'bufferMb', 'requestsPerWindow', 'roundIntervalMs')) {
-        if ([string](Get-ConfigValue $configuration $name '') -ne [string](Get-ConfigValue $extension $name '')) {
-            throw "Extension differs from look 1 in '$name' ('$(Get-ConfigValue $configuration $name '')' vs '$(Get-ConfigValue $extension $name '')'); it cannot be pooled."
+$identityFields = @('machine', 'gitHead', 'plainExeSha256', 'runtimeExeSha256', 'durationSeconds', 'idleSeconds', 'pauseSeconds',
+    'iterations', 'bufferMb', 'requestsPerWindow', 'roundIntervalMs')
+$sources = New-Object System.Collections.Generic.List[object]
+foreach ($path in $ResultsDirectory) {
+    $directory = (Resolve-Path -LiteralPath $path).Path
+    $sources.Add([pscustomobject]@{ Directory = $directory; Configuration = (Read-Configuration $directory); Look = 1 })
+}
+$phases = @($sources | ForEach-Object { [string]$_.Configuration.phase } | Select-Object -Unique)
+if ($phases.Count -ne 1) { throw "All results directories must have the same phase (got $($phases -join ', '))." }
+$phase = $phases[0]
+$profiles = @($sources | ForEach-Object { [string]$_.Configuration.profile })
+if (@($profiles | Select-Object -Unique).Count -ne $profiles.Count) { throw "Give at most one results directory per profile (got $($profiles -join ', '))." }
+$firstConfiguration = $sources[0].Configuration
+foreach ($source in $sources) {
+    foreach ($name in $identityFields) {
+        if ([string](Get-ConfigValue $firstConfiguration $name '') -ne [string](Get-ConfigValue $source.Configuration $name '')) {
+            $message = "$(Split-Path -Leaf $source.Directory) differs from $(Split-Path -Leaf $sources[0].Directory) in '$name'"
+            if ($phase -eq 'Confirmatory') { throw "$message; the profiles cannot form one family." }
+            $deviations.Add($message)
+        }
+    }
+}
+if ($phase -eq 'Confirmatory') {
+    if ((($profiles | Sort-Object) -join ',') -ne 'Cpu,Ram') { throw 'Confirmatory analysis needs one Cpu and one Ram results directory: the family covers both profiles.' }
+    foreach ($source in $sources) {
+        if ([int](Get-ConfigValue $source.Configuration 'firstPair' 1) -ne 1 -or [int]$source.Configuration.pairs -ne $plannedPairsPerLook) {
+            throw "Confirmatory look 1 must be pairs 1..$plannedPairsPerLook (got firstPair $(Get-ConfigValue $source.Configuration 'firstPair' 1), pairs $($source.Configuration.pairs))."
+        }
+    }
+}
+if ($ExtensionDirectory.Count -gt 0 -and $phase -ne 'Confirmatory') { throw 'An extension (look 2) exists only for Confirmatory results.' }
+foreach ($path in $ExtensionDirectory) {
+    $directory = (Resolve-Path -LiteralPath $path).Path
+    $extension = Read-Configuration $directory
+    $base = @($sources | Where-Object { $_.Look -eq 1 -and [string]$_.Configuration.profile -eq [string]$extension.profile })
+    if ($base.Count -ne 1) { throw "Extension $directory has profile '$($extension.profile)' without a look 1 directory for it." }
+    if (@($sources | Where-Object { $_.Look -eq 2 -and [string]$_.Configuration.profile -eq [string]$extension.profile }).Count -gt 0) { throw "Two extensions for profile '$($extension.profile)'." }
+    foreach ($name in @($identityFields + @('profile', 'phase', 'monitorSha256', 'sampleIntervalSeconds'))) {
+        if ([string](Get-ConfigValue $base[0].Configuration $name '') -ne [string](Get-ConfigValue $extension $name '')) {
+            throw "Extension differs from look 1 in '$name' ('$(Get-ConfigValue $base[0].Configuration $name '')' vs '$(Get-ConfigValue $extension $name '')'); it cannot be pooled."
         }
     }
     if ([int](Get-ConfigValue $extension 'firstPair' 1) -ne $plannedPairsPerLook + 1 -or [int]$extension.pairs -ne $plannedPairsPerLook) {
         throw "The extension must be pairs $($plannedPairsPerLook + 1)..$(2 * $plannedPairsPerLook) (-FirstPair $($plannedPairsPerLook + 1) -Pairs $plannedPairsPerLook)."
     }
-    $directories += $ExtensionDirectory
-}
-if ($phase -eq 'Confirmatory' -and ([int](Get-ConfigValue $configuration 'firstPair' 1) -ne 1 -or [int]$configuration.pairs -ne $plannedPairsPerLook)) {
-    throw "Confirmatory look 1 must be pairs 1..$plannedPairsPerLook (got firstPair $(Get-ConfigValue $configuration 'firstPair' 1), pairs $($configuration.pairs))."
+    $sources.Add([pscustomobject]@{ Directory = $directory; Configuration = $extension; Look = 2 })
 }
 if (-not $OutputDirectory) {
-    $OutputDirectory = Join-Path $directories[-1] ("analysis-{0}" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    $OutputDirectory = Join-Path $sources[$sources.Count - 1].Directory ("analysis-{0}" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
 }
 if (Test-Path -LiteralPath $OutputDirectory) { throw "$OutputDirectory already exists; choose a new -OutputDirectory." }
 
@@ -195,11 +188,16 @@ $memoryMetrics = @(
 $cpuMetrics = @('IdleBeforeCpuSeconds', 'LoadCpuSeconds')
 $resourceMetrics = @($memoryMetrics + $cpuMetrics)
 $performanceMetrics = @('RequestsPerSecond', 'RoundMsP50', 'RoundMsP95')
-$primaryMetrics = if ($monitorProfile -eq 'Cpu') { @('LoadCpuSeconds', 'LoadPrivateMBAvg') } else { @('LoadPrivateMBMaxSample', 'LoadPrivateMBAvg') }
-$comparedMetrics = if ($monitorProfile -eq 'Cpu') { @($resourceMetrics + $performanceMetrics) } else { @($memoryMetrics + $performanceMetrics) }
+# The confirmatory family: one primary metric per profile and scenario. CPU is judged only at
+# the 1 s rate, memory only at the 0.2 s rate; the other metrics of each profile are secondary.
+$primaryByProfile = @{ Cpu = 'LoadCpuSeconds'; Ram = 'LoadPrivateMBAvg' }
+$comparedByProfile = @{ Cpu = @($resourceMetrics + $performanceMetrics); Ram = @($memoryMetrics + $performanceMetrics) }
 
 $runs = New-Object System.Collections.Generic.List[object]
-foreach ($directory in $directories) {
+foreach ($source in $sources) {
+    $directory = $source.Directory
+    $monitorProfile = [string]$source.Configuration.profile
+    $nominalInterval = [double]$source.Configuration.sampleIntervalSeconds
     $runsDirectory = Join-Path $directory 'runs'
     $logByRun = @{}
     $logOrder = New-Object System.Collections.Generic.List[string]
@@ -243,7 +241,7 @@ foreach ($directory in $directories) {
         try { $report = Get-Content -LiteralPath $reportFile.FullName -Raw | ConvertFrom-Json }
         catch { $reasons.Add('report is not valid JSON') }
         $row = [ordered]@{
-            Scenario = $scenario; Pair = $pair; Build = $build; Directory = Split-Path -Leaf $directory
+            Profile = $monitorProfile; Scenario = $scenario; Pair = $pair; Build = $build; Directory = Split-Path -Leaf $directory
             Valid = $false; InvalidReason = ''
             Passed = $false; Error = ''
             ExitCode = $(if ($null -ne $log) { $log.exitCode } else { $null })
@@ -365,16 +363,15 @@ foreach ($directory in $directories) {
         else {
             $reasons.Add('monitor CSV missing')
         }
-        foreach ($metric in $primaryMetrics) {
-            if ($null -eq $row[$metric]) { $reasons.Add("$metric missing") }
-        }
+        $primaryMetric = $primaryByProfile[$monitorProfile]
+        if ($null -eq $row[$primaryMetric]) { $reasons.Add("$primaryMetric missing") }
         $row.Valid = $reasons.Count -eq 0
         $row.InvalidReason = $reasons -join '; '
         $runs.Add([pscustomobject]$row)
     }
 }
 
-if ($runs.Count -eq 0) { throw "No run reports found in $($directories -join ', ')" }
+if ($runs.Count -eq 0) { throw "No run reports found in $(($sources | ForEach-Object { $_.Directory }) -join ', ')" }
 New-Item -ItemType Directory -Path $OutputDirectory | Out-Null
 $OutputDirectory = (Resolve-Path -LiteralPath $OutputDirectory).Path
 
@@ -383,7 +380,7 @@ $formattedColumns = @($numberColumns + @('IntervalMedianSeconds', 'IntervalMaxSe
 $runs | ForEach-Object {
     $out = [ordered]@{}
     foreach ($property in $_.PSObject.Properties) {
-        if ($formattedColumns -contains $property.Name) { $out[$property.Name] = Format-Number $property.Value 3 }
+        if ($formattedColumns -contains $property.Name) { $out[$property.Name] = Format-Raw $property.Value }
         else { $out[$property.Name] = $property.Value }
     }
     [pscustomobject]$out
@@ -391,7 +388,7 @@ $runs | ForEach-Object {
 
 # Paired differences; a pair is valid only if both of its runs are.
 $pairRows = New-Object System.Collections.Generic.List[object]
-foreach ($group in @($runs | Group-Object Scenario, Pair | Sort-Object { $_.Group[0].Scenario }, { $_.Group[0].Pair })) {
+foreach ($group in @($runs | Group-Object Profile, Scenario, Pair | Sort-Object { $_.Group[0].Profile }, { $_.Group[0].Scenario }, { $_.Group[0].Pair })) {
     $plain = @($group.Group | Where-Object { $_.Build -eq 'plain' })
     $runtime = @($group.Group | Where-Object { $_.Build -eq 'runtime' })
     $reasons = New-Object System.Collections.Generic.List[string]
@@ -399,7 +396,7 @@ foreach ($group in @($runs | Group-Object Scenario, Pair | Sort-Object { $_.Grou
     if ($runtime.Count -ne 1) { $reasons.Add("runtime runs: $($runtime.Count)") }
     foreach ($run in @($plain + $runtime)) { if (-not $run.Valid) { $reasons.Add("$($run.Build): $($run.InvalidReason)") } }
     $first = $group.Group[0]
-    $pairRow = [ordered]@{ Scenario = $first.Scenario; Pair = $first.Pair; Valid = $reasons.Count -eq 0; InvalidReason = $reasons -join '; ' }
+    $pairRow = [ordered]@{ Profile = $first.Profile; Scenario = $first.Scenario; Pair = $first.Pair; Valid = $reasons.Count -eq 0; InvalidReason = $reasons -join '; ' }
     foreach ($metric in $numberColumns) {
         $pairRow["Plain$metric"] = $null; $pairRow["Runtime$metric"] = $null; $pairRow[$metric] = $null
         if ($plain.Count -eq 1 -and $runtime.Count -eq 1 -and $null -ne $plain[0].$metric -and $null -ne $runtime[0].$metric) {
@@ -411,39 +408,43 @@ foreach ($group in @($runs | Group-Object Scenario, Pair | Sort-Object { $_.Grou
     $pairRows.Add([pscustomobject]$pairRow)
 }
 $pairRows | ForEach-Object {
-    $out = [ordered]@{ Scenario = $_.Scenario; Pair = $_.Pair; Valid = $_.Valid; InvalidReason = $_.InvalidReason }
-    foreach ($metric in $numberColumns) { $out[$metric] = Format-Number $_.$metric }
+    $out = [ordered]@{ Profile = $_.Profile; Scenario = $_.Scenario; Pair = $_.Pair; Valid = $_.Valid; InvalidReason = $_.InvalidReason }
+    foreach ($metric in $numberColumns) {
+        $out["Plain$metric"] = Format-Raw $_."Plain$metric"; $out["Runtime$metric"] = Format-Raw $_."Runtime$metric"; $out[$metric] = Format-Raw $_.$metric
+    }
     [pscustomobject]$out
 } | Export-Csv -LiteralPath (Join-Path $OutputDirectory 'pairs.csv') -NoTypeInformation -Encoding UTF8
 
 function Invoke-Analysis {
-    # One look: per scenario and metric, statistics over the valid pairs with Pair <= MaxPair.
+    # One look: per profile, scenario and metric, statistics over the valid pairs with Pair <= MaxPair.
     param([int]$MaxPair, [double]$Alpha, [string[]]$TestedKeys)
     $rows = New-Object System.Collections.Generic.List[object]
-    foreach ($scenario in @($pairRows | Select-Object -ExpandProperty Scenario -Unique | Sort-Object)) {
-        $inLook = @($pairRows | Where-Object { $_.Scenario -eq $scenario -and $_.Pair -le $MaxPair })
+    foreach ($cell in @($pairRows | Select-Object Profile, Scenario -Unique | Sort-Object Profile, Scenario)) {
+        $monitorProfile = $cell.Profile; $scenario = $cell.Scenario
+        $inLook = @($pairRows | Where-Object { $_.Profile -eq $monitorProfile -and $_.Scenario -eq $scenario -and $_.Pair -le $MaxPair })
         $valid = @($inLook | Where-Object { $_.Valid })
-        foreach ($metric in $comparedMetrics) {
+        foreach ($metric in $comparedByProfile[$monitorProfile]) {
             $usable = @($valid | Where-Object { $null -ne $_.$metric })
             $diffs = [double[]]@($usable | ForEach-Object { [double]$_.$metric })
             $plainValues = [double[]]@($usable | ForEach-Object { [double]$_."Plain$metric" })
             $runtimeValues = [double[]]@($usable | ForEach-Object { [double]$_."Runtime$metric" })
-            $key = "$scenario/$metric"
-            $primary = $primaryMetrics -contains $metric
+            $key = "$monitorProfile/$scenario/$metric"
+            $primary = $primaryByProfile[$monitorProfile] -eq $metric
             $row = [pscustomobject][ordered]@{
-                Scenario = $scenario; Metric = $metric
-                Role = $(if ($primary) { 'primary' } else { 'descriptive' })
+                Profile = $monitorProfile; Scenario = $scenario; Metric = $metric
+                Role = $(if ($primary) { 'primary' } else { 'secondary' })
                 PairsInLook = $inLook.Count; ValidPairs = $diffs.Count; InvalidPairs = $inLook.Count - $valid.Count
+                ZeroDiffs = [SymmetricBenchStats]::CountZeros($diffs)
                 PlainMedian = Get-Median $plainValues; RuntimeMedian = Get-Median $runtimeValues
                 DiffMedian = Get-Median $diffs
                 DiffMin = $(if ($diffs.Count -gt 0) { ($diffs | Measure-Object -Minimum).Minimum } else { $null })
                 DiffMax = $(if ($diffs.Count -gt 0) { ($diffs | Measure-Object -Maximum).Maximum } else { $null })
-                CiLevel = 1 - $Alpha; CiLow = $null; CiHigh = $null; CiCoverage = $null
+                CiLevel = 1 - $Alpha; CiLow = $null; CiHigh = $null; CiCoverageMin = $null
                 P = $null; PHolm = $null; Decided = $false; Verdict = ''
             }
             if ($diffs.Count -ge 1) {
                 $interval = [SymmetricBenchStats]::MedianInterval($diffs, 1 - $Alpha)
-                if ($null -ne $interval) { $row.CiLow = $interval[0]; $row.CiHigh = $interval[1]; $row.CiCoverage = $interval[2] }
+                if ($null -ne $interval) { $row.CiLow = $interval[0]; $row.CiHigh = $interval[1]; $row.CiCoverageMin = $interval[2] }
             }
             if ($primary -and $TestedKeys -contains $key -and $diffs.Count -ge $minValidPairsPerLook) {
                 $row.P = [SymmetricBenchStats]::SignTestP($diffs)
@@ -451,7 +452,7 @@ function Invoke-Analysis {
             $rows.Add($row)
         }
     }
-    # Holm over the primary tests of this look.
+    # Holm over the primary tests of this look (the whole family, both profiles).
     $tested = @($rows | Where-Object { $null -ne $_.P } | Sort-Object P)
     $running = 0.0
     for ($k = 0; $k -lt $tested.Count; $k++) {
@@ -462,8 +463,8 @@ function Invoke-Analysis {
     }
     foreach ($row in $rows) {
         if ($row.ValidPairs -eq 0) { $row.Verdict = 'no valid data'; continue }
-        if ($row.Role -ne 'primary') { $row.Verdict = 'descriptive'; continue }
-        if ($TestedKeys -notcontains "$($row.Scenario)/$($row.Metric)") { continue }
+        if ($row.Role -ne 'primary') { $row.Verdict = 'secondary: descriptive'; continue }
+        if ($TestedKeys -notcontains "$($row.Profile)/$($row.Scenario)/$($row.Metric)") { continue }
         if ($null -eq $row.P) { $row.Verdict = "insufficient valid pairs (< $minValidPairsPerLook)"; continue }
         if ($row.PHolm -lt $Alpha) {
             $row.Decided = $true
@@ -475,7 +476,8 @@ function Invoke-Analysis {
     return , $rows.ToArray()
 }
 
-$allPrimaryKeys = @(foreach ($scenario in @($pairRows | Select-Object -ExpandProperty Scenario -Unique)) { foreach ($metric in $primaryMetrics) { "$scenario/$metric" } })
+$allPrimaryKeys = @($pairRows | Select-Object Profile, Scenario -Unique | ForEach-Object { "$($_.Profile)/$($_.Scenario)/$($primaryByProfile[$_.Profile])" })
+$hasExtension = @($sources | Where-Object { $_.Look -eq 2 }).Count -gt 0
 $looks = New-Object System.Collections.Generic.List[object]
 if ($phase -eq 'Pilot') {
     $rows = Invoke-Analysis -MaxPair ([int]::MaxValue) -Alpha 0.05 -TestedKeys @()
@@ -484,19 +486,25 @@ if ($phase -eq 'Pilot') {
 }
 else {
     $look1 = Invoke-Analysis -MaxPair $plannedPairsPerLook -Alpha $lookAlpha -TestedKeys $allPrimaryKeys
-    $undecided = @($look1 | Where-Object { $_.Role -eq 'primary' -and -not $_.Decided } | ForEach-Object { "$($_.Scenario)/$($_.Metric)" })
+    $undecided = @($look1 | Where-Object { $_.Role -eq 'primary' -and -not $_.Decided } | ForEach-Object { "$($_.Profile)/$($_.Scenario)/$($_.Metric)" })
     foreach ($row in $look1) {
         if ($row.Role -eq 'primary' -and -not $row.Decided) {
-            $note = $(if ($ExtensionDirectory) { 'undecided, tested again at look 2' } else { 'undecided: extend to 20 pairs' })
+            $note = $(if ($hasExtension) { 'undecided, tested again at look 2' } else { 'undecided: extend to 20 pairs' })
             $row.Verdict = $(if ($row.Verdict) { "$($row.Verdict); $note" } else { $note })
         }
     }
     $looks.Add([pscustomobject]@{ Name = 'look1'; Rows = $look1 })
-    if ($ExtensionDirectory) {
+    if ($hasExtension) {
+        foreach ($key in $undecided) {
+            $keyProfile = $key.Split('/')[0]
+            if (@($sources | Where-Object { $_.Look -eq 2 -and [string]$_.Configuration.profile -eq $keyProfile }).Count -eq 0) {
+                throw "Test $key is undecided after look 1, but there is no extension directory for profile $keyProfile."
+            }
+        }
         $look2 = Invoke-Analysis -MaxPair (2 * $plannedPairsPerLook) -Alpha $lookAlpha -TestedKeys $undecided
         foreach ($row in $look2) {
             if ($row.Role -ne 'primary') { continue }
-            if ($undecided -notcontains "$($row.Scenario)/$($row.Metric)") { $row.Verdict = 'decided at look 1'; continue }
+            if ($undecided -notcontains "$($row.Profile)/$($row.Scenario)/$($row.Metric)") { $row.Verdict = 'decided at look 1'; continue }
             if (-not $row.Decided -and -not $row.Verdict) { $row.Verdict = 'no detectable difference' }
         }
         $looks.Add([pscustomobject]@{ Name = 'look2'; Rows = $look2 })
@@ -508,9 +516,9 @@ foreach ($look in $looks) {
     foreach ($row in $look.Rows) {
         $out = [ordered]@{ Look = $look.Name }
         foreach ($property in $row.PSObject.Properties) {
-            if (@('P', 'PHolm') -contains $property.Name) { $out[$property.Name] = Format-Number $property.Value 4 }
-            elseif (@('PlainMedian', 'RuntimeMedian', 'DiffMedian', 'DiffMin', 'DiffMax', 'CiLow', 'CiHigh') -contains $property.Name) { $out[$property.Name] = Format-Number $property.Value }
-            elseif (@('CiLevel', 'CiCoverage') -contains $property.Name) { $out[$property.Name] = Format-Number $property.Value 3 }
+            if (@('P', 'PHolm', 'PlainMedian', 'RuntimeMedian', 'DiffMedian', 'DiffMin', 'DiffMax', 'CiLevel', 'CiLow', 'CiHigh', 'CiCoverageMin') -contains $property.Name) {
+                $out[$property.Name] = Format-Raw $property.Value
+            }
             else { $out[$property.Name] = $property.Value }
         }
         $summaryRows.Add([pscustomobject]$out)
@@ -520,10 +528,13 @@ $summaryRows | Export-Csv -LiteralPath (Join-Path $OutputDirectory 'summary.csv'
 
 # Markdown: protocol notes, correctness, validity, then resources.
 $lines = New-Object System.Collections.Generic.List[string]
-$lines.Add(('Profile: {0} (nominal monitor interval {1} s). Phase: {2}. Commit {3}. {4}.' -f $monitorProfile, $configuration.sampleIntervalSeconds, $phase, $configuration.gitHead, $configuration.os))
-$lines.Add(('Sources: {0}. Analysis: {1}.' -f (($directories | ForEach-Object { Split-Path -Leaf $_ }) -join ', '), (Split-Path -Leaf $OutputDirectory)))
+$lines.Add(('Phase: {0}. Commit {1}. {2}. Analysis: {3}.' -f $phase, $firstConfiguration.gitHead, $firstConfiguration.os, (Split-Path -Leaf $OutputDirectory)))
 $lines.Add('')
-$lines.Add('Estimand: median paired difference (runtime - plain) over valid pairs. MaxSample columns are the largest sampled value, not a guaranteed true peak.')
+foreach ($source in $sources) {
+    $lines.Add(('- {0}: profile {1}, nominal monitor interval {2} s, look {3}' -f (Split-Path -Leaf $source.Directory), $source.Configuration.profile, $source.Configuration.sampleIntervalSeconds, $source.Look))
+}
+$lines.Add('')
+$lines.Add('Estimand: median paired difference (runtime - plain) over valid pairs. Primary family: LoadCpuSeconds (Cpu profile) and LoadPrivateMBAvg (Ram profile) per scenario, Holm over all of them. MaxSample columns are the largest sampled value, not a guaranteed true peak. CI coverage is a guaranteed minimum (exact only without ties).')
 $lines.Add('')
 if ($deviations.Count -gt 0) {
     $lines.Add('## Protocol deviations')
@@ -533,33 +544,35 @@ if ($deviations.Count -gt 0) {
 }
 $lines.Add('## Correctness (counters per run)')
 $lines.Add('')
-$lines.Add('| Scenario | Pair | Build | Passed | Rounds passed | Overruns | Received | Executed | Coalesced | Cache hits | Failed | Note |')
-$lines.Add('|---|---|---|---|---|---|---|---|---|---|---|---|')
-foreach ($run in @($runs | Sort-Object Scenario, Pair, Build)) {
-    $lines.Add(('| {0} | {1} | {2} | {3} | {4}/{5} | {6} | {7} | {8} | {9} | {10} | {11} | {12} |' -f $run.Scenario, $run.Pair, $run.Build, $run.Passed, $run.PassedRounds, $run.Rounds, $run.Overruns, $run.RequestsReceived, $run.OperationsExecuted, $run.CoalescedRequests, $run.CacheHits, $run.FailedRequests, $run.Error))
+$lines.Add('| Profile | Scenario | Pair | Build | Passed | Rounds passed | Overruns | Received | Executed | Coalesced | Cache hits | Failed | Note |')
+$lines.Add('|---|---|---|---|---|---|---|---|---|---|---|---|---|')
+foreach ($run in @($runs | Sort-Object Profile, Scenario, Pair, Build)) {
+    $lines.Add(('| {13} | {0} | {1} | {2} | {3} | {4}/{5} | {6} | {7} | {8} | {9} | {10} | {11} | {12} |' -f $run.Scenario, $run.Pair, $run.Build, $run.Passed, $run.PassedRounds, $run.Rounds, $run.Overruns, $run.RequestsReceived, $run.OperationsExecuted, $run.CoalescedRequests, $run.CacheHits, $run.FailedRequests, $run.Error, $run.Profile))
 }
 $lines.Add('')
 $lines.Add('## Run validity and monitoring')
 $lines.Add('')
 $lines.Add('| Run | Valid | Load rows / expected | Interval median / load max (s) | Monitor CPU s | Reason |')
 $lines.Add('|---|---|---|---|---|---|')
-foreach ($run in @($runs | Sort-Object Scenario, Pair, Build)) {
-    $lines.Add(('| {0}-{1}-{2} | {3} | {4} / {5} | {6} / {7} | {8} | {9} |' -f $run.Scenario, $run.Pair, $run.Build, $run.Valid, $run.LoadRows, $run.LoadRowsExpected, (Format-Number $run.IntervalMedianSeconds 3), (Format-Number $run.LoadIntervalMaxSeconds 3), $run.MonitorCpuSeconds, $run.InvalidReason))
+foreach ($run in @($runs | Sort-Object Profile, Scenario, Pair, Build)) {
+    $lines.Add(('| {10} {0}-{1}-{2} | {3} | {4} / {5} | {6} / {7} | {8} | {9} |' -f $run.Scenario, $run.Pair, $run.Build, $run.Valid, $run.LoadRows, $run.LoadRowsExpected, (Format-Number $run.IntervalMedianSeconds 3), (Format-Number $run.LoadIntervalMaxSeconds 3), $run.MonitorCpuSeconds, $run.InvalidReason, $run.Profile))
 }
 $lines.Add('')
 $invalidPairs = @($pairRows | Where-Object { -not $_.Valid })
-$lines.Add(('Invalid pairs (kept in pairs.csv, left out of the statistics): {0}' -f $(if ($invalidPairs.Count -eq 0) { 'none' } else { ($invalidPairs | ForEach-Object { "$($_.Scenario) pair $($_.Pair)" }) -join ', ' })))
+$lines.Add(('Invalid pairs (kept in pairs.csv, left out of the statistics): {0}' -f $(if ($invalidPairs.Count -eq 0) { 'none' } else { ($invalidPairs | ForEach-Object { "$($_.Profile) $($_.Scenario) pair $($_.Pair)" }) -join ', ' })))
 $lines.Add('')
 foreach ($look in $looks) {
     $lines.Add("## Resources and latency, $($look.Name) (paired differences: runtime - plain)")
     $lines.Add('')
-    if ($monitorProfile -eq 'Ram') { $lines.Add('CPU metrics are not compared in the Ram profile (0.2 s WMI sampling adds observer overhead).'); $lines.Add('') }
-    $lines.Add('| Scenario | Metric | Role | Valid / in look | Plain median | Runtime median | Diff median | Diff min..max | CI of median diff | p (Holm) | Verdict |')
-    $lines.Add('|---|---|---|---|---|---|---|---|---|---|---|')
-    foreach ($row in @($summaryRows | Where-Object { $_.Look -eq $look.Name })) {
-        $ci = if ($row.CiLow -ne '') { '{0}..{1} ({2}%)' -f $row.CiLow, $row.CiHigh, ([double]$row.CiCoverage * 100).ToString('0.#', $culture) } elseif ($row.ValidPairs -gt 0) { "too few pairs for $(([double]$row.CiLevel * 100).ToString('0.#', $culture))%" } else { '' }
-        $pText = if ($row.P -ne '') { '{0} ({1})' -f $row.P, $row.PHolm } else { '' }
-        $lines.Add(('| {0} | {1} | {2} | {3} / {4} | {5} | {6} | {7} | {8}..{9} | {10} | {11} | {12} |' -f $row.Scenario, $row.Metric, $row.Role, $row.ValidPairs, $row.PairsInLook, $row.PlainMedian, $row.RuntimeMedian, $row.DiffMedian, $row.DiffMin, $row.DiffMax, $ci, $pText, $row.Verdict))
+    $lines.Add('CPU metrics are not compared in the Ram profile (0.2 s WMI sampling adds observer overhead).')
+    $lines.Add('')
+    $lines.Add('| Profile | Scenario | Metric | Role | Valid / in look (zero diffs) | Plain median | Runtime median | Diff median | Diff min..max | CI of median diff | p (Holm) | Verdict |')
+    $lines.Add('|---|---|---|---|---|---|---|---|---|---|---|---|')
+    foreach ($row in @($looks | Where-Object { $_.Name -eq $look.Name } | ForEach-Object { $_.Rows })) {
+        $ci = if ($null -ne $row.CiLow) { '{0}..{1} (>= {2}%)' -f (Format-Number $row.CiLow), (Format-Number $row.CiHigh), ([Math]::Floor($row.CiCoverageMin * 1000) / 10).ToString('0.#', $culture) } elseif ($row.ValidPairs -gt 0) { "too few pairs for $(([double]$row.CiLevel * 100).ToString('0.#', $culture))%" } else { '' }
+        $pText = if ($null -ne $row.P) { '{0} ({1})' -f (Format-Number $row.P 4), (Format-Number $row.PHolm 4) } else { '' }
+        $lines.Add(('| {0} | {1} | {2} | {3} | {4} / {5} ({6}) | {7} | {8} | {9} | {10}..{11} | {12} | {13} | {14} |' -f $row.Profile, $row.Scenario, $row.Metric, $row.Role, $row.ValidPairs, $row.PairsInLook, $row.ZeroDiffs,
+                (Format-Number $row.PlainMedian), (Format-Number $row.RuntimeMedian), (Format-Number $row.DiffMedian), (Format-Number $row.DiffMin), (Format-Number $row.DiffMax), $ci, $pText, $row.Verdict))
     }
     $lines.Add('')
 }
