@@ -29,6 +29,15 @@ struct TaskEntry<V, E> {
     callers: AtomicUsize,
 }
 
+impl<V, E> TaskEntry<V, E> {
+    fn new_arc() -> Arc<Self> {
+        Arc::new(Self {
+            cell: OnceCell::new(),
+            callers: AtomicUsize::new(0),
+        })
+    }
+}
+
 /// Удаляет запись при завершении или отмене вызывающего вызова.
 struct CallerGuard<'a, K: Eq + Hash, V, E> {
     tasks: &'a Mutex<HashMap<K, Arc<TaskEntry<V, E>>>>,
@@ -102,15 +111,13 @@ where
             #[cfg(test)]
             coalescer_probe::mark_join();
 
-            let entry = tasks
-                .entry(key.clone())
-                .or_insert_with(|| {
-                    Arc::new(TaskEntry {
-                        cell: OnceCell::new(),
-                        callers: AtomicUsize::new(0),
-                    })
-                })
-                .clone();
+            let slot = tasks.entry(key.clone()).or_insert_with(TaskEntry::new_arc);
+            // Результат уже опубликован: операция завершена, новый вызов
+            // не присоединяется к ней, а начинает свою.
+            if slot.cell.initialized() {
+                *slot = TaskEntry::new_arc();
+            }
+            let entry = Arc::clone(slot);
 
             entry.callers.fetch_add(1, Ordering::Relaxed);
             entry
