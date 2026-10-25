@@ -19,8 +19,9 @@ The rule is the one in README.md ("Statistical rule"); in short:
   ("Run validity"); a pair is valid only if both of its runs are. Invalid
   runs and pairs stay in runs.csv and pairs.csv with their reasons and are
   left out of every median, interval and p-value.
-- Test: exact two-sided sign test (zero differences dropped), Holm over the
-  whole family within a look. Interval: closed order-statistic interval for
+- Test: two-sided sign test that keeps zero differences in n (exact without
+  ties, conservative with them), Holm within a look over every hypothesis of
+  the declared family, with p = 1 where no p-value can be computed. Interval: closed order-statistic interval for
   the median over all differences, with a guaranteed minimum coverage
   (exact only without ties; see SymmetricBenchStats.cs).
 - Confirmatory looks: look 1 after 10 pairs at alpha 0.025; look 2, only for
@@ -65,7 +66,10 @@ $maxIntervalFactor = 5
 function ConvertTo-Number {
     param([AllowNull()][object]$Value)
     if ($null -eq $Value -or [string]::IsNullOrWhiteSpace([string]$Value)) { return $null }
-    return [double]::Parse([string]$Value, $culture)
+    $number = [double]::Parse([string]$Value, $culture)
+    # NaN or Infinity count as missing, so they make a run invalid instead of entering a statistic.
+    if ([double]::IsNaN($number) -or [double]::IsInfinity($number)) { return $null }
+    return $number
 }
 
 function Get-Median {
@@ -109,6 +113,16 @@ function Select-Phase {
     @($Rows | Where-Object { $_.Time -ge $From -and $_.Time -lt $To })
 }
 
+function Get-LogReasons {
+    param([AllowNull()][object]$Log)
+    if ($null -eq $Log) { return @('no runs.log entry') }
+    $reasons = @()
+    if (-not $Log.PSObject.Properties['exitCode'] -or $null -eq $Log.exitCode -or [int]$Log.exitCode -ne 0) { $reasons += "app exit code '$(Get-ConfigValue $Log 'exitCode' '')'" }
+    if (-not $Log.PSObject.Properties['timedOut'] -or $Log.timedOut) { $reasons += 'timed out or timeout not recorded' }
+    if (-not $Log.PSObject.Properties['monitorExit'] -or $null -eq $Log.monitorExit -or [int]$Log.monitorExit -ne 0) { $reasons += "monitor exit code '$(Get-ConfigValue $Log 'monitorExit' '')'" }
+    return $reasons
+}
+
 function Read-Configuration {
     param([string]$Directory)
     $file = Join-Path $Directory 'configuration.json'
@@ -128,7 +142,8 @@ function Get-ConfigValue {
 
 $deviations = New-Object System.Collections.Generic.List[string]
 $identityFields = @('machine', 'gitHead', 'plainExeSha256', 'runtimeExeSha256', 'durationSeconds', 'idleSeconds', 'pauseSeconds',
-    'iterations', 'bufferMb', 'requestsPerWindow', 'roundIntervalMs')
+    'iterations', 'bufferMb', 'requestsPerWindow', 'roundIntervalMs', 'runScriptSha256', 'summarizeScriptSha256', 'protocolSha256', 'order')
+$familyScenarios = @('S1', 'S2', 'S3', 'S4')
 $sources = New-Object System.Collections.Generic.List[object]
 foreach ($path in $ResultsDirectory) {
     $directory = (Resolve-Path -LiteralPath $path).Path
@@ -154,6 +169,9 @@ if ($phase -eq 'Confirmatory') {
     foreach ($source in $sources) {
         if ([int](Get-ConfigValue $source.Configuration 'firstPair' 1) -ne 1 -or [int]$source.Configuration.pairs -ne $plannedPairsPerLook) {
             throw "Confirmatory look 1 must be pairs 1..$plannedPairsPerLook (got firstPair $(Get-ConfigValue $source.Configuration 'firstPair' 1), pairs $($source.Configuration.pairs))."
+        }
+        if ((@($source.Configuration.scenarios | ForEach-Object { [string]$_ } | Sort-Object) -join ',') -ne ($familyScenarios -join ',')) {
+            throw "Confirmatory look 1 must run all of $($familyScenarios -join ', ') (got $(@($source.Configuration.scenarios) -join ', ')): the family is declared over all of them."
         }
     }
 }
@@ -212,6 +230,7 @@ foreach ($source in $sources) {
     }
 
     # The order fixed before the first run, if the run script wrote one.
+    $scheduled = @()
     $scheduleFile = Join-Path $directory 'schedule.csv'
     if (Test-Path -LiteralPath $scheduleFile) {
         $scheduled = @(Import-Csv -LiteralPath $scheduleFile | Sort-Object { [int]$_.Seq } | ForEach-Object { $_.Name })
@@ -231,6 +250,7 @@ foreach ($source in $sources) {
         $deviations.Add("$(Split-Path -Leaf $directory): no schedule.csv (run script before the fixed-order change); order taken from runs.log")
     }
 
+    $seen = @{}
     foreach ($reportFile in @(Get-ChildItem -LiteralPath $runsDirectory -Filter '*.json' | Sort-Object Name)) {
         $base = [System.IO.Path]::GetFileNameWithoutExtension($reportFile.Name)
         if ($base -notmatch '^(S[1-4])-pair(\d+)-(plain|runtime)$') { continue }
@@ -249,17 +269,16 @@ foreach ($source in $sources) {
             Rounds = $null; PassedRounds = $null; Overruns = $null
             RequestsReceived = $null; OperationsExecuted = $null; CoalescedRequests = $null; CacheHits = $null; FailedRequests = $null
             RequestsPerSecond = $null; RoundMsP50 = $null; RoundMsP95 = $null
-            MonitorRows = 0; LoadRows = 0; LoadRowsExpected = $null; LoadRowsWithMissingValues = $null; LoadProcessCountMax = $null
-            IntervalMedianSeconds = $null; IntervalMaxSeconds = $null; LoadIntervalMaxSeconds = $null
+            MonitorExit = $(if ($null -ne $log -and $log.PSObject.Properties['monitorExit']) { $log.monitorExit } else { $null })
+            MonitorRows = 0; LoadRows = 0; LoadRowsExpected = $null
+            LoadRowsWithMissingPrivate = $null; LoadRowsWithUnreadableCpu = $null; LoadRowsWithInvalidInterval = $null; LoadProcessCountMax = $null
+            IntervalMedianSeconds = $null; IntervalMaxSeconds = $null; LoadIntervalMedianSeconds = $null; LoadIntervalMaxSeconds = $null
             MonitorCpuSeconds = $(if ($null -ne $log -and $log.PSObject.Properties['monitorCpuSeconds']) { $log.monitorCpuSeconds } else { $null })
         }
         foreach ($metric in $resourceMetrics) { $row[$metric] = $null }
+        $seen[$base] = $true
 
-        if ($null -eq $log) { $reasons.Add('no runs.log entry') }
-        else {
-            if ($log.exitCode -ne 0) { $reasons.Add("exit code $($log.exitCode)") }
-            if ($log.timedOut) { $reasons.Add('timed out') }
-        }
+        foreach ($reason in @(Get-LogReasons $log)) { $reasons.Add($reason) }
         if ($null -ne $report) {
             $row.Passed = [bool]$report.passed
             if (-not $row.Passed) { $reasons.Add('report not passed') }
@@ -308,7 +327,8 @@ foreach ($source in $sources) {
                         CpuDelta   = ConvertTo-Number $_.CpuDeltaSeconds
                         Sample     = [int]$_.Sample
                         Interval   = ConvertTo-Number $_.IntervalSeconds
-                        Missing    = [int](ConvertTo-Number $_.PrivateMissingCount) + [int](ConvertTo-Number $_.CpuUnreadableCount)
+                        PrivateMissing = ConvertTo-Number $_.PrivateMissingCount
+                        CpuUnreadable  = ConvertTo-Number $_.CpuUnreadableCount
                     }
                 })
             $row.MonitorRows = $samples.Count
@@ -323,7 +343,11 @@ foreach ($source in $sources) {
             $idleAfter = Select-Phase $samples $loadTo (Get-Time $report.phases.endedAt)
             $row.LoadRows = $load.Count
             $row.LoadRowsExpected = [Math]::Floor(($loadTo - $loadFrom).TotalSeconds / $nominalInterval)
-            $row.LoadIntervalMaxSeconds = Get-Max @($load | Where-Object { $_.Sample -gt 0 -and $null -ne $_.Interval } | ForEach-Object { $_.Interval })
+            # The cadence is checked inside the load phase itself; the whole-run median is only context.
+            $row.LoadRowsWithInvalidInterval = @($load | Where-Object { $_.Sample -eq 0 -or $null -eq $_.Interval -or $_.Interval -le 0 }).Count
+            $loadIntervals = @($load | Where-Object { $_.Sample -gt 0 -and $null -ne $_.Interval -and $_.Interval -gt 0 } | ForEach-Object { $_.Interval })
+            $row.LoadIntervalMedianSeconds = Get-Median $loadIntervals
+            $row.LoadIntervalMaxSeconds = Get-Max $loadIntervals
             $row.IdleBeforePrivateMB = Get-Average @($idleBefore | ForEach-Object { $_.Private })
             $row.LoadPrivateMBAvg = Get-Average @($load | ForEach-Object { $_.Private })
             $row.LoadPrivateMBMaxSample = Get-Max @($load | ForEach-Object { $_.Private })
@@ -334,13 +358,17 @@ foreach ($source in $sources) {
             $row.IdleAfterPrivateMB = Get-Average @($idleAfter | ForEach-Object { $_.Private })
             $idleCpu = @($idleBefore | Where-Object { $null -ne $_.CpuDelta } | ForEach-Object { $_.CpuDelta })
             if ($idleCpu.Count -gt 0) { $row.IdleBeforeCpuSeconds = ($idleCpu | Measure-Object -Sum).Sum }
-            $row.LoadRowsWithMissingValues = @($load | Where-Object { $_.Missing -gt 0 }).Count
+            $row.LoadRowsWithMissingPrivate = @($load | Where-Object { $null -eq $_.Private -or $null -eq $_.PrivateMissing -or $_.PrivateMissing -gt 0 }).Count
+            $row.LoadRowsWithUnreadableCpu = @($load | Where-Object { $null -eq $_.CpuDelta -or $null -eq $_.CpuUnreadable -or $_.CpuUnreadable -gt 0 }).Count
             $row.LoadProcessCountMax = Get-Max @($load | ForEach-Object { [double]$_.Processes })
 
             if ($row.LoadRowsExpected -gt 0 -and $row.LoadRows -lt $minLoadCoverage * $row.LoadRowsExpected) { $reasons.Add("load rows $($row.LoadRows) < $([int]($minLoadCoverage * 100))% of $($row.LoadRowsExpected)") }
-            if ($row.LoadRowsWithMissingValues -gt 0) { $reasons.Add("$($row.LoadRowsWithMissingValues) load rows with missing values") }
-            if ($null -eq $row.IntervalMedianSeconds -or [Math]::Abs($row.IntervalMedianSeconds - $nominalInterval) -gt $maxIntervalDeviation * $nominalInterval) {
-                $reasons.Add("interval median $(Format-Number $row.IntervalMedianSeconds 3) s not within $([int]($maxIntervalDeviation * 100))% of $nominalInterval s")
+            if ($row.LoadRowsWithMissingPrivate -gt 0) { $reasons.Add("$($row.LoadRowsWithMissingPrivate) load rows with missing or non-finite private memory") }
+            # CPU is compared only in the Cpu profile, so unreadable CPU invalidates only those runs.
+            if ($monitorProfile -eq 'Cpu' -and $row.LoadRowsWithUnreadableCpu -gt 0) { $reasons.Add("$($row.LoadRowsWithUnreadableCpu) load rows with missing or non-finite CPU") }
+            if ($row.LoadRowsWithInvalidInterval -gt 0) { $reasons.Add("$($row.LoadRowsWithInvalidInterval) load rows with a missing, non-finite or non-positive interval") }
+            if ($null -eq $row.LoadIntervalMedianSeconds -or [Math]::Abs($row.LoadIntervalMedianSeconds - $nominalInterval) -gt $maxIntervalDeviation * $nominalInterval) {
+                $reasons.Add("load interval median $(Format-Number $row.LoadIntervalMedianSeconds 3) s not within $([int]($maxIntervalDeviation * 100))% of $nominalInterval s")
             }
             if ($null -ne $row.LoadIntervalMaxSeconds -and $row.LoadIntervalMaxSeconds -gt $maxIntervalFactor * $nominalInterval) {
                 $reasons.Add("load gap $(Format-Number $row.LoadIntervalMaxSeconds 3) s > $maxIntervalFactor x $nominalInterval s")
@@ -369,6 +397,35 @@ foreach ($source in $sources) {
         $row.InvalidReason = $reasons -join '; '
         $runs.Add([pscustomobject]$row)
     }
+
+    # A scheduled or logged launch without a JSON report stays in the data as an invalid run,
+    # so a crash or timeout cannot drop a pair from the family.
+    $expectedNames = @(@($scheduled) + @($logOrder) | Where-Object { $_ -match '^S[1-4]-pair\d+-(plain|runtime)$' } | Sort-Object -Unique)
+    foreach ($name in $expectedNames) {
+        if ($seen.ContainsKey($name)) { continue }
+        $null = $name -match '^(S[1-4])-pair(\d+)-(plain|runtime)$'
+        $log = $logByRun[$name]
+        $reasons = New-Object System.Collections.Generic.List[string]
+        $reasons.Add('JSON report missing')
+        foreach ($reason in @(Get-LogReasons $log)) { $reasons.Add($reason) }
+        $row = [ordered]@{
+            Profile = $monitorProfile; Scenario = $Matches[1]; Pair = [int]$Matches[2]; Build = $Matches[3]; Directory = Split-Path -Leaf $directory
+            Valid = $false; InvalidReason = $reasons -join '; '
+            Passed = $false; Error = 'JSON report missing'
+            ExitCode = $(if ($null -ne $log) { $log.exitCode } else { $null })
+            TimedOut = $(if ($null -ne $log) { $log.timedOut } else { $null })
+            Rounds = $null; PassedRounds = $null; Overruns = $null
+            RequestsReceived = $null; OperationsExecuted = $null; CoalescedRequests = $null; CacheHits = $null; FailedRequests = $null
+            RequestsPerSecond = $null; RoundMsP50 = $null; RoundMsP95 = $null
+            MonitorExit = $(if ($null -ne $log -and $log.PSObject.Properties['monitorExit']) { $log.monitorExit } else { $null })
+            MonitorRows = 0; LoadRows = 0; LoadRowsExpected = $null
+            LoadRowsWithMissingPrivate = $null; LoadRowsWithUnreadableCpu = $null; LoadRowsWithInvalidInterval = $null; LoadProcessCountMax = $null
+            IntervalMedianSeconds = $null; IntervalMaxSeconds = $null; LoadIntervalMedianSeconds = $null; LoadIntervalMaxSeconds = $null
+            MonitorCpuSeconds = $(if ($null -ne $log -and $log.PSObject.Properties['monitorCpuSeconds']) { $log.monitorCpuSeconds } else { $null })
+        }
+        foreach ($metric in $resourceMetrics) { $row[$metric] = $null }
+        $runs.Add([pscustomobject]$row)
+    }
 }
 
 if ($runs.Count -eq 0) { throw "No run reports found in $(($sources | ForEach-Object { $_.Directory }) -join ', ')" }
@@ -376,7 +433,7 @@ New-Item -ItemType Directory -Path $OutputDirectory | Out-Null
 $OutputDirectory = (Resolve-Path -LiteralPath $OutputDirectory).Path
 
 $numberColumns = @($resourceMetrics + $performanceMetrics)
-$formattedColumns = @($numberColumns + @('IntervalMedianSeconds', 'IntervalMaxSeconds', 'LoadIntervalMaxSeconds'))
+$formattedColumns = @($numberColumns + @('IntervalMedianSeconds', 'IntervalMaxSeconds', 'LoadIntervalMedianSeconds', 'LoadIntervalMaxSeconds'))
 $runs | ForEach-Object {
     $out = [ordered]@{}
     foreach ($property in $_.PSObject.Properties) {
@@ -419,7 +476,7 @@ function Invoke-Analysis {
     # One look: per profile, scenario and metric, statistics over the valid pairs with Pair <= MaxPair.
     param([int]$MaxPair, [double]$Alpha, [string[]]$TestedKeys)
     $rows = New-Object System.Collections.Generic.List[object]
-    foreach ($cell in @($pairRows | Select-Object Profile, Scenario -Unique | Sort-Object Profile, Scenario)) {
+    foreach ($cell in $cells) {
         $monitorProfile = $cell.Profile; $scenario = $cell.Scenario
         $inLook = @($pairRows | Where-Object { $_.Profile -eq $monitorProfile -and $_.Scenario -eq $scenario -and $_.Pair -le $MaxPair })
         $valid = @($inLook | Where-Object { $_.Valid })
@@ -452,14 +509,17 @@ function Invoke-Analysis {
             $rows.Add($row)
         }
     }
-    # Holm over the primary tests of this look (the whole family, both profiles).
-    $tested = @($rows | Where-Object { $null -ne $_.P } | Sort-Object P)
+    # Holm over every hypothesis tested in this look. One without a p-value (too few valid
+    # pairs) stays in the family with p = 1, so failed runs never weaken the correction.
+    $tested = @($rows | Where-Object { $_.Role -eq 'primary' -and $TestedKeys -contains "$($_.Profile)/$($_.Scenario)/$($_.Metric)" } |
+        ForEach-Object { [pscustomobject]@{ Row = $_; P = $(if ($null -eq $_.P) { 1.0 } else { [double]$_.P }) } } | Sort-Object P)
+    if ($tested.Count -ne $TestedKeys.Count) { throw "Holm family has $($tested.Count) rows for $($TestedKeys.Count) hypotheses." }
     $running = 0.0
     for ($k = 0; $k -lt $tested.Count; $k++) {
         $adjusted = [Math]::Min(1.0, ($tested.Count - $k) * $tested[$k].P)
         if ($adjusted -lt $running) { $adjusted = $running }
         $running = $adjusted
-        $tested[$k].PHolm = $adjusted
+        $tested[$k].Row.PHolm = $adjusted
     }
     foreach ($row in $rows) {
         if ($row.ValidPairs -eq 0) { $row.Verdict = 'no valid data'; continue }
@@ -476,7 +536,13 @@ function Invoke-Analysis {
     return , $rows.ToArray()
 }
 
-$allPrimaryKeys = @($pairRows | Select-Object Profile, Scenario -Unique | ForEach-Object { "$($_.Profile)/$($_.Scenario)/$($primaryByProfile[$_.Profile])" })
+# Cells analysed: the declared family (Cpu and Ram x S1-S4) for confirmatory results, whatever
+# data exists; the cells present in the data for a pilot.
+$cells = if ($phase -eq 'Confirmatory') {
+    @(foreach ($profileName in @('Cpu', 'Ram')) { foreach ($scenario in $familyScenarios) { [pscustomobject]@{ Profile = $profileName; Scenario = $scenario } } })
+}
+else { @($pairRows | Select-Object Profile, Scenario -Unique | Sort-Object Profile, Scenario) }
+$allPrimaryKeys = @($cells | ForEach-Object { "$($_.Profile)/$($_.Scenario)/$($primaryByProfile[$_.Profile])" })
 $hasExtension = @($sources | Where-Object { $_.Look -eq 2 }).Count -gt 0
 $looks = New-Object System.Collections.Generic.List[object]
 if ($phase -eq 'Pilot') {
@@ -495,10 +561,20 @@ else {
     }
     $looks.Add([pscustomobject]@{ Name = 'look1'; Rows = $look1 })
     if ($hasExtension) {
-        foreach ($key in $undecided) {
-            $keyProfile = $key.Split('/')[0]
-            if (@($sources | Where-Object { $_.Look -eq 2 -and [string]$_.Configuration.profile -eq $keyProfile }).Count -eq 0) {
-                throw "Test $key is undecided after look 1, but there is no extension directory for profile $keyProfile."
+        # Fail closed: every undecided hypothesis needs its own planned pairs 11-20, and the
+        # extension holds exactly the undecided scenarios, so look 1 data is never re-tested as look 2.
+        foreach ($profileName in @('Cpu', 'Ram')) {
+            $required = @($undecided | Where-Object { $_.Split('/')[0] -eq $profileName } | ForEach-Object { $_.Split('/')[1] } | Sort-Object -Unique)
+            $extensionSource = @($sources | Where-Object { $_.Look -eq 2 -and [string]$_.Configuration.profile -eq $profileName })
+            $configured = if ($extensionSource.Count -eq 1) { @($extensionSource[0].Configuration.scenarios | ForEach-Object { [string]$_ } | Sort-Object -Unique) } else { @() }
+            if (($required -join ',') -ne ($configured -join ',')) {
+                throw "Profile ${profileName}: the extension must hold exactly the scenarios undecided at look 1 [$($required -join ', ')], got [$($configured -join ', ')]."
+            }
+            foreach ($scenario in $required) {
+                for ($pairNumber = $plannedPairsPerLook + 1; $pairNumber -le 2 * $plannedPairsPerLook; $pairNumber++) {
+                    $found = @($pairRows | Where-Object { $_.Profile -eq $profileName -and $_.Scenario -eq $scenario -and $_.Pair -eq $pairNumber }).Count
+                    if ($found -ne 1) { throw "Profile $profileName ${scenario}: planned pair $pairNumber appears $found times; look 2 needs each of pairs $($plannedPairsPerLook + 1)..$(2 * $plannedPairsPerLook) once." }
+                }
             }
         }
         $look2 = Invoke-Analysis -MaxPair (2 * $plannedPairsPerLook) -Alpha $lookAlpha -TestedKeys $undecided
@@ -552,10 +628,10 @@ foreach ($run in @($runs | Sort-Object Profile, Scenario, Pair, Build)) {
 $lines.Add('')
 $lines.Add('## Run validity and monitoring')
 $lines.Add('')
-$lines.Add('| Run | Valid | Load rows / expected | Interval median / load max (s) | Monitor CPU s | Reason |')
+$lines.Add('| Run | Valid | Load rows / expected | Interval median: run / load; load max (s) | Monitor exit / CPU s | Reason |')
 $lines.Add('|---|---|---|---|---|---|')
 foreach ($run in @($runs | Sort-Object Profile, Scenario, Pair, Build)) {
-    $lines.Add(('| {10} {0}-{1}-{2} | {3} | {4} / {5} | {6} / {7} | {8} | {9} |' -f $run.Scenario, $run.Pair, $run.Build, $run.Valid, $run.LoadRows, $run.LoadRowsExpected, (Format-Number $run.IntervalMedianSeconds 3), (Format-Number $run.LoadIntervalMaxSeconds 3), $run.MonitorCpuSeconds, $run.InvalidReason, $run.Profile))
+    $lines.Add(('| {10} {0}-{1}-{2} | {3} | {4} / {5} | {6} / {11}; {7} | {12} / {8} | {9} |' -f $run.Scenario, $run.Pair, $run.Build, $run.Valid, $run.LoadRows, $run.LoadRowsExpected, (Format-Number $run.IntervalMedianSeconds 3), (Format-Number $run.LoadIntervalMaxSeconds 3), $run.MonitorCpuSeconds, $run.InvalidReason, $run.Profile, (Format-Number $run.LoadIntervalMedianSeconds 3), $run.MonitorExit))
 }
 $lines.Add('')
 $invalidPairs = @($pairRows | Where-Object { -not $_.Valid })

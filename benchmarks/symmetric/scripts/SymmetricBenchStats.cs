@@ -26,22 +26,25 @@ public static class SymmetricBenchStats {
         return zeros;
     }
 
-    // Exact two-sided sign test of "median paired difference = 0". Zero differences carry no
-    // sign and are dropped, so the test is conditional on the number of non-zero differences.
+    // Two-sided sign test of "median paired difference = 0" that keeps every difference in n:
+    // zeros count as neither positive nor negative. If 0 is a median of the differences, then
+    // P(d > 0) <= 1/2 and P(d < 0) <= 1/2, so each sign count is stochastically at most
+    // Binomial(n, 1/2) and p = 2 min(P(X >= positives), P(X >= negatives)) is valid. It is exact
+    // for continuous differences (it then equals the usual sign test) and conservative with zeros.
     public static double SignTestP(double[] diffs) {
-        int positive = 0, negative = 0;
-        foreach (double d in diffs) { if (d > 0) positive++; else if (d < 0) negative++; }
-        int n = positive + negative;
+        int n = diffs.Length, positive = 0, negative = 0;
         if (n == 0) return 1.0;
-        return Math.Min(1.0, 2.0 * BinomialHalfCdf(n, Math.Min(positive, negative)));
+        foreach (double d in diffs) { if (d > 0) positive++; else if (d < 0) negative++; }
+        double positiveTail = 1.0 - BinomialHalfCdf(n, positive - 1);
+        double negativeTail = 1.0 - BinomialHalfCdf(n, negative - 1);
+        return Math.Max(0.0, Math.Min(1.0, 2.0 * Math.Min(positiveTail, negativeTail)));
     }
 
     // Distribution-free closed interval for the median from order statistics over ALL differences
     // (zeros included): [d(k), d(n-k+1)] with the largest k such that P(X <= k-1) <= (1-level)/2.
     // Returns {low, high, minimum coverage}, or null when n is too small for the level.
     // The coverage 1 - 2 P(X <= k-1) is a guaranteed lower bound for any distribution, ties
-    // included; it is exact only for continuous differences. With zero differences the interval
-    // is not exactly the inversion of SignTestP, which drops the zeros.
+    // included; it is exact only for continuous differences.
     public static double[] MedianInterval(double[] diffs, double level) {
         int n = diffs.Length;
         double tail = (1.0 - level) / 2.0;
