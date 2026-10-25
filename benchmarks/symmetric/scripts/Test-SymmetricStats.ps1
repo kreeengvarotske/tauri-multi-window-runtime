@@ -113,7 +113,7 @@ try {
         $runs = Join-Path $Directory 'runs'
         New-Item -ItemType Directory -Path $runs | Out-Null
         [ordered]@{
-            profile = $MonitorProfile; phase = 'Confirmatory'; machine = 'SYNTHETIC'; gitHead = 'synthetic'; os = 'synthetic'
+            profile = $MonitorProfile; phase = 'Confirmatory'; machine = 'SYNTHETIC'; gitHead = 'synthetic'; os = 'synthetic'; webView2 = 'synthetic'
             plainExeSha256 = 'p'; runtimeExeSha256 = 'r'; monitorSha256 = 'same-monitor'; sampleIntervalSeconds = $Interval
             durationSeconds = 20; idleSeconds = 2; pauseSeconds = 0; iterations = 1; bufferMb = 4; requestsPerWindow = 10; roundIntervalMs = 500
             scenarios = $Scenarios; pairs = $Pairs; firstPair = $FirstPair; order = 'fixed'; runScriptSha256 = 'run'; summarizeScriptSha256 = 'sum'; protocolSha256 = 'readme'
