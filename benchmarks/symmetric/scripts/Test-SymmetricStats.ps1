@@ -107,7 +107,7 @@ New-Item -ItemType Directory -Path $root | Out-Null
 try {
     $start0 = [DateTimeOffset]::new(2026, 10, 25, 12, 0, 0, [TimeSpan]::Zero)
     function New-SyntheticResults {
-        # Mutations: run name -> one of NoReport, AppExit, MonitorExit, NaNPrivate, ZeroInterval, SlowLoadInterval, CpuUnreadable.
+        # Mutations: run name -> one of NoReport, AppExit, MonitorExit, NaNPrivate, BadPrivate, NaNWorkingSet, ZeroInterval, SlowLoadInterval, CpuUnreadable.
         param([string]$Directory, [string]$MonitorProfile, [double]$Interval, [string[]]$Scenarios = @('S1', 'S2', 'S3', 'S4'),
             [int]$FirstPair = 1, [int[]]$SkipPairs = @(), [hashtable]$Mutations = @{})
         $runs = Join-Path $Directory 'runs'
@@ -164,10 +164,13 @@ try {
                 $intervalValue = $Interval
                 if ($inLoad -and $mutation -eq 'SlowLoadInterval') { $intervalValue = 1.3 * $Interval }
                 $intervalText = if ($i -eq 0) { '' } elseif ($inLoad -and $mutation -eq 'ZeroInterval' -and $i % 7 -eq 0) { '0' } else { $intervalValue.ToString('R', $culture) }
-                $privateText = if ($inLoad -and $mutation -eq 'NaNPrivate' -and $i % 9 -eq 0) { 'NaN' } else { $privateMb.ToString('R', $culture) }
+                $privateText = if ($inLoad -and @('NaNPrivate', 'BadPrivate') -contains $mutation -and $i % 9 -eq 0) {
+                    if ($mutation -eq 'BadPrivate') { 'not-a-number' } else { 'NaN' }
+                } else { $privateMb.ToString('R', $culture) }
+                $workingSetText = if ($inLoad -and $mutation -eq 'NaNWorkingSet' -and $i % 9 -eq 0) { 'NaN' } else { '300' }
                 $cpuUnreadable = if ($inLoad -and $mutation -eq 'CpuUnreadable' -and $i % 5 -eq 0) { '1' } else { '0' }
                 if ($cpuUnreadable -eq '1') { $cpu = '' }
-                $rows.Add(('"{0}","1000","6","300","{1}","{2}","{3}","{4}","0","{5}"' -f $time, $privateText, $cpu, $i, $intervalText, $cpuUnreadable))
+                $rows.Add(('"{0}","1000","6","{1}","{2}","{3}","{4}","{5}","0","{6}"' -f $time, $workingSetText, $privateText, $cpu, $i, $intervalText, $cpuUnreadable))
             }
             $rows | Set-Content -LiteralPath (Join-Path $runs "$($run.Name).monitor.csv") -Encoding UTF8
             $exitCode = if ($mutation -eq 'AppExit' -or $mutation -eq 'NoReport') { 1 } else { 0 }
@@ -178,7 +181,12 @@ try {
     }
     $summarize = Join-Path $PSScriptRoot 'Summarize-SymmetricRuns.ps1'
     $cpuDirectory = Join-Path $root 'cpu'; $ramDirectory = Join-Path $root 'ram'
-    $cpuMutations = @{ 'S1-pair05-plain' = 'CpuUnreadable' }
+    $cpuMutations = @{
+        'S1-pair05-plain' = 'CpuUnreadable'
+        'S1-pair06-runtime' = 'NaNPrivate'
+        'S1-pair07-runtime' = 'BadPrivate'
+        'S1-pair08-runtime' = 'NaNWorkingSet'
+    }
     foreach ($pair in 1..10) { foreach ($build in 'plain', 'runtime') { $cpuMutations[('S3-pair{0:D2}-{1}' -f $pair, $build)] = 'AppExit' } }
     New-SyntheticResults -Directory $cpuDirectory -MonitorProfile 'Cpu' -Interval 1 -Mutations $cpuMutations
     New-SyntheticResults -Directory $ramDirectory -MonitorProfile 'Ram' -Interval 0.2 -Mutations @{
@@ -205,6 +213,20 @@ try {
 
     $runRows = @(Import-Csv -LiteralPath (Join-Path $output 'runs.csv'))
     function Get-Run { param([string]$Profile, [string]$Scenario, [int]$Pair, [string]$Build) @($runRows | Where-Object { $_.Profile -eq $Profile -and $_.Scenario -eq $Scenario -and [int]$_.Pair -eq $Pair -and $_.Build -eq $Build }) }
+
+    # In Cpu profile, incomplete secondary memory data must not discard a valid CPU run,
+    # but it must be excluded from the private-memory metric's own pair set.
+    $cpuPrivateNaN = @(Get-Run 'Cpu' 'S1' 6 'runtime')
+    Assert-True 'NaN private secondary sample does not invalidate Cpu-primary run' ($cpuPrivateNaN.Count -eq 1 -and $cpuPrivateNaN[0].Valid -eq 'True') "reason '$(if ($cpuPrivateNaN.Count) { $cpuPrivateNaN[0].InvalidReason })'"
+    $cpuPrivateBad = @(Get-Run 'Cpu' 'S1' 7 'runtime')
+    Assert-True 'malformed numeric secondary sample does not crash or invalidate Cpu-primary run' ($cpuPrivateBad.Count -eq 1 -and $cpuPrivateBad[0].Valid -eq 'True') "reason '$(if ($cpuPrivateBad.Count) { $cpuPrivateBad[0].InvalidReason })'"
+    $cpuWorkingSetBad = @(Get-Run 'Cpu' 'S1' 8 'runtime')
+    Assert-True 'NaN working-set secondary sample does not invalidate Cpu-primary run' ($cpuWorkingSetBad.Count -eq 1 -and $cpuWorkingSetBad[0].Valid -eq 'True') "reason '$(if ($cpuWorkingSetBad.Count) { $cpuWorkingSetBad[0].InvalidReason })'"
+    $cpuPrivateSecondary = @($summary | Where-Object { $_.Look -eq 'look1' -and $_.Profile -eq 'Cpu' -and $_.Scenario -eq 'S1' -and $_.Metric -eq 'LoadPrivateMBAvg' })[0]
+    Assert-True 'private secondary metric excludes both malformed/non-finite pairs only' ($cpuPrivateSecondary.ValidPairs -eq '7' -and $cpuPrivateSecondary.MetricExcludedPairs -eq '2' -and $cpuPrivateSecondary.InvalidPairs -eq '1') "valid $($cpuPrivateSecondary.ValidPairs), metric-excluded $($cpuPrivateSecondary.MetricExcludedPairs), invalid $($cpuPrivateSecondary.InvalidPairs)"
+    $cpuWorkingSetSecondary = @($summary | Where-Object { $_.Look -eq 'look1' -and $_.Profile -eq 'Cpu' -and $_.Scenario -eq 'S1' -and $_.Metric -eq 'LoadWorkingSetMBAvg' })[0]
+    Assert-True 'working-set secondary metric excludes only the pair with bad samples' ($cpuWorkingSetSecondary.ValidPairs -eq '8' -and $cpuWorkingSetSecondary.MetricExcludedPairs -eq '1' -and $cpuWorkingSetSecondary.InvalidPairs -eq '1') "valid $($cpuWorkingSetSecondary.ValidPairs), metric-excluded $($cpuWorkingSetSecondary.MetricExcludedPairs), invalid $($cpuWorkingSetSecondary.InvalidPairs)"
+
     $noReport = @(Get-Run 'Ram' 'S1' 9 'runtime')
     Assert-True 'launch without JSON report is kept as an invalid run' ($noReport.Count -eq 1 -and $noReport[0].Valid -eq 'False' -and $noReport[0].InvalidReason -like '*JSON report missing*') "$($noReport.Count) rows"
     $checks = @(
