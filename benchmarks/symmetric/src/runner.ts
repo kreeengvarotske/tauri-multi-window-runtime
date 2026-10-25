@@ -36,8 +36,8 @@ export interface RunnerDeps {
   wallClock(): string;
   sleep(milliseconds: number): Promise<void>;
   onProgress?(text: string): void;
-  /** How many 5 s handshake attempts to wait for the secondary page at startup. */
-  readinessAttempts?: number;
+  /** How long to wait at startup for the secondary window and its page. */
+  readinessTimeoutMs?: number;
   drainTimeoutMs?: number;
 }
 
@@ -107,7 +107,7 @@ export async function runSeries(invoke: Invoke, request: SeriesRequest, now: () 
 }
 
 export async function runScenario(config: BenchConfig, deps: RunnerDeps): Promise<BenchReport> {
-  const { invoke, bridge } = deps;
+  const { invoke } = deps;
   const phases: Record<string, string> = { startedAt: deps.wallClock() };
   const perWindow = config.requestsPerWindow;
   const mainKeys = keysFor(config.scenario, "main", perWindow);
@@ -117,7 +117,7 @@ export async function runScenario(config: BenchConfig, deps: RunnerDeps): Promis
 
   // Both builds always run two windows; wait until the secondary page serves.
   progress("Waiting for the secondary window…");
-  await waitForSecondary(bridge, deps.readinessAttempts ?? 6);
+  await waitForSecondary(deps, deps.readinessTimeoutMs ?? 30_000);
   phases.secondaryReadyAt = deps.wallClock();
 
   progress("Computing expected checksums…");
@@ -252,19 +252,27 @@ async function runRound(
   };
 }
 
-async function waitForSecondary(bridge: RunnerDeps["bridge"], attempts: number): Promise<void> {
+/**
+ * Both windows are created at startup, but on Windows 10 `getByLabel` may
+ * not find the secondary for a while, and its page loads later still. So
+ * "not open" here means "not yet": retry until the timeout. This happens
+ * before the measured window.
+ */
+async function waitForSecondary(deps: RunnerDeps, timeoutMs: number): Promise<void> {
+  const deadline = deps.now() + timeoutMs;
   let lastError: unknown = null;
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
+  do {
     try {
-      const ping = await bridge.request({ keys: [], expected: {} });
+      const ping = await deps.bridge.request({ keys: [], expected: {} });
       const done = await ping.completed;
       if (done.ok) return;
       lastError = new Error(done.error);
     } catch (error) {
       lastError = error;
     }
-  }
-  throw new Error(`The secondary window never became ready: ${String(lastError)}`);
+    await deps.sleep(250);
+  } while (deps.now() < deadline);
+  throw new Error(`The secondary window never became ready within ${timeoutMs} ms: ${String(lastError)}`);
 }
 
 /** After a failure, waits until requests already sent have finished, so none is left running. */

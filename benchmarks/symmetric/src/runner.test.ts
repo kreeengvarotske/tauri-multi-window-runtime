@@ -267,6 +267,43 @@ describe("runScenario", () => {
     expect(report.passed).toBe(false);
   });
 
+  it("waits at startup for a secondary that Tauri does not find yet", async () => {
+    const backend = fakeBackend("plain");
+    const inner = fakeBridge(backend.invoke).bridge;
+    const visibleAt = Date.now() + 1_500;
+    let refused = 0;
+    const bridge: Bridge<SeriesRequest, SeriesResult> = {
+      async request(request) {
+        if (Date.now() < visibleAt) {
+          refused += 1;
+          throw new Error("The secondary window is not open.");
+        }
+        return inner.request(request);
+      },
+      serve: inner.serve,
+    };
+    const report = await run(configFor("plain", "S2"), depsFor(backend.invoke, bridge));
+    expect(refused).toBeGreaterThan(1);
+    expect(report.passed).toBe(true);
+  });
+
+  it("fails clearly when the secondary never becomes ready, before any load", async () => {
+    const backend = fakeBackend("plain");
+    const bridge: Bridge<SeriesRequest, SeriesResult> = {
+      request: async () => {
+        throw new Error("The secondary window is not open.");
+      },
+      serve: async () => () => {},
+    };
+    const outcome = runScenario(configFor("plain", "S2"), { ...depsFor(backend.invoke, bridge), readinessTimeoutMs: 3_000 }).then(
+      () => "resolved",
+      (error: Error) => error.message,
+    );
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(await outcome).toMatch(/never became ready within 3000 ms/);
+    expect(backend.stats.requestsReceived).toBe(0);
+  });
+
   it("S1 sends one request per round and uses the secondary only to check it is ready", async () => {
     const backend = fakeBackend("runtime");
     const bridge = fakeBridge(backend.invoke);
