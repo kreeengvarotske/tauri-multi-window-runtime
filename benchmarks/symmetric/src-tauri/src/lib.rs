@@ -12,10 +12,17 @@ use config::BenchConfig;
 use std::sync::Arc;
 
 pub fn run() {
-    let config = match BenchConfig::from_args(std::env::args().skip(1)) {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let config = match BenchConfig::from_args(args.clone()) {
         Ok(config) => config,
         Err(error) => {
+            // A release build has no console, so an automated run also gets
+            // the error in its report. Nothing has been allocated yet.
             eprintln!("symmetric-bench: {error}");
+            if let Some(path) = report_path(&args) {
+                let report = serde_json::json!({ "schemaVersion": 1, "configError": error, "passed": false });
+                let _ = std::fs::write(path, report.to_string());
+            }
             std::process::exit(2);
         }
     };
@@ -36,4 +43,10 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running the benchmark app");
+}
+
+fn report_path(args: &[String]) -> Option<&str> {
+    args.windows(2)
+        .find(|pair| pair[0] == "--report")
+        .map(|pair| pair[1].as_str())
 }

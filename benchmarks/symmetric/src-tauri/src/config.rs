@@ -40,6 +40,10 @@ impl Scenario {
     }
 }
 
+/// Upper bound on buffers that may be allocated at once: every request of
+/// both windows running its own execution, as in the plain build.
+pub const MAX_CONCURRENT_BUFFER_MB: u32 = 128;
+
 /// Which variant this executable is; fixed at compile time.
 pub const BUILD: &str = if cfg!(feature = "runtime") {
     "runtime"
@@ -60,6 +64,9 @@ pub struct BenchConfig {
     pub round_interval_ms: u32,
     pub idle_before_seconds: u32,
     pub idle_after_seconds: u32,
+    /// `2 × requests_per_window × buffer_mb`, checked against
+    /// `MAX_CONCURRENT_BUFFER_MB` before the app starts.
+    pub potential_concurrent_buffer_mb: u32,
     /// Set only for an automated run: the app runs the scenario, writes the
     /// report here and exits.
     #[serde(skip)]
@@ -99,6 +106,15 @@ impl BenchConfig {
         if scenario == Scenario::S1 {
             requests_per_window = 1;
         }
+        // Checked before any operation can run, so an unsafe combination
+        // never allocates. Counted for two windows even in S1.
+        let potential_concurrent_buffer_mb = 2 * requests_per_window * work.buffer_mb;
+        if potential_concurrent_buffer_mb > MAX_CONCURRENT_BUFFER_MB {
+            return Err(format!(
+                "2 windows x {requests_per_window} requests x {} MB = {potential_concurrent_buffer_mb} MB of buffers could be allocated at once; the limit is {MAX_CONCURRENT_BUFFER_MB} MB",
+                work.buffer_mb
+            ));
+        }
 
         let policy = if BUILD == "plain" {
             "none".to_owned()
@@ -119,6 +135,7 @@ impl BenchConfig {
             round_interval_ms,
             idle_before_seconds,
             idle_after_seconds,
+            potential_concurrent_buffer_mb,
             automated: report_path.is_some(),
             report_path,
         })
@@ -181,6 +198,23 @@ mod tests {
                 .unwrap()
                 .requests_per_window,
             1
+        );
+    }
+
+    #[test]
+    fn limits_the_buffers_that_can_be_allocated_at_once() {
+        assert_eq!(parse(&[]).unwrap().potential_concurrent_buffer_mb, 80);
+        assert!(parse(&["--requests-per-window", "16", "--buffer-mb", "4"]).is_ok());
+        let error = parse(&["--requests-per-window", "17", "--buffer-mb", "4"]).unwrap_err();
+        assert!(error.contains("136 MB"), "{error}");
+        assert!(parse(&["--requests-per-window", "10", "--buffer-mb", "8"]).is_err());
+        assert!(parse(&["--requests-per-window", "50", "--buffer-mb", "8"]).is_err());
+        // S1 sends one request per round, but the bound is still for 2 windows.
+        assert_eq!(
+            parse(&["--scenario", "S1", "--buffer-mb", "8"])
+                .unwrap()
+                .potential_concurrent_buffer_mb,
+            16
         );
     }
 

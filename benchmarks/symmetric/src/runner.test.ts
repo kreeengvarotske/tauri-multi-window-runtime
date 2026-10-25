@@ -74,6 +74,7 @@ function configFor(build: Build, scenario: ScenarioId, overrides: Partial<BenchC
     roundIntervalMs: 500,
     idleBeforeSeconds: 1,
     idleAfterSeconds: 1,
+    potentialConcurrentBufferMb: 80,
     automated: false,
     ...overrides,
   };
@@ -187,6 +188,82 @@ describe("runScenario", () => {
     const { bridge } = fakeBridge(stuck, { failAtRequest: 2 });
     const report = await run(configFor("plain", "S2"), { ...depsFor(stuck, bridge), drainTimeoutMs: 1_000 });
     expect(report.abort).toMatchObject({ cleanup: "dirty", inFlightAfterDrain: 3 });
+    expect(report.passed).toBe(false);
+  });
+
+  it("waits for a slow secondary when main fails fast, before reading counters or starting a round", async () => {
+    const secondaryBackend = fakeBackend("plain");
+    const log: { at: number; what: string }[] = [];
+    // Main's own requests fail at once; the secondary's take 2 s.
+    const mainInvoke = (async (command: string, args?: Record<string, unknown>) => {
+      if (command === "bench_run") {
+        log.push({ at: Date.now(), what: "main-failed" });
+        throw new Error("main side broke");
+      }
+      if (command === "bench_stats") log.push({ at: Date.now(), what: "stats" });
+      return secondaryBackend.invoke(command, args);
+    }) as Invoke;
+    const slowSecondary = (async (command: string, args?: Record<string, unknown>) => {
+      if (command === "bench_run") await new Promise((resolve) => setTimeout(resolve, 2_000));
+      const result = await secondaryBackend.invoke(command, args);
+      return result;
+    }) as Invoke;
+    let requests = 0;
+    const bridge: Bridge<SeriesRequest, SeriesResult> = {
+      async request(request) {
+        requests += 1;
+        const completed = runSeries(slowSecondary, request, () => Date.now()).then((result) => {
+          if (request.keys.length > 0) log.push({ at: Date.now(), what: "secondary-done" });
+          return { ok: true, result };
+        });
+        return { requestId: `r${requests}`, completed };
+      },
+      serve: async () => () => {},
+    };
+    const report = await run(configFor("plain", "S2", { durationSeconds: 3 }), depsFor(mainInvoke, bridge));
+
+    const firstFailure = log.find((e) => e.what === "main-failed")!.at;
+    const secondaryDone = log.find((e) => e.what === "secondary-done")!.at;
+    expect(secondaryDone - firstFailure).toBeGreaterThanOrEqual(2_000);
+    // No counter read and no new round while the secondary's half was still running.
+    expect(log.filter((e) => e.what === "stats" && e.at > firstFailure && e.at < secondaryDone)).toHaveLength(0);
+    expect(report.rounds[0].durationMs).toBeGreaterThanOrEqual(2_000);
+    expect(report.rounds[0].passed).toBe(false);
+    expect(report.rounds[0].failures).toBe(10);
+    // The round's counters include all of the secondary's requests, and nothing is left running.
+    expect(report.rounds[0].delta.requestsReceived).toBe(10);
+    expect(report.totals.requestsReceived).toBe(report.rounds.length * 10);
+    expect(report.passed).toBe(false);
+  });
+
+  it("finishes main's half before aborting when the secondary fails fast", async () => {
+    const backend = fakeBackend("plain");
+    const log: string[] = [];
+    const logged = (async (command: string, args?: Record<string, unknown>) => {
+      const result = await backend.invoke(command, args);
+      if (command === "bench_run") log.push("main-request-done");
+      if (command === "bench_stats") log.push("stats");
+      return result;
+    }) as Invoke;
+    let requests = 0;
+    const bridge: Bridge<SeriesRequest, SeriesResult> = {
+      async request() {
+        requests += 1;
+        // The readiness ping succeeds; the first round's secondary half fails at once.
+        if (requests === 1) return { requestId: "ping", completed: Promise.resolve({ ok: true }) };
+        log.push("secondary-failed");
+        return { requestId: `r${requests}`, completed: Promise.resolve({ ok: false, error: "secondary broke" }) };
+      },
+      serve: async () => () => {},
+    };
+    const report = await run(configFor("plain", "S2"), depsFor(logged, bridge));
+
+    expect(report.rounds).toHaveLength(0);
+    expect(report.abort).toMatchObject({ error: "secondary: secondary broke", cleanup: "clean", inFlightAfterDrain: 0 });
+    // All 10 of main's requests completed before the drain read the counters.
+    const failedAt = log.indexOf("secondary-failed");
+    const firstStatsAfter = log.indexOf("stats", failedAt);
+    expect(log.slice(failedAt, firstStatsAfter).filter((e) => e === "main-request-done")).toHaveLength(10);
     expect(report.passed).toBe(false);
   });
 

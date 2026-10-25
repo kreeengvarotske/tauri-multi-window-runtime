@@ -21,6 +21,8 @@ export interface BenchConfig {
   roundIntervalMs: number;
   idleBeforeSeconds: number;
   idleAfterSeconds: number;
+  /** 2 × requestsPerWindow × bufferMb; the app refuses to start above 128. */
+  potentialConcurrentBufferMb: number;
   automated: boolean;
 }
 
