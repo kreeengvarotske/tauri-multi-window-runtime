@@ -85,12 +85,13 @@ Fixed in `Summarize-SymmetricRuns.ps1` before any confirmatory pair runs; changi
 
 ## Run validity
 
-A run is valid only if all of these hold; a pair is valid only if both runs are. Invalid runs and pairs stay in `runs.csv` and `pairs.csv` with `InvalidReason` and are left out of every median, interval and p-value. Every raw report and monitor file is kept.
+A run is valid only if all of these hold; a pair is valid only if both runs are. Invalid runs and pairs stay in `runs.csv` and `pairs.csv` with `InvalidReason` and are left out of every median, interval and p-value. A scheduled or logged launch that has no JSON report is still emitted as an invalid row; every raw report and monitor file is kept.
 
 - the report exists, is `passed` (every round had the expected counters), has no `abort`, and names the expected build and scenario;
-- `runs.log` has the run with exit code 0 and no timeout;
-- the monitor CSV exists, has no load row with missing values, and covers at least 80% of the expected load samples (load duration ÷ nominal interval);
-- the median actual interval is within ±20% of the nominal one, and no load interval is longer than 5 × nominal;
+- `runs.log` has the run with app exit code 0, no timeout, and monitor exit code 0;
+- the monitor CSV exists, has no missing private-memory values during load, and covers at least 80% of the expected load samples (load duration ÷ nominal interval);
+- for the `Cpu` profile, CPU values are also readable in all load rows; CPU readability does not invalidate RAM-only metrics in the `Ram` profile, where CPU is not compared;
+- the **median actual sampling interval during the load phase** is within ±20% of the nominal interval, and no load interval is longer than 5 × nominal. The whole-session interval median is reported for context but does not substitute for the load-phase check;
 - both primary metrics could be computed.
 
 The 80%, ±20% and 5× thresholds are checked against the pilot data before they are frozen. Overruns are not a validity criterion: if a build cannot keep up with the offered load, that is part of the result and is reported.
