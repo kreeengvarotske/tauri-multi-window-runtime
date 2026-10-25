@@ -114,7 +114,7 @@ try {
         New-Item -ItemType Directory -Path $runs | Out-Null
         [ordered]@{
             profile = $MonitorProfile; phase = 'Confirmatory'; machine = 'SYNTHETIC'; gitHead = 'synthetic'; os = 'synthetic'
-            plainExeSha256 = 'p'; runtimeExeSha256 = 'r'; monitorSha256 = $MonitorProfile; sampleIntervalSeconds = $Interval
+            plainExeSha256 = 'p'; runtimeExeSha256 = 'r'; monitorSha256 = 'same-monitor'; sampleIntervalSeconds = $Interval
             durationSeconds = 20; idleSeconds = 2; pauseSeconds = 0; iterations = 1; bufferMb = 4; requestsPerWindow = 10; roundIntervalMs = 500
             scenarios = $Scenarios; pairs = $Pairs; firstPair = $FirstPair; order = 'fixed'; runScriptSha256 = 'run'; summarizeScriptSha256 = 'sum'; protocolSha256 = 'readme'
         } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Directory 'configuration.json') -Encoding UTF8
