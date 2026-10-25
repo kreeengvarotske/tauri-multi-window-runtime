@@ -138,7 +138,7 @@ function Get-ConfigValue {
 }
 
 $deviations = New-Object System.Collections.Generic.List[string]
-$identityFields = @('machine', 'os', 'webview2Version', 'monitorSha256', 'gitHead', 'plainExeSha256', 'runtimeExeSha256', 'durationSeconds', 'idleSeconds', 'pauseSeconds',
+$identityFields = @('machine', 'os', 'webView2', 'monitorSha256', 'gitHead', 'plainExeSha256', 'runtimeExeSha256', 'durationSeconds', 'idleSeconds', 'pauseSeconds',
     'iterations', 'bufferMb', 'requestsPerWindow', 'roundIntervalMs', 'runScriptSha256', 'summarizeScriptSha256', 'protocolSha256', 'order')
 $familyScenarios = @('S1', 'S2', 'S3', 'S4')
 $sources = New-Object System.Collections.Generic.List[object]
