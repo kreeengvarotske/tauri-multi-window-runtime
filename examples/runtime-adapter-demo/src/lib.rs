@@ -12,8 +12,8 @@
 
 use serde::{Deserialize, Serialize};
 use shared_runtime::{
-    CachePolicy, CallOptions, OpContext, Operation, OperationConfig, RegistryError, Runtime,
-    RuntimeConfig, ScopeRule, View, ViewError,
+    CachePolicy, CallOptions, OpContext, Operation, OperationConfig, RegistryError, ResponseBudget,
+    Runtime, RuntimeConfig, ScopeRule, View, ViewError,
 };
 use shared_runtime_tauri::{AdapterConfig, AdapterError, JsonBytes, SharedRuntime, caller, decode};
 use std::{
@@ -129,8 +129,9 @@ impl View<Catalog> for CatalogPage {
         &self,
         output: &Vec<Item>,
         request: PageRequest,
-        max_items: usize,
+        budget: &mut ResponseBudget,
     ) -> Result<OwnedPage, ViewError> {
+        let max_items = budget.max_items();
         if request.limit == 0 || request.limit as usize > max_items {
             return Err(ViewError::InvalidRequest(format!(
                 "limit must be 1 to {max_items}"
@@ -138,9 +139,15 @@ impl View<Catalog> for CatalogPage {
         }
         let start = (request.offset as usize).min(output.len());
         let end = (start + request.limit as usize).min(output.len());
+        let mut items = Vec::with_capacity(end - start);
+        for item in &output[start..end] {
+            // Charged before the copy, as `response_bytes` counts it.
+            budget.take(std::mem::size_of::<Item>() + item.name.len())?;
+            items.push(item.clone());
+        }
         Ok(OwnedPage {
             total: output.len(),
-            items: output[start..end].to_vec(),
+            items,
         })
     }
 

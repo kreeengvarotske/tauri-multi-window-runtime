@@ -122,7 +122,8 @@ mod tests {
     use super::*;
     use serde::Serializer;
     use shared_runtime::{
-        CachePolicy, OpContext, OperationConfig, RuntimeConfig, ScopeRule, ViewError,
+        CachePolicy, OpContext, OperationConfig, ResponseBudget, RuntimeConfig, ScopeRule,
+        ViewError,
     };
     use std::{
         convert::Infallible,
@@ -211,8 +212,11 @@ mod tests {
             &self,
             output: &Vec<String>,
             _len: u32,
-            _max: usize,
+            budget: &mut ResponseBudget,
         ) -> Result<Response, ViewError> {
+            for string in output {
+                budget.take(string.len())?;
+            }
             Ok(Response {
                 strings: output.clone(),
                 gate: Some(Arc::clone(&self.gate)),
