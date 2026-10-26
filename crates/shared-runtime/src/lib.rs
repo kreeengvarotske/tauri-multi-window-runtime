@@ -9,6 +9,18 @@
 //! This crate has no Tauri dependency. A Tauri adapter builds a [`Caller`]
 //! from the window Tauri identifies and exposes hand-written commands; the
 //! WebView never reaches the runtime itself.
+//!
+//! Memory bounds, all set by the application:
+//!
+//! - cached outputs: `RuntimeConfig::cache_budget_bytes` for the whole
+//!   runtime, split into per-operation `OperationConfig::cache_budget_bytes`
+//!   reserved at registration (weights as estimated by `Operation::weight`);
+//! - view responses: `View::max_items` and `View::max_response_bytes`;
+//! - per-window outputs: dropped by [`Runtime::forget_window`] when the
+//!   window closes; the runtime keeps no list of window labels;
+//! - request and serialized response bytes on the IPC boundary: enforced by
+//!   the adapter, before deserializing a request and after serializing a
+//!   response, since only it sees the bytes.
 
 mod config;
 mod operation;

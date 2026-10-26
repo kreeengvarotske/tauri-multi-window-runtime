@@ -45,12 +45,28 @@ impl OperationStats {
 }
 
 /// Counters of every registered operation, in registration order.
+///
+/// Memory bound: `cache_weight_bytes() <= allocated_budget_bytes() <=
+/// cache_budget_bytes`, because each operation's cached weight stays within
+/// its own budget and the budgets were reserved from the runtime total.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeStats {
     pub operations: Vec<OperationStats>,
+    /// `RuntimeConfig::cache_budget_bytes`.
+    pub cache_budget_bytes: usize,
 }
 
 impl RuntimeStats {
+    /// Summed weight of every operation's cached outputs.
+    pub fn cache_weight_bytes(&self) -> usize {
+        self.operations.iter().map(|op| op.cache_weight_bytes).sum()
+    }
+
+    /// Summed per-operation budgets reserved from `cache_budget_bytes`.
+    pub fn allocated_budget_bytes(&self) -> usize {
+        self.operations.iter().map(|op| op.cache_budget_bytes).sum()
+    }
+
     pub fn operation(&self, name: &str) -> Option<&OperationStats> {
         self.operations.iter().find(|op| op.name == name)
     }

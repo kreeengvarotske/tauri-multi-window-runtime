@@ -24,6 +24,7 @@ fn config() -> RuntimeConfig {
         max_queued_operations: 16,
         default_deadline: Duration::from_secs(30),
         shutdown_grace: Duration::from_secs(1),
+        cache_budget_bytes: 4 << 20,
     }
 }
 
@@ -503,6 +504,12 @@ impl View<Catalog> for Page {
     fn items(response: &Vec<u32>) -> usize {
         response.len()
     }
+    fn max_response_bytes(&self) -> usize {
+        1024
+    }
+    fn response_bytes(response: &Vec<u32>) -> usize {
+        response.len() * size_of::<u32>()
+    }
 }
 
 /// Ignores its limit; the runtime must refuse its response.
@@ -524,6 +531,12 @@ impl View<Catalog> for Unbounded {
     }
     fn items(response: &Vec<u32>) -> usize {
         response.len()
+    }
+    fn max_response_bytes(&self) -> usize {
+        1024
+    }
+    fn response_bytes(response: &Vec<u32>) -> usize {
+        response.len() * size_of::<u32>()
     }
 }
 
@@ -592,7 +605,7 @@ async fn views_are_bounded_and_share_one_source_output() {
     assert!(
         matches!(
             refused,
-            Err(ViewCallError::View(ViewError::TooLarge {
+            Err(ViewCallError::View(ViewError::TooManyItems {
                 items: 1000,
                 max_items: 10
             }))
@@ -679,4 +692,234 @@ fn registry_rejects_duplicate_names() {
         .unwrap()
         .register(Other, budget(1));
     assert_eq!(result.err(), Some(RegistryError::DuplicateName(Load::NAME)));
+}
+
+// ------------------------------------------------- runtime memory bounds
+
+#[test]
+fn operation_budgets_must_fit_in_the_runtime_budget() {
+    let total = RuntimeConfig {
+        cache_budget_bytes: 1000,
+        ..config()
+    };
+    let catalog = Catalog {
+        executions: Arc::default(),
+    };
+    let result = Runtime::builder(total.clone())
+        .unwrap()
+        .register(Load::new(ScopeRule::Shared), budget(700))
+        .unwrap()
+        .register(catalog, budget(301));
+    assert_eq!(
+        result.err(),
+        Some(RegistryError::BudgetExceeded {
+            operation: Catalog::NAME,
+            requested: 301,
+            available: 300,
+        })
+    );
+
+    let runtime = Runtime::builder(total)
+        .unwrap()
+        .register(Load::new(ScopeRule::Shared), budget(700))
+        .unwrap()
+        .register(
+            Catalog {
+                executions: Arc::default(),
+            },
+            budget(300),
+        )
+        .unwrap()
+        .build();
+    let stats = runtime.stats();
+    assert_eq!(
+        (stats.cache_budget_bytes, stats.allocated_budget_bytes()),
+        (1000, 1000)
+    );
+}
+
+#[tokio::test]
+async fn summed_cache_weight_stays_within_the_runtime_budget() {
+    let runtime = Runtime::builder(RuntimeConfig {
+        cache_budget_bytes: 300,
+        ..config()
+    })
+    .unwrap()
+    .register(Load::new(ScopeRule::PerWindow), budget(200))
+    .unwrap()
+    .register(
+        Catalog {
+            executions: Arc::default(),
+        },
+        budget(100),
+    )
+    .unwrap()
+    .build();
+    let load = runtime.operation::<Load>().unwrap();
+    let catalog = runtime.operation::<Catalog>().unwrap();
+    for (i, label) in ["a", "b", "c", "d", "e"].into_iter().enumerate() {
+        load.get(&window(label), 60 + i as u32, NO_OPTIONS)
+            .await
+            .unwrap();
+        catalog
+            .get(&window(label), 10 + i as u32, NO_OPTIONS)
+            .await
+            .unwrap();
+        let stats = runtime.stats();
+        assert!(
+            stats.cache_weight_bytes() <= stats.cache_budget_bytes,
+            "{stats:?}"
+        );
+        for op in &stats.operations {
+            assert!(op.cache_weight_bytes <= op.cache_budget_bytes, "{op:?}");
+        }
+    }
+    assert!(runtime.stats().operations.iter().all(|op| op.evictions > 0));
+}
+
+/// One item can be arbitrarily large; the byte limit must catch it.
+struct Notes;
+
+impl Operation for Notes {
+    const NAME: &'static str = "test.notes";
+    type Params = usize;
+    type Output = Vec<String>;
+    type Error = String;
+
+    fn policy(&self) -> CachePolicy {
+        CachePolicy::Forever
+    }
+    fn weight(&self, output: &Vec<String>) -> usize {
+        output.iter().map(String::len).sum()
+    }
+    async fn run(&self, _ctx: OpContext, huge: usize) -> Result<Vec<String>, String> {
+        Ok(vec!["short".to_owned(), "x".repeat(huge)])
+    }
+}
+
+/// Returns the note at `index`.
+struct Note;
+
+impl View<Notes> for Note {
+    const NAME: &'static str = "test.notes.one";
+    type Request = (usize, usize);
+    type Response = Vec<String>;
+
+    fn source(&self, request: &(usize, usize)) -> usize {
+        request.0
+    }
+    fn max_items(&self) -> usize {
+        10
+    }
+    fn max_response_bytes(&self) -> usize {
+        64 * 1024
+    }
+    fn project(
+        &self,
+        output: &Vec<String>,
+        (_, index): (usize, usize),
+        _max_items: usize,
+    ) -> Result<Vec<String>, ViewError> {
+        Ok(output.get(index).cloned().into_iter().collect())
+    }
+    fn items(response: &Vec<String>) -> usize {
+        response.len()
+    }
+    fn response_bytes(response: &Vec<String>) -> usize {
+        response.iter().map(String::len).sum()
+    }
+}
+
+#[tokio::test]
+async fn one_huge_item_is_refused_by_the_byte_limit() {
+    let runtime = Runtime::builder(config())
+        .unwrap()
+        .register(Notes, budget(2 << 20))
+        .unwrap()
+        .view::<Notes, _>(Note)
+        .unwrap()
+        .build();
+    let note = runtime.view::<Notes, Note>().unwrap();
+    let main = window("main");
+    let huge = 1 << 20;
+
+    let short = note.get(&main, (huge, 0), NO_OPTIONS).await.unwrap();
+    assert_eq!(short, vec!["short".to_owned()]);
+
+    let refused = note.get(&main, (huge, 1), NO_OPTIONS).await;
+    assert!(
+        matches!(
+            refused,
+            Err(ViewCallError::View(ViewError::TooManyBytes {
+                bytes,
+                max_bytes: 65536,
+            })) if bytes == huge
+        ),
+        "one item under max_items slipped past the byte limit: {:?}",
+        refused.as_ref().map(|r| r.len())
+    );
+}
+
+// --------------------------------------------------------- window lifecycle
+
+#[tokio::test]
+async fn forget_window_drops_only_that_windows_entries() {
+    let op = Load::new(ScopeRule::PerWindow);
+    let runtime = runtime_with(op.clone(), 1024);
+    let load = runtime.operation::<Load>().unwrap();
+    let (a, b) = (window("a"), window("b"));
+
+    load.get(&a, 8, NO_OPTIONS).await.unwrap();
+    load.get(&a, 9, NO_OPTIONS).await.unwrap();
+    load.get(&b, 8, NO_OPTIONS).await.unwrap();
+    assert_eq!(stats(&runtime).cache_entries, 3);
+
+    assert_eq!(runtime.forget_window(&a), 2);
+    let s = stats(&runtime);
+    assert_eq!((s.cache_entries, s.cache_weight_bytes), (1, 8));
+    assert_eq!(runtime.forget_window(&a), 0, "forgetting twice is a no-op");
+
+    // b is untouched; a window reopened under the label "a" starts empty.
+    load.get(&b, 8, NO_OPTIONS).await.unwrap();
+    load.get(&a, 8, NO_OPTIONS).await.unwrap();
+    let s = stats(&runtime);
+    assert_eq!((s.cache_hits, op.executions()), (1, 4));
+
+    // invalidate still reaches every window's entry.
+    assert!(load.invalidate(&8));
+    assert_eq!(stats(&runtime).cache_entries, 0);
+    assert_balanced(&stats(&runtime));
+}
+
+#[tokio::test]
+async fn forget_window_ignores_shared_operations() {
+    let op = Load::new(ScopeRule::Shared);
+    let runtime = runtime_with(op, 1024);
+    let load = runtime.operation::<Load>().unwrap();
+    load.get(&window("a"), 8, NO_OPTIONS).await.unwrap();
+    assert_eq!(runtime.forget_window(&window("a")), 0);
+    assert_eq!(stats(&runtime).cache_entries, 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn result_of_a_forgotten_window_in_flight_is_not_cached() {
+    let (op, gate) = Load::gated(ScopeRule::PerWindow);
+    let runtime = Arc::new(runtime_with(op.clone(), 1024));
+    let load = runtime.operation::<Load>().unwrap();
+    let call = {
+        let load = load.clone();
+        tokio::spawn(async move { load.get(&window("a"), 8, NO_OPTIONS).await })
+    };
+    settle().await;
+    assert_eq!(op.executions(), 1);
+
+    runtime.forget_window(&window("a"));
+    gate.add_permits(1);
+    assert_eq!(
+        call.await.unwrap().unwrap().len(),
+        8,
+        "caller still gets it"
+    );
+    assert_eq!(stats(&runtime).cache_entries, 0);
+    assert_balanced(&stats(&runtime));
 }

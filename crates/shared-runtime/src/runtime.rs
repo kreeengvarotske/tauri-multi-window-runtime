@@ -5,7 +5,7 @@ use std::{
     fmt,
     hash::Hash,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
 };
@@ -43,6 +43,13 @@ pub enum RegistryError {
     NotRegistered(&'static str),
     /// The runtime limits are invalid.
     Config(ConfigError),
+    /// The operation's cache budget does not fit in what is left of the
+    /// runtime's total cache budget.
+    BudgetExceeded {
+        operation: &'static str,
+        requested: usize,
+        available: usize,
+    },
 }
 
 impl fmt::Display for RegistryError {
@@ -58,6 +65,14 @@ impl fmt::Display for RegistryError {
             }
             Self::NotRegistered(name) => write!(f, "`{name}` is not registered"),
             Self::Config(error) => write!(f, "invalid runtime config: {error}"),
+            Self::BudgetExceeded {
+                operation,
+                requested,
+                available,
+            } => write!(
+                f,
+                "`{operation}` asks for a {requested}-byte cache budget, {available} bytes are left"
+            ),
         }
     }
 }
@@ -131,15 +146,13 @@ struct OpEntry<O: Operation> {
     service: Service<O>,
     budget_bytes: usize,
     counters: Counters,
-    /// Windows that called a `PerWindow` operation, so that `invalidate`
-    /// reaches each window's entry. Labels only, no data.
-    windows: Mutex<HashSet<Arc<str>>>,
 }
 
-/// Type-erased access for stats and shutdown.
+/// Type-erased access for stats, window lifecycle and shutdown.
 trait ErasedOp: Send + Sync {
     fn stats(&self) -> OperationStats;
     fn clear(&self);
+    fn forget_window(&self, label: &str) -> usize;
 }
 
 impl<O: Operation> ErasedOp for OpEntry<O> {
@@ -168,6 +181,15 @@ impl<O: Operation> ErasedOp for OpEntry<O> {
     fn clear(&self) {
         self.service.clear();
     }
+
+    fn forget_window(&self, label: &str) -> usize {
+        match self.scope {
+            ScopeRule::Shared => 0,
+            ScopeRule::PerWindow => self.service.invalidate_matching(
+                |(scope, _)| matches!(scope, ScopeKey::Window(window) if &**window == label),
+            ),
+        }
+    }
 }
 
 /// Builds a [`Runtime`]. Operations and views are registered once, at startup.
@@ -177,6 +199,7 @@ pub struct RuntimeBuilder {
     ops: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
     erased: Vec<Arc<dyn ErasedOp>>,
     views: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
+    allocated_budget: usize,
 }
 
 impl RuntimeBuilder {
@@ -197,9 +220,12 @@ impl RuntimeBuilder {
             ops: HashMap::new(),
             erased: Vec::new(),
             views: HashMap::new(),
+            allocated_budget: 0,
         })
     }
 
+    /// Fails on a duplicate name or type, or when `config.cache_budget_bytes`
+    /// does not fit in what is left of `RuntimeConfig::cache_budget_bytes`.
     pub fn register<O: Operation>(
         mut self,
         op: O,
@@ -209,9 +235,18 @@ impl RuntimeBuilder {
         if self.ops.contains_key(&type_id) {
             return Err(RegistryError::DuplicateType(O::NAME));
         }
+        let available = self.shared.config.cache_budget_bytes - self.allocated_budget;
+        if config.cache_budget_bytes > available {
+            return Err(RegistryError::BudgetExceeded {
+                operation: O::NAME,
+                requested: config.cache_budget_bytes,
+                available,
+            });
+        }
         if !self.names.insert(O::NAME) {
             return Err(RegistryError::DuplicateName(O::NAME));
         }
+        self.allocated_budget += config.cache_budget_bytes;
         let op = Arc::new(op);
         let weigher = Arc::clone(&op);
         let budget = CacheBudget::new(config.cache_budget_bytes, move |output: &O::Output| {
@@ -223,7 +258,6 @@ impl RuntimeBuilder {
             op,
             budget_bytes: config.cache_budget_bytes,
             counters: Counters::default(),
-            windows: Mutex::new(HashSet::new()),
         });
         self.erased.push(entry.clone());
         self.ops.insert(type_id, entry);
@@ -301,7 +335,24 @@ impl Runtime {
     pub fn stats(&self) -> RuntimeStats {
         RuntimeStats {
             operations: self.erased.iter().map(|op| op.stats()).collect(),
+            cache_budget_bytes: self.shared.config.cache_budget_bytes,
         }
+    }
+
+    /// Drops every `PerWindow` output of a window that has closed. The
+    /// adapter calls it when Tauri reports the window destroyed. Calls of
+    /// that window still in flight return their results, but those results
+    /// are not cached. A window opened later under the same label starts
+    /// empty. Returns how many cached outputs were dropped.
+    ///
+    /// The runtime keeps no list of windows, so nothing grows with the
+    /// number of windows ever opened beyond their cached outputs, which the
+    /// budget bounds.
+    pub fn forget_window(&self, caller: &Caller) -> usize {
+        self.erased
+            .iter()
+            .map(|op| op.forget_window(caller.label()))
+            .sum()
     }
 
     /// Clears every operation's cache. Calls in flight still return their
@@ -444,15 +495,7 @@ impl<O: Operation> OperationHandle<O> {
 
         let scope = match entry.scope {
             ScopeRule::Shared => ScopeKey::Shared,
-            ScopeRule::PerWindow => {
-                let window = caller.window_key();
-                entry
-                    .windows
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .insert(Arc::clone(&window));
-                ScopeKey::Window(window)
-            }
+            ScopeRule::PerWindow => ScopeKey::Window(caller.window_key()),
         };
         let ctx = OpContext {
             phase: phase.clone(),
@@ -526,20 +569,10 @@ impl<O: Operation> OperationHandle<O> {
                 .service
                 .invalidate(&(ScopeKey::Shared, params.clone())),
             ScopeRule::PerWindow => {
-                let windows: Vec<_> = entry
-                    .windows
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .iter()
-                    .cloned()
-                    .collect();
-                let mut any = false;
-                for window in windows {
-                    any |= entry
-                        .service
-                        .invalidate(&(ScopeKey::Window(window), params.clone()));
-                }
-                any
+                entry
+                    .service
+                    .invalidate_matching(|(_, cached)| cached == params)
+                    > 0
             }
         }
     }
@@ -572,7 +605,8 @@ impl<O: Operation, V: View<O>> Clone for ViewHandle<O, V> {
 impl<O: Operation, V: View<O>> ViewHandle<O, V> {
     /// Reads the source output (shared, cached, coalesced) and returns a
     /// bounded projection of it. A response with more than `max_items`
-    /// items is refused, never truncated.
+    /// items or more than `max_response_bytes` bytes is refused, never
+    /// truncated.
     pub async fn get(
         &self,
         caller: &Caller,
@@ -592,9 +626,17 @@ impl<O: Operation, V: View<O>> ViewHandle<O, V> {
             .map_err(ViewCallError::View)?;
         let items = V::items(&response);
         if items > max_items {
-            return Err(ViewCallError::View(ViewError::TooLarge {
+            return Err(ViewCallError::View(ViewError::TooManyItems {
                 items,
                 max_items,
+            }));
+        }
+        let max_bytes = self.view.max_response_bytes();
+        let bytes = V::response_bytes(&response);
+        if bytes > max_bytes {
+            return Err(ViewCallError::View(ViewError::TooManyBytes {
+                bytes,
+                max_bytes,
             }));
         }
         Ok(response)

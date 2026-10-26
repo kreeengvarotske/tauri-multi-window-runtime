@@ -16,6 +16,11 @@ pub trait View<O: Operation>: Send + Sync + 'static {
     /// response instead of truncating it silently.
     fn max_items(&self) -> usize;
 
+    /// Most bytes one response may carry, as measured by `response_bytes`.
+    /// Bounds the size of the items, which `max_items` does not: one item
+    /// can hold an arbitrarily long string.
+    fn max_response_bytes(&self) -> usize;
+
     /// Builds the response. `max_items` is passed so that the view can
     /// clamp its own page size.
     fn project(
@@ -27,6 +32,12 @@ pub trait View<O: Operation>: Send + Sync + 'static {
 
     /// Items in a response, checked against `max_items`.
     fn items(response: &Self::Response) -> usize;
+
+    /// Bytes the response holds (at least the sum of its variable-length
+    /// fields), checked against `max_response_bytes`. It is the view's own
+    /// measure; the adapter also bounds the serialized size it sends to the
+    /// WebView.
+    fn response_bytes(response: &Self::Response) -> usize;
 }
 
 /// Why a view returned nothing.
@@ -35,15 +46,20 @@ pub enum ViewError {
     /// The request itself is invalid (bad offset, unknown sort key, …).
     InvalidRequest(String),
     /// The projection produced more than `max_items` items.
-    TooLarge { items: usize, max_items: usize },
+    TooManyItems { items: usize, max_items: usize },
+    /// The projection holds more than `max_response_bytes` bytes.
+    TooManyBytes { bytes: usize, max_bytes: usize },
 }
 
 impl fmt::Display for ViewError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidRequest(why) => write!(f, "invalid view request: {why}"),
-            Self::TooLarge { items, max_items } => {
+            Self::TooManyItems { items, max_items } => {
                 write!(f, "view response has {items} items, limit is {max_items}")
+            }
+            Self::TooManyBytes { bytes, max_bytes } => {
+                write!(f, "view response has {bytes} bytes, limit is {max_bytes}")
             }
         }
     }

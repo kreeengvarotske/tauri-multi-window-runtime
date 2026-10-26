@@ -16,6 +16,11 @@ pub struct RuntimeConfig {
     pub default_deadline: Duration,
     /// How long `shutdown` lets calls in flight finish before ending them.
     pub shutdown_grace: Duration,
+    /// Upper bound on the summed weight of every operation's cached outputs.
+    /// Each operation's `OperationConfig::cache_budget_bytes` is a sublimit
+    /// carved out of it at registration; registration fails when the
+    /// sublimits would add up to more than this.
+    pub cache_budget_bytes: usize,
 }
 
 impl RuntimeConfig {
@@ -33,8 +38,10 @@ impl RuntimeConfig {
 /// Limits for one registered operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OperationConfig {
-    /// Upper bound on the summed `Operation::weight` of this operation's
-    /// cached outputs. Least recently used outputs are evicted beyond it.
+    /// This operation's share of `RuntimeConfig::cache_budget_bytes`: an upper
+    /// bound on the summed `Operation::weight` of its cached outputs. Least
+    /// recently used outputs are evicted beyond it. Shares are reserved, not
+    /// borrowed: one operation never evicts another's outputs.
     pub cache_budget_bytes: usize,
 }
 
