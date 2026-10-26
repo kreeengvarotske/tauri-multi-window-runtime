@@ -330,20 +330,26 @@ Decided in the review on #33 (2026-10-26):
 - **Q4 Implementation**: a separate Draft PR on top of the #23 harness; no
   change to Runtime Lab or the public `runtime_*` contract.
 
-Open, needs agreement:
+Decided in the second review on #33 (2026-10-26):
 
-- **Q5 Source of arm C.** Arm C needs `shared-runtime` from #35, which is
-  stacked on #34 and #14 and not on #23. Proposed: implement arms A and B on
-  #23 first (they need nothing new); add arm C in the same Draft PR by
-  merging the #35 branch into the scenario branch once #35 is reviewed,
-  recorded in the PR so the extra diff is visible. Alternative: wait for #35
-  to land in `main` and rebase the harness branch.
-- **Q6 Thresholds.** δ = max(10 MiB, 5 %), ε = max(5 MiB, 2 %) and the
-  guardrail bounds in §8d.
+- **Q5 Source of arm C.** A scenario Draft PR on #23 implements arms A and
+  B first. Arm C is merged in from the #35 branch only after #35 is
+  reviewed, CI is green at its exact head and the needed API is checked;
+  the exact base, head and merge commit are recorded in that PR. No
+  existing PR base is changed and nothing is merged into `main`.
+- **Q6 Thresholds.** δ = max(10 MiB, 5 % of A) for C vs A,
+  ε = max(5 MiB, 2 % of B) for C vs B, and the guardrails in §8d are fixed
+  now, before any result. After the pilot they may change only through a
+  documented protocol change made before the first confirmatory run, never
+  to fit an observed effect.
+
+The pilot stays descriptive, is never used for confirmatory conclusions,
+and runs only after this revision's review is complete and the scenario
+build has been checked.
 
 ## 11. Acceptance criteria for this phase
 
-- This revision reviewed; Q5–Q6 decided.
+- This revision reviewed; Q1–Q6 decided (done 2026-10-26).
 - Scenario M implemented with unit tests for the generator, checksums,
   paging, aggregates and the size report; CI green; a native smoke run.
 - Pilot run only from this revision, reported per §8a, with raw data and the
