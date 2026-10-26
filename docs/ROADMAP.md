@@ -27,7 +27,7 @@ result is honest, but they are never presented as the thing being shared.
 | Path | Status | Rule |
 |---|---|---|
 | In-process runtime inside one Tauri application | **Main path** | All product work targets this |
-| Broker shared by separate applications (#27, #29) | **Conditional, experimental** | Continues only after (a) a measured memory break-even on a realistic workload and (b) closed identity and security questions. Code stays in `experiments/` until an architecture decision |
+| Broker shared by separate applications (#27, #29) | **Conditional research branch** | Considered for production only if the in-process runtime and the realistic benchmark show that sharing within one application is not enough, a cross-application measurement then shows a memory break-even, and identity and security questions are closed. Code stays in `experiments/` until that decision |
 
 ### Out of scope
 
@@ -104,7 +104,9 @@ process was about 8–9 MB Private of 280–315 MB total, and the rest was WebVi
 | B | Tauri integration and multiple windows | `runtime-ipc`, `src-tauri` commands and capabilities, TS SDK, Runtime Lab, window events | #2, #7, #28 |
 | C | Memory measurement | process monitor, symmetric harness, statistical protocol, realistic workload | #9, #10, #11, #16, #17, #18, #20, #23, #24, #25 |
 | D | Cross-application architecture (conditional) | ADR, threat model, broker spike | #27, #29 (Issue #15 for the in-app access model) |
-| E | Packaging and release | sample app, integration guide, crate publishing, CI matrix | none yet |
+| E | Packaging and release | sample app, crate publishing, versioning, CI matrix for supported platforms | none yet |
+| T | Testing (cross-cutting) | regression test for every defect, shown red on the original code; fmt, clippy `-D warnings`, workspace tests at exact SHAs; native Windows runs recorded separately from hosted CI | `docs/VERIFICATION.md` |
+| Doc | Documentation (cross-cutting) | integration guide, API reference, contract and limits, verification record; all in English | this file, `docs/VERIFICATION.md`, `docs/design/` |
 
 ## 5. Phases
 
@@ -114,12 +116,12 @@ started**, **conditional**.
 
 | Phase | Workstream | Status | Evidence | Next step | Acceptance criteria |
 |---|---|---|---|---|---|
-| 0. Plan and product boundary | all | in progress | this file | Review and agree this roadmap | Roadmap agreed; stale items in §8 accepted as removed |
-| 1. Core correctness | A | review | #8 `1434e31`; #12 `c728538` (approved, CI green, native Windows 10); #14 `772155d` (CI green, native Windows 10) | Re-verify #8/#12/#14 together at exact SHAs (Phase 1 checklist below); merge in order #8 → #12 → #14 | Every defect has a regression test shown red on the original code; fmt, clippy `-D warnings`, workspace tests green at exact SHAs; native Windows run recorded with OS build |
-| 2. Lab and window contract | B | review | #2 `37d82d5`, #7 `1bbbc4a`, #28 `85f2937` (CI green; native Windows 10 22H2 19045 incl. manual two-window run) | Joint check of #2 + #7 + #28 (Phase 2 checklist); #2 has no CI at its head | Window events treated as untrusted and validated; admin commands main-only, enforced in Rust; stats meaning with in-flight requests documented; closed-secondary behaviour tested; manual two-window scenario recorded |
-| 3. Stable Rust API | A, B | not started | Issue #15 (A1–A5), decision memo in #13 | Written API proposal: config, typed operation registry, shared cache access, cancellation/deadlines/limits/shutdown, safe diagnostics, Tauri adapter; memory location stated per API | Proposal agreed; implementation with tests; WebView never sees runtime internals; no public IPC/SDK change without agreement |
-| 4. Memory benchmark | C | blocked | #20 `9c40dd5` → #23 `3f70b7d` → #25 `ed756a8` (CI green, protocol not approved); monitor #18 `1d57f6f` → #24 `6952886` (native Windows 10: 0.2 s median 0.214 s) | Consolidate #9–#25 into one scenario; recompute #25 with RAM primary; add a realistic Rust-owned data set; write the pilot protocol | Pilot protocol reviewed before any confirmatory run; RAM primary, CPU/latency/errors guardrails; all processes summed with Private Bytes; configs, hashes, raw data and failed runs kept |
-| 5. Cross-app broker | D | conditional | #27 `491486b`, #29 `4e6d19b` (CI green incl. hosted Windows; native Windows 10: 12/12 cross-process tests 6/6 runs; two-user check not run) | Independent re-check of #27 and #29; list checks that need a second local user | Stays experimental until identity is decided and Phase 4 shows break-even on a realistic workload |
+| 0. Plan and product boundary | all | review | this file; `docs/VERIFICATION.md`; mapping of earlier decisions (§9) | Review and agree this roadmap | Roadmap agreed; items in §8 and §9 accepted |
+| 1. Core correctness | A | review (complete, waiting for merge) | #8 `1434e31`, #12 `c728538` (approved), #14 `772155d`: CI green and native Windows 10 on 2026-10-26 (`docs/VERIFICATION.md`); no new correctness defect found | Merge in order #8 → #12 → #14 (owner) | Every defect has a regression test shown red on the original code; fmt, clippy `-D warnings`, workspace tests green at exact SHAs; native Windows run recorded with OS build |
+| 2. Lab and window contract | B | review | #2 `37d82d5`, #7 `1bbbc4a`, #28 `85f2937` (CI green; native incl. manual two-window run); #31 `29adfed` fixes repeated and malformed window events (CI green, native pending) | Native two-window run of #31; C-2 decision; #2 has no CI at its head | Window events treated as untrusted and validated; admin commands main-only, enforced in Rust; stats meaning with in-flight requests documented; closed-secondary behaviour tested; manual two-window scenario recorded |
+| 3. Stable Rust API | A, B | proposal | #32 (contract, examples, IPC compatibility); Issue #15 A1–A5 | Review of #32; then small PRs: runtime + registry, limits and deadlines, diagnostics, shutdown, Tauri adapter, demo migration | Contract agreed before code; tests per PR; WebView never sees runtime internals; current IPC unchanged until a migration is agreed |
+| 4. Memory benchmark | C | protocol draft | #33 (pilot protocol, realistic catalog scenario); harness #20 → #23, monitor #18 → #24 (native: 0.2 s median 0.214 s) | Review #33 and decide its Q1–Q4; implement scenario M; **do not run the #25 pilot with its old parameters** | Pilot protocol reviewed before any run; confirmatory only after the pilot report and a frozen protocol; RAM primary, CPU/latency/errors guardrails; all processes summed with Private Bytes; configs, hashes, raw data and failed runs kept |
+| 5. Cross-app broker | D | conditional research | #27 `491486b`, #29 `4e6d19b` (CI green incl. hosted Windows; native Windows 10: 12/12 cross-process tests in 6/6 runs; two-user check not run) | None until Phase 4 reports. Then a written decision whether a cross-app stage is needed, with the measurement and the open identity, manifest, rights, timeout and same-user questions | Stays in `experiments/`; production work only after that decision |
 | 6. Release path | E | not started | none | Starts after Phases 1–4 pass | Sample app and guide; versioning and error/disabled-runtime behaviour defined; crate publishable; CI for supported platforms; framework used from a fresh Tauri app without Runtime Lab |
 
 ### Phase 1 checklist (Core)
@@ -195,7 +197,44 @@ measurement results stay as history.
 | Separate stage lists in #13 (stages 0–10), Issue #15 order, `docs/cross-app/06` phases P0–P6 | issue and PR comments | Merged into §5; those documents stay as history |
 | A daemon shared across applications as part of the core product | 2026-10-25 stage list | Kept only as the conditional Phase 5 |
 
-## 9. Reporting
+## 9. Mapping of earlier decisions
+
+Earlier open questions and recommendations (Issue #13 comment 6414461497,
+Issue #15, `docs/cross-app/06` on #29) mapped to this plan. **Kept**: still
+needed as is. **Replaced**: needed, but in a different form. **Optional**: no
+longer required for the product path; revisit only if Phase 5 is opened.
+
+| Item | Topic | Status | Where it goes now |
+|---|---|---|---|
+| D1 | Product boundary | **Kept, now decided by the owner**: in-process is the product, broker is research | §1 |
+| D2 | Client identity for the broker | Optional | Phase 5 entry condition |
+| D3 | Manifest location | Optional | Phase 5 |
+| D4 | Data classes (Public / App, no secrets) | **Replaced** by in-process scopes (`Shared` / `PerWindow`) set in Rust; no secrets in shared scope | Phase 3 API |
+| D5 | Who may read stats and invalidate | **Replaced**: admin commands main-only in Rust, stats without keys or values | Phase 3 API |
+| D6 | Platforms | **Kept**: Windows 10 first, Windows 11 as a release gate, Linux for CI | Phase 6 |
+| D7 | Broker absent → in-process fallback | Optional | Phase 5 |
+| D8 | Panic policy | **Replaced**: decide for the in-process runtime (abort vs unwind with isolation) | Phase 3 API, decision |
+| D9 | Broker protocol and versioning | Optional; in-process protocol version (C-4) is kept separately | Phase 5 |
+| D10 | Criteria to keep the broker | **Replaced**: RAM-primary break-even, CPU and latency as guardrails | §2, Phase 5 |
+| S-1 | Fixed N = 20, Holm over 8 (4 CPU + 4 RAM) | **Replaced**: RAM-primary family on the realistic scenario | Phase 4 protocol |
+| S-2 | 0.2 s RAM sampling | **Replaced**: 1 s sampling of a retained data set (plateau) | Phase 4 protocol |
+| S-3 | Minimum valid pairs | **Kept** as a rule, recomputed for the new family | Phase 4 protocol |
+| S-4 | Memory columns in the CPU profile | Optional (no CPU profile as a primary) | — |
+| S-5 | Equivalence rule for S1/S3 | **Kept** as the fixed-overhead check (D0 cell) | Phase 4 protocol |
+| S-6 | Time budget (2.6 h + 10.2 h) | **Replaced** by the new pilot and confirmatory estimate | Phase 4 protocol |
+| S-7 | Run the #25 pilot before freezing | **Dropped**: the #25 pilot must not run with its old parameters | — |
+| C-1 | Counters counted on entry vs completion | **Kept**, extended: add `cancelled` and other outcomes so every request ends in one counter | Phase 3 API, decision |
+| C-2 | Window events unauthenticated; remove `allow-emit*` from secondary | **Kept** | Phase 2; #31 validates payloads meanwhile |
+| C-3 | Window label as admin authority | **Kept** for the demo; any private data needs a stronger identity first | Phase 3 |
+| C-4 | `runtime_get_protocol_info` | **Kept**, separate agreed PR after the stack merges | Phase 3 |
+| #13 stages 0–5 | Audit, PR A/B, Windows checks, first benchmark, architecture report | Done; results in `docs/VERIFICATION.md` | history |
+| #13 stages 6–10 | Lab handshake, baseline, monitor units, symmetric design, decision memo | Monitor and symmetric harness **kept** (Phase 4); Lab vs vanilla comparison **optional** (superseded) | Phase 4 |
+| #15 F1, A1–A3 | Access context not in keys; scope in Rust; operation registry | **Kept** as the core of the API | Phase 3 |
+| #15 F3, A4 | Events are not authenticated; private data only in direct responses | **Kept** | Phases 2 and 3 |
+| #15 A5 | Protocol versioning | **Kept** (same as C-4) | Phase 3 |
+| #15 §6 | Shared Runtime saves at most the Core share unless it holds heavy data | **Kept**: the reason the benchmark needs a realistic data set | §3, Phase 4 |
+
+## 10. Reporting
 
 After each phase: what was done and what remains; PR links and exact SHAs;
 commands, platforms and actual results (hosted CI and native runs reported
