@@ -161,7 +161,19 @@ describe("Runtime Lab UI", () => {
     mountTauri(fakeCoreTransport({ ...SAMPLE_STATS, requestsReceived: 99 }));
     button("Обновить").click();
     await flush();
-    expect($('[data-stat="invariant"]').textContent).toContain("нарушен");
+    expect($('[data-stat="invariant"]').className).toContain("text-error");
+    expect($('[data-stat="invariant"]').textContent).toContain("не сходится");
+  });
+
+  it("does not call a mismatch a violation, since another window may still have calls in flight", async () => {
+    // Counters are shared by all windows and requestsReceived is counted before
+    // the outcome, so this window cannot tell an unfinished call from a bug.
+    mountTauri(fakeCoreTransport({ ...SAMPLE_STATS, requestsReceived: 51 }));
+    button("Обновить").click();
+    await flush();
+    const text = $('[data-stat="invariant"]').textContent ?? "";
+    expect(text).not.toContain("нарушен");
+    expect(text).toContain("другом окне");
   });
 
   it("invalidates the selected project from the cache in the main Tauri window", async () => {
@@ -376,6 +388,28 @@ describe("Runtime Lab UI", () => {
     expect(transport.calls).toBe(10);
     expect($<HTMLInputElement>("#project-id").value).toBe("demo");
     expect(out("state")).toContain("все 10 ответов успешны");
+  });
+
+  it("ignores a series request whose payload is not a series the UI offers", async () => {
+    // Window events are not authenticated: any window may emit them, so the
+    // payload must not decide how much work this window does.
+    const bridge = fakeBridge();
+    const transport = fakeCoreTransport();
+    mountTauri(transport, vi.fn(), SECONDARY, bridge);
+    await flush();
+    const forged: unknown[] = [
+      { projectId: "demo", size: 100_000 },
+      { projectId: "demo", size: -1 },
+      { projectId: "demo", size: "10" },
+      { projectId: 42, size: 10 },
+      { size: 10 },
+      null,
+    ];
+    for (const payload of forged) bridge.deliver(payload as SeriesRequest);
+    await flush();
+    await flush();
+    expect(transport.calls).toBe(0);
+    expect($<HTMLInputElement>("#project-id").value).not.toBe("42");
   });
 
   it("exports the series history as JSON", async () => {

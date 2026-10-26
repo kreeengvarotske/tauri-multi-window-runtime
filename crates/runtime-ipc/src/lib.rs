@@ -556,4 +556,37 @@ mod concurrency {
         // minimum distinct executions: 4 + 3 + 4
         assert!(s.operations_executed >= 11, "{s:?}");
     }
+
+    /// The invariant `requests = executed + coalesced + cache hits` holds only
+    /// when no request is in flight: `requestsReceived` is counted on entry and
+    /// the outcome counter on completion. A window that reads stats while
+    /// another window's request runs sees them disagree, so the UI must not
+    /// call such a snapshot a violation.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stats_disagree_while_a_request_is_in_flight() {
+        let ipc = Arc::new(RuntimeIpc::with_cache_policy(CachePolicy::Ttl(
+            Duration::from_secs(3600),
+        )));
+        let request = tokio::spawn({
+            let ipc = ipc.clone();
+            async move { ipc.get_project_metadata("demo".to_owned()).await }
+        });
+        while ipc.get_debug_stats().requests_received == 0 {
+            tokio::task::yield_now().await;
+        }
+
+        let during = ipc.get_debug_stats();
+        assert_eq!(during.requests_received, 1);
+        assert_eq!(
+            during.operations_executed + during.coalesced_requests + during.cache_hits,
+            0
+        );
+
+        request.await.unwrap().unwrap();
+        let after = ipc.get_debug_stats();
+        assert_eq!(
+            after.requests_received,
+            after.operations_executed + after.coalesced_requests + after.cache_hits
+        );
+    }
 }
