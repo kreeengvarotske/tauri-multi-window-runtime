@@ -1699,7 +1699,12 @@ mod budget {
     use super::{CachedService, ServiceRunKind};
     use crate::{CacheBudget, CachePolicy};
     use std::{sync::Arc, time::Duration};
-    use tokio::sync::Barrier;
+    use tokio::{
+        sync::{Notify, Semaphore},
+        time::timeout,
+    };
+
+    const LIMIT: Duration = Duration::from_secs(5);
 
     fn service(max: usize) -> CachedService<u32, Vec<u8>, ()> {
         CachedService::with_budget(
@@ -1739,30 +1744,41 @@ mod budget {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn eviction_does_not_disturb_callers_of_an_operation_in_flight() {
         let svc = Arc::new(service(100));
-        let gate = Arc::new(Barrier::new(2));
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Semaphore::new(0));
         let slow = {
-            let (svc, gate) = (Arc::clone(&svc), Arc::clone(&gate));
+            let (svc, started, release) =
+                (Arc::clone(&svc), Arc::clone(&started), Arc::clone(&release));
             tokio::spawn(async move {
                 svc.run_with_metadata(1, || async move {
-                    gate.wait().await;
-                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    started.notify_one();
+                    release.acquire().await.unwrap().forget();
                     Ok(vec![1; 60])
                 })
                 .await
             })
         };
+        timeout(LIMIT, started.notified()).await.unwrap();
         let joined = {
             let svc = Arc::clone(&svc);
-            tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-                svc.run_with_metadata(1, || async { Ok(vec![9; 60]) }).await
-            })
+            tokio::spawn(
+                async move { svc.run_with_metadata(1, || async { Ok(vec![9; 60]) }).await },
+            )
         };
-        gate.wait().await;
+        // The second caller is registered on the in-flight operation before
+        // the cache is churned; no timing assumption.
+        timeout(LIMIT, async {
+            while svc.coalescer.test_callers() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("second caller did not join the operation in flight");
         // fill and churn the cache while key 1 is in flight
         for key in 10..20 {
             get(&svc, key, 60).await;
         }
+        release.add_permits(1);
         let slow = slow.await.unwrap();
         let joined = joined.await.unwrap();
         assert_eq!(slow.kind, ServiceRunKind::Executed);
