@@ -41,7 +41,7 @@ function Get-LatinSquares {
 
 function ConvertFrom-CellName {
     param([string]$Cell)
-    if ($Cell -notmatch '^N([1-8])D(\d{1,3})$') { throw "Cell '$Cell' must look like N2D16 (windows 1-8, data 0-256 MiB)." }
+    if ($Cell -cnotmatch '^N([1-8])D(\d{1,3})$') { throw "Cell '$Cell' must look like N2D16 (windows 1-8, data 0-256 MiB)." }
     $data = [int]$Matches[2]
     if ($data -gt 256) { throw "Cell '$Cell': data must be at most 256 MiB." }
     return [pscustomobject]@{ Cell = $Cell; Windows = [int]$Matches[1]; DataMib = $data }
