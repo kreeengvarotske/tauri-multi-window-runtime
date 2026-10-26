@@ -1,23 +1,131 @@
 use crate::cache_policy::CachePolicy;
 use std::{
     collections::HashMap,
+    fmt,
     hash::Hash,
     sync::{Arc, Mutex},
     time::Instant,
 };
 
+/// Upper bound on the total weight of the values a cache keeps.
+///
+/// The weight of a value is whatever `weigher` returns for it, normally an
+/// estimate of the bytes it retains. When an insertion takes the total above
+/// `max_weight`, the least recently used entries are removed until it fits.
+/// A value heavier than `max_weight` on its own is not stored.
+pub struct CacheBudget<V> {
+    max_weight: usize,
+    weigher: Arc<dyn Fn(&V) -> usize + Send + Sync>,
+}
+
+impl<V> CacheBudget<V> {
+    pub fn new(max_weight: usize, weigher: impl Fn(&V) -> usize + Send + Sync + 'static) -> Self {
+        Self {
+            max_weight,
+            weigher: Arc::new(weigher),
+        }
+    }
+
+    pub const fn max_weight(&self) -> usize {
+        self.max_weight
+    }
+}
+
+impl<V> Clone for CacheBudget<V> {
+    fn clone(&self) -> Self {
+        Self {
+            max_weight: self.max_weight,
+            weigher: Arc::clone(&self.weigher),
+        }
+    }
+}
+
+impl<V> fmt::Debug for CacheBudget<V> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CacheBudget")
+            .field("max_weight", &self.max_weight)
+            .finish_non_exhaustive()
+    }
+}
+
 struct CacheEntry<V> {
     value: Arc<V>,
     inserted_at: Instant,
     policy: CachePolicy,
+    weight: usize,
+    last_used: u64,
 }
 
-/// A thread-safe cache whose entries follow an explicit [`CachePolicy`].
-///
-/// Expired values are never returned by `get`. Entries are cleaned up on lookup,
-/// when `len` is called, or explicitly through `remove_expired`.
+struct Entries<K, V> {
+    map: HashMap<K, CacheEntry<V>>,
+    total_weight: usize,
+    clock: u64,
+    evictions: u64,
+}
+
+impl<K, V> Default for Entries<K, V> {
+    fn default() -> Self {
+        Self {
+            map: HashMap::new(),
+            total_weight: 0,
+            clock: 0,
+            evictions: 0,
+        }
+    }
+}
+
+impl<K: Eq + Hash, V> Entries<K, V> {
+    fn tick(&mut self) -> u64 {
+        self.clock += 1;
+        self.clock
+    }
+
+    fn remove(&mut self, key: &K) -> Option<CacheEntry<V>> {
+        let removed = self.map.remove(key);
+        if let Some(entry) = &removed {
+            self.total_weight -= entry.weight;
+        }
+        removed
+    }
+
+    /// Removes the least recently used entry. Returns its value so that the
+    /// caller can drop it after releasing the lock.
+    fn evict_oldest(&mut self) -> Option<Arc<V>> {
+        let oldest = self.map.values().map(|entry| entry.last_used).min()?;
+        let mut evicted = None;
+        let mut freed = 0;
+        self.map.retain(|_, entry| {
+            if entry.last_used != oldest {
+                return true;
+            }
+            freed = entry.weight;
+            evicted = Some(Arc::clone(&entry.value));
+            false
+        });
+        self.total_weight -= freed;
+        self.evictions += 1;
+        evicted
+    }
+
+    fn remove_expired(&mut self, now: Instant) -> usize {
+        let before = self.map.len();
+        let mut freed = 0;
+        self.map.retain(|_, entry| {
+            let expired = entry.policy.is_expired(entry.inserted_at, now);
+            if expired {
+                freed += entry.weight;
+            }
+            !expired
+        });
+        self.total_weight -= freed;
+        before - self.map.len()
+    }
+}
+
+/// A key-value cache with per-entry policies and an optional weight budget.
 pub struct PolicyCache<K, V> {
-    entries: Mutex<HashMap<K, CacheEntry<V>>>,
+    entries: Mutex<Entries<K, V>>,
+    budget: Option<CacheBudget<V>>,
 }
 
 impl<K, V> Default for PolicyCache<K, V>
@@ -26,7 +134,8 @@ where
 {
     fn default() -> Self {
         Self {
-            entries: Mutex::new(HashMap::new()),
+            entries: Mutex::new(Entries::default()),
+            budget: None,
         }
     }
 }
@@ -35,19 +144,24 @@ impl<K, V> PolicyCache<K, V>
 where
     K: Eq + Hash,
 {
-    /// Creates an empty cache.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Returns a shared value if it exists and has not expired.
-    ///
-    /// If the entry has expired, it is removed and `None` is returned.
+    /// Creates a cache whose total weight stays within `budget`.
+    pub fn with_budget(budget: CacheBudget<V>) -> Self {
+        Self {
+            entries: Mutex::new(Entries::default()),
+            budget: Some(budget),
+        }
+    }
+
     pub fn get(&self, key: &K) -> Option<Arc<V>> {
         let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
         let now = Instant::now();
 
         let expired = entries
+            .map
             .get(key)
             .is_some_and(|entry| entry.policy.is_expired(entry.inserted_at, now));
 
@@ -58,45 +172,75 @@ where
             return None;
         }
 
-        entries.get(key).map(|entry| Arc::clone(&entry.value))
+        let tick = entries.tick();
+        entries.map.get_mut(key).map(|entry| {
+            entry.last_used = tick;
+            Arc::clone(&entry.value)
+        })
     }
 
-    /// Stores a value using the given policy.
-    ///
-    /// Returns `true` if the value was stored. With `NoStore`, any existing
-    /// value for this key is invalidated and this call returns `false`.
     pub fn insert(&self, key: K, value: V, policy: CachePolicy) -> bool {
         self.insert_arc(key, Arc::new(value), policy)
     }
 
-    /// Stores an existing `Arc` without wrapping it in another `Arc`.
-    ///
-    /// Returns `true` if the value was stored. With `NoStore`, any existing
-    /// value for this key is invalidated and this call returns `false`.
+    /// Stores `value` unless the policy is `NoStore` or the value alone is
+    /// heavier than the budget; in both cases an older value for `key` is
+    /// removed and `false` is returned. With a budget, least recently used
+    /// entries are evicted until the total weight fits.
     pub fn insert_arc(&self, key: K, value: Arc<V>, policy: CachePolicy) -> bool {
         if !policy.should_store() {
             self.invalidate(&key);
             return false;
         }
 
+        let weight = self
+            .budget
+            .as_ref()
+            .map_or(0, |budget| (budget.weigher)(&value));
+        if self
+            .budget
+            .as_ref()
+            .is_some_and(|budget| weight > budget.max_weight)
+        {
+            self.invalidate(&key);
+            return false;
+        }
+
+        let mut evicted = Vec::new();
         let replaced = {
             let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
-            entries.insert(
+            let replaced = entries.remove(&key);
+            let last_used = entries.tick();
+            entries.total_weight += weight;
+            entries.map.insert(
                 key,
                 CacheEntry {
                     value,
                     inserted_at: Instant::now(),
                     policy,
+                    weight,
+                    last_used,
                 },
-            )
+            );
+
+            if let Some(budget) = &self.budget {
+                // The new entry has the newest tick and fits on its own, so it
+                // is evicted only after every other entry, which never happens.
+                while entries.total_weight > budget.max_weight {
+                    match entries.evict_oldest() {
+                        Some(value) => evicted.push(value),
+                        None => break,
+                    }
+                }
+            }
+            replaced
         };
 
-        // Drop replaced values after releasing the mutex.
         drop(replaced);
+        drop(evicted);
         true
     }
 
-    /// Removes one entry. Returns `true` if an entry existed.
     pub fn invalidate(&self, key: &K) -> bool {
         let removed = {
             let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
@@ -108,35 +252,52 @@ where
         existed
     }
 
-    /// Removes all entries.
     pub fn clear(&self) {
         let removed = {
             let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
-            std::mem::take(&mut *entries)
+            entries.total_weight = 0;
+            std::mem::take(&mut entries.map)
         };
         drop(removed);
     }
 
-    /// Removes all expired entries and returns the number removed.
     pub fn remove_expired(&self) -> usize {
         let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
-        let now = Instant::now();
-        let before = entries.len();
-
-        entries.retain(|_, entry| !entry.policy.is_expired(entry.inserted_at, now));
-
-        before - entries.len()
+        entries.remove_expired(Instant::now())
     }
 
-    /// Returns the number of live entries, pruning expired entries first.
     pub fn len(&self) -> usize {
         self.remove_expired();
-        self.entries.lock().unwrap_or_else(|p| p.into_inner()).len()
+        self.entries
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .map
+            .len()
     }
 
-    /// Returns whether the cache has no live entries.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Total weight of the live entries, pruning expired entries first.
+    /// Always 0 for a cache without a budget.
+    pub fn weight(&self) -> usize {
+        let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
+        entries.remove_expired(Instant::now());
+        entries.total_weight
+    }
+
+    /// Number of entries removed to stay within the budget.
+    pub fn evictions(&self) -> u64 {
+        self.entries
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .evictions
+    }
+
+    /// The budget this cache was created with, if any.
+    pub fn budget(&self) -> Option<&CacheBudget<V>> {
+        self.budget.as_ref()
     }
 }
 
@@ -242,5 +403,93 @@ mod tests {
 
         let cached = cache.get(&key).unwrap();
         assert!(Arc::ptr_eq(&value, &cached));
+    }
+
+    fn budgeted(max: usize) -> PolicyCache<String, Vec<u8>> {
+        PolicyCache::with_budget(super::CacheBudget::new(max, |v: &Vec<u8>| v.len()))
+    }
+
+    #[test]
+    fn budget_evicts_least_recently_used_entries() {
+        let cache = budgeted(100);
+        assert!(cache.insert("a".into(), vec![0; 40], CachePolicy::Forever));
+        assert!(cache.insert("b".into(), vec![0; 40], CachePolicy::Forever));
+        // touch "a", so "b" is now the least recently used entry
+        assert!(cache.get(&"a".to_owned()).is_some());
+        assert!(cache.insert("c".into(), vec![0; 40], CachePolicy::Forever));
+
+        assert!(cache.get(&"b".to_owned()).is_none());
+        assert!(cache.get(&"a".to_owned()).is_some());
+        assert!(cache.get(&"c".to_owned()).is_some());
+        assert_eq!(cache.weight(), 80);
+        assert_eq!(cache.evictions(), 1);
+    }
+
+    #[test]
+    fn budget_evicts_as_many_entries_as_needed() {
+        let cache = budgeted(100);
+        for key in ["a", "b", "c", "d"] {
+            assert!(cache.insert(key.into(), vec![0; 25], CachePolicy::Forever));
+        }
+        assert_eq!(cache.weight(), 100);
+        assert!(cache.insert("big".into(), vec![0; 70], CachePolicy::Forever));
+        assert_eq!(cache.weight(), 95);
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.evictions(), 3);
+        assert!(cache.get(&"d".to_owned()).is_some());
+    }
+
+    #[test]
+    fn value_heavier_than_budget_is_not_stored_and_drops_the_old_value() {
+        let cache = budgeted(100);
+        assert!(cache.insert("k".into(), vec![0; 10], CachePolicy::Forever));
+        assert!(!cache.insert("k".into(), vec![0; 101], CachePolicy::Forever));
+        assert!(cache.get(&"k".to_owned()).is_none());
+        assert_eq!(cache.weight(), 0);
+        assert_eq!(cache.evictions(), 0);
+    }
+
+    #[test]
+    fn replacing_invalidating_and_clearing_keep_the_weight_exact() {
+        let cache = budgeted(100);
+        assert!(cache.insert("k".into(), vec![0; 30], CachePolicy::Forever));
+        assert!(cache.insert("k".into(), vec![0; 50], CachePolicy::Forever));
+        assert_eq!(cache.weight(), 50);
+        assert!(cache.insert("j".into(), vec![0; 20], CachePolicy::Forever));
+        assert!(cache.invalidate(&"k".to_owned()));
+        assert_eq!(cache.weight(), 20);
+        assert!(!cache.insert("j".into(), vec![0; 1], CachePolicy::NoStore));
+        assert_eq!(cache.weight(), 0);
+        assert!(cache.insert("x".into(), vec![0; 60], CachePolicy::Forever));
+        cache.clear();
+        assert_eq!(cache.weight(), 0);
+        assert_eq!(cache.evictions(), 0);
+    }
+
+    #[test]
+    fn expired_entries_leave_the_weight() {
+        let cache = budgeted(100);
+        assert!(cache.insert(
+            "short".into(),
+            vec![0; 60],
+            CachePolicy::Ttl(Duration::from_millis(10))
+        ));
+        thread::sleep(Duration::from_millis(25));
+        assert_eq!(cache.weight(), 0);
+        // the expired entry no longer pushes a new one out
+        assert!(cache.insert("k".into(), vec![0; 60], CachePolicy::Forever));
+        assert_eq!(cache.evictions(), 0);
+    }
+
+    #[test]
+    fn cache_without_budget_reports_zero_weight_and_never_evicts() {
+        let cache = PolicyCache::<String, Vec<u8>>::new();
+        for n in 0..50 {
+            assert!(cache.insert(n.to_string(), vec![0; 1000], CachePolicy::Forever));
+        }
+        assert_eq!(cache.len(), 50);
+        assert_eq!(cache.weight(), 0);
+        assert_eq!(cache.evictions(), 0);
+        assert!(cache.budget().is_none());
     }
 }
