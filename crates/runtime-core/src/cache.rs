@@ -263,6 +263,28 @@ where
         existed
     }
 
+    /// Removes every entry whose key matches `predicate`. Returns how many
+    /// entries were removed.
+    pub fn invalidate_matching(&self, mut predicate: impl FnMut(&K) -> bool) -> usize {
+        let mut removed = Vec::new();
+        {
+            let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
+            let mut freed = 0;
+            entries.map.retain(|key, entry| {
+                if !predicate(key) {
+                    return true;
+                }
+                freed += entry.weight;
+                removed.push(Arc::clone(&entry.value));
+                false
+            });
+            entries.total_weight -= freed;
+        }
+        let count = removed.len();
+        drop(removed);
+        count
+    }
+
     pub fn clear(&self) {
         let removed = {
             let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());

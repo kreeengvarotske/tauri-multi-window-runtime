@@ -1,0 +1,12 @@
+[package]
+name = "shared-runtime"
+version = "0.1.0"
+edition = "2024"
+description = "In-process runtime for Tauri applications: typed operations whose data, cache and work are shared by every window"
+
+[dependencies]
+runtime-core = { path = "../runtime-core" }
+tokio = { version = "1", features = ["sync", "time", "macros", "rt"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "test-util"] }

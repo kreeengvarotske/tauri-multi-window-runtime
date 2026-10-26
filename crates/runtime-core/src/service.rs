@@ -271,6 +271,27 @@ where
         self.cache.invalidate(key)
     }
 
+    /// Invalidates every key that matches `predicate`, as `invalidate` does
+    /// for one key: matching cached values are removed, and matching calls in
+    /// flight cannot cache their results. Returns how many cached values were
+    /// removed.
+    pub fn invalidate_matching(&self, mut predicate: impl FnMut(&K) -> bool) -> usize {
+        let mut generations = self
+            .generation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        #[cfg(test)]
+        probe::mark();
+
+        for (key, key_state) in generations.keys.iter_mut() {
+            if predicate(key) {
+                key_state.version = key_state.version.wrapping_add(1);
+            }
+        }
+
+        self.cache.invalidate_matching(predicate)
+    }
+
     /// Clears all cached values and separates future calls from older work.
     ///
     /// Existing callers may still receive their results, but those results
@@ -1788,5 +1809,48 @@ mod budget {
             joined.result.as_ref().unwrap()
         ));
         assert!(svc.cached_weight() <= 100);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn invalidate_matching_removes_matching_keys_and_blocks_in_flight_results() {
+        let svc = Arc::new(service(1000));
+        for key in 1..=4 {
+            get(&svc, key, 10).await;
+        }
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Semaphore::new(0));
+        let in_flight = {
+            let (svc, started, release) =
+                (Arc::clone(&svc), Arc::clone(&started), Arc::clone(&release));
+            tokio::spawn(async move {
+                svc.run_with_metadata(6, || async move {
+                    started.notify_one();
+                    release.acquire().await.unwrap().forget();
+                    Ok(vec![0; 10])
+                })
+                .await
+            })
+        };
+        timeout(LIMIT, started.notified()).await.unwrap();
+
+        // even keys: 2, 4 cached, 6 in flight
+        assert_eq!(svc.invalidate_matching(|key| key % 2 == 0), 2);
+        assert_eq!((svc.cached_entries(), svc.cached_weight()), (2, 20));
+        release.add_permits(1);
+        let result = timeout(LIMIT, in_flight).await.unwrap().unwrap();
+        assert_eq!(
+            result.result.unwrap().len(),
+            10,
+            "caller still gets its value"
+        );
+        assert_eq!(
+            svc.cached_entries(),
+            2,
+            "invalidated in-flight result was cached"
+        );
+
+        assert_eq!(get(&svc, 1, 10).await, ServiceRunKind::CacheHit);
+        assert_eq!(get(&svc, 2, 10).await, ServiceRunKind::Executed);
+        assert_eq!(get(&svc, 6, 10).await, ServiceRunKind::Executed);
     }
 }
