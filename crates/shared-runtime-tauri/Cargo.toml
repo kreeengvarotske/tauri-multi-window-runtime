@@ -1,0 +1,16 @@
+[package]
+name = "shared-runtime-tauri"
+version = "0.1.0"
+edition = "2024"
+description = "Tauri v2 adapter for shared-runtime: one runtime as app state, callers from the injected window, bounded IPC bytes, window lifecycle and shutdown"
+
+[dependencies]
+serde = "1"
+serde_json = "1"
+shared-runtime = { path = "../shared-runtime" }
+tauri = { version = "2", default-features = false }
+tokio = { version = "1", features = ["time"] }
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }

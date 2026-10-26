@@ -335,6 +335,11 @@ impl Runtime {
         })
     }
 
+    /// The limits the runtime was built with.
+    pub fn config(&self) -> &RuntimeConfig {
+        &self.shared.config
+    }
+
     pub fn stats(&self) -> RuntimeStats {
         RuntimeStats {
             operations: self.erased.iter().map(|op| op.stats()).collect(),
