@@ -186,7 +186,8 @@ where
     /// Stores `value` unless the policy is `NoStore` or the value alone is
     /// heavier than the budget; in both cases an older value for `key` is
     /// removed and `false` is returned. With a budget, least recently used
-    /// entries are evicted until the total weight fits.
+    /// entries are evicted before the insert until the new value fits, so the
+    /// total weight never exceeds the budget and never overflows.
     pub fn insert_arc(&self, key: K, value: Arc<V>, policy: CachePolicy) -> bool {
         if !policy.should_store() {
             self.invalidate(&key);
@@ -210,8 +211,29 @@ where
         let replaced = {
             let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
             let replaced = entries.remove(&key);
+
+            if let Some(budget) = &self.budget {
+                // Make room before inserting: `weight <= max_weight`, so the
+                // bound `max_weight - weight` cannot underflow, and the total
+                // after the insert is at most `max_weight` (no overflow).
+                let room = budget.max_weight - weight;
+                while entries.total_weight > room {
+                    match entries.evict_oldest() {
+                        Some(value) => evicted.push(value),
+                        None => break,
+                    }
+                }
+            }
+            let Some(total_weight) = entries.total_weight.checked_add(weight) else {
+                // Unreachable while the invariant above holds; refuse to store
+                // rather than let the total wrap.
+                drop(entries);
+                drop(replaced);
+                drop(evicted);
+                return false;
+            };
+            entries.total_weight = total_weight;
             let last_used = entries.tick();
-            entries.total_weight += weight;
             entries.map.insert(
                 key,
                 CacheEntry {
@@ -222,17 +244,6 @@ where
                     last_used,
                 },
             );
-
-            if let Some(budget) = &self.budget {
-                // The new entry has the newest tick and fits on its own, so it
-                // is evicted only after every other entry, which never happens.
-                while entries.total_weight > budget.max_weight {
-                    match entries.evict_oldest() {
-                        Some(value) => evicted.push(value),
-                        None => break,
-                    }
-                }
-            }
             replaced
         };
 
