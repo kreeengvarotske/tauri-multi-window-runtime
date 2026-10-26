@@ -1,0 +1,67 @@
+use std::fmt;
+
+use crate::{CallError, Operation};
+
+/// A bounded projection of an operation's output: a page, an aggregate, a
+/// lookup. The output stays in Rust; only the response leaves the runtime.
+pub trait View<O: Operation>: Send + Sync + 'static {
+    const NAME: &'static str;
+    type Request: Send;
+    type Response: Send;
+
+    /// Parameters of the source operation this request reads.
+    fn source(&self, request: &Self::Request) -> O::Params;
+
+    /// Most items one response may carry. The runtime refuses a larger
+    /// response instead of truncating it silently.
+    fn max_items(&self) -> usize;
+
+    /// Builds the response. `max_items` is passed so that the view can
+    /// clamp its own page size.
+    fn project(
+        &self,
+        output: &O::Output,
+        request: Self::Request,
+        max_items: usize,
+    ) -> Result<Self::Response, ViewError>;
+
+    /// Items in a response, checked against `max_items`.
+    fn items(response: &Self::Response) -> usize;
+}
+
+/// Why a view returned nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ViewError {
+    /// The request itself is invalid (bad offset, unknown sort key, …).
+    InvalidRequest(String),
+    /// The projection produced more than `max_items` items.
+    TooLarge { items: usize, max_items: usize },
+}
+
+impl fmt::Display for ViewError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidRequest(why) => write!(f, "invalid view request: {why}"),
+            Self::TooLarge { items, max_items } => {
+                write!(f, "view response has {items} items, limit is {max_items}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ViewError {}
+
+/// A view call fails either while getting the source output or in the view.
+pub enum ViewCallError<E> {
+    Source(CallError<E>),
+    View(ViewError),
+}
+
+impl<E: fmt::Debug> fmt::Debug for ViewCallError<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Source(error) => f.debug_tuple("Source").field(error).finish(),
+            Self::View(error) => f.debug_tuple("View").field(error).finish(),
+        }
+    }
+}

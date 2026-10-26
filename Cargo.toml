@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/runtime-core",
     "crates/runtime-ipc",
+    "crates/shared-runtime",
     "src-tauri",
 ]
 
