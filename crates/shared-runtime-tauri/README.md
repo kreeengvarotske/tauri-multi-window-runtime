@@ -63,7 +63,7 @@ Codes: `INVALID_ARGUMENT`, `REQUEST_TOO_LARGE`, `RESPONSE_TOO_LARGE`, `DEADLINE_
 - **Who may call a command is up to the capabilities.** The adapter does not check permissions. A command granted to a window runs for it; `PerWindow` only keeps that window's data apart.
 - **Window identity is the window label.** `Caller` is the label of the `WebviewWindow` Tauri injects; a window opened later under the same label is the same caller (it starts empty because the old one was forgotten on destroy). Commands work for `WebviewWindow`s; a webview embedded in a multi-webview window is not supported.
 - **`call` responses are not under the projection limit.** `SharedRuntime::call` serializes what `respond` returns after the operation, without a projection slot; it is meant for small results. Anything that grows with the data belongs in a view.
-- **Operation error messages are the operation's `Display`.** They are sent to the WebView; an operation must keep private data out of them.
+- **Operation errors are sanitized at the IPC boundary.** The WebView receives the stable `OPERATION_FAILED` code and generic `operation failed` message; operation error details are not serialized into the response.
 - **Exit waits at most `shutdown_grace + abort_wait`.** Work that ignores the abort (blocking code in an operation, a projection or a serialization still running) is left behind when the process exits.
 - **Response memory is bounded only for views that charge their budget.** The runtime refuses an over-limit response either way, but a view that builds before charging has already allocated it.
 - **Measured memory effect: none claimed.** This PR adds the adapter; memory comes from the reviewed scenario runs.
