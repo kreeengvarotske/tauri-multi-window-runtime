@@ -2,7 +2,7 @@ pub mod cache;
 pub mod cache_policy;
 pub mod service;
 
-pub use cache::PolicyCache;
+pub use cache::{CacheBudget, PolicyCache};
 pub use cache_policy::CachePolicy;
 pub use service::{CachedService, ServiceRunKind, ServiceRunOutcome};
 use std::{

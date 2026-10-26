@@ -1,4 +1,8 @@
-use crate::{CoalescerRunKind, TaskCoalescer, cache::PolicyCache, cache_policy::CachePolicy};
+use crate::{
+    CoalescerRunKind, TaskCoalescer,
+    cache::{CacheBudget, PolicyCache},
+    cache_policy::CachePolicy,
+};
 use std::{
     collections::HashMap,
     future::Future,
@@ -144,6 +148,20 @@ where
         self.run_with_metadata(key, operation).await.result
     }
 
+    /// Creates a service whose cache keeps at most `budget` total weight.
+    ///
+    /// Eviction removes cached values only; it never affects operations in
+    /// flight or the callers waiting for them. A value heavier than the whole
+    /// budget is returned to its callers but not cached.
+    pub fn with_budget(policy: CachePolicy, budget: CacheBudget<V>) -> Self {
+        Self {
+            cache: PolicyCache::with_budget(budget),
+            coalescer: TaskCoalescer::new(),
+            policy,
+            generation: Mutex::new(GenerationState::default()),
+        }
+    }
+
     /// Like `run`, but also reports how the result was obtained.
     ///
     /// `CacheHit` means the value was found in the cache.
@@ -272,6 +290,16 @@ where
     /// Returns the number of live cached entries, pruning expired entries first.
     pub fn cached_entries(&self) -> usize {
         self.cache.len()
+    }
+
+    /// Returns the total weight of live cached entries (0 without a budget).
+    pub fn cached_weight(&self) -> usize {
+        self.cache.weight()
+    }
+
+    /// Returns how many cached entries were evicted to respect the budget.
+    pub fn evictions(&self) -> u64 {
+        self.cache.evictions()
     }
 
     /// Returns the policy used for values computed by this service.
@@ -1663,5 +1691,102 @@ mod completed_operation {
         assert_eq!(violations, 0);
         assert_eq!((svc.in_flight_tasks(), svc.in_flight_keys()), (0, 0));
         let _ = probe::now();
+    }
+}
+
+#[cfg(test)]
+mod budget {
+    use super::{CachedService, ServiceRunKind};
+    use crate::{CacheBudget, CachePolicy};
+    use std::{sync::Arc, time::Duration};
+    use tokio::{
+        sync::{Notify, Semaphore},
+        time::timeout,
+    };
+
+    const LIMIT: Duration = Duration::from_secs(5);
+
+    fn service(max: usize) -> CachedService<u32, Vec<u8>, ()> {
+        CachedService::with_budget(
+            CachePolicy::Forever,
+            CacheBudget::new(max, |v: &Vec<u8>| v.len()),
+        )
+    }
+
+    async fn get(svc: &CachedService<u32, Vec<u8>, ()>, key: u32, len: usize) -> ServiceRunKind {
+        svc.run_with_metadata(key, || async move { Ok(vec![0; len]) })
+            .await
+            .kind
+    }
+
+    #[tokio::test]
+    async fn evicted_key_is_executed_again_and_others_stay_cached() {
+        let svc = service(100);
+        assert_eq!(get(&svc, 1, 60).await, ServiceRunKind::Executed);
+        assert_eq!(get(&svc, 2, 60).await, ServiceRunKind::Executed);
+        assert_eq!(svc.evictions(), 1);
+        assert_eq!(svc.cached_weight(), 60);
+        assert_eq!(get(&svc, 2, 60).await, ServiceRunKind::CacheHit);
+        assert_eq!(get(&svc, 1, 60).await, ServiceRunKind::Executed);
+    }
+
+    #[tokio::test]
+    async fn value_heavier_than_budget_reaches_callers_but_is_not_cached() {
+        let svc = service(100);
+        let outcome = svc
+            .run_with_metadata(7, || async { Ok(vec![1; 500]) })
+            .await;
+        assert_eq!(outcome.result.unwrap().len(), 500);
+        assert_eq!(svc.cached_entries(), 0);
+        assert_eq!(get(&svc, 7, 500).await, ServiceRunKind::Executed);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn eviction_does_not_disturb_callers_of_an_operation_in_flight() {
+        let svc = Arc::new(service(100));
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Semaphore::new(0));
+        let slow = {
+            let (svc, started, release) =
+                (Arc::clone(&svc), Arc::clone(&started), Arc::clone(&release));
+            tokio::spawn(async move {
+                svc.run_with_metadata(1, || async move {
+                    started.notify_one();
+                    release.acquire().await.unwrap().forget();
+                    Ok(vec![1; 60])
+                })
+                .await
+            })
+        };
+        timeout(LIMIT, started.notified()).await.unwrap();
+        let joined = {
+            let svc = Arc::clone(&svc);
+            tokio::spawn(
+                async move { svc.run_with_metadata(1, || async { Ok(vec![9; 60]) }).await },
+            )
+        };
+        // The second caller is registered on the in-flight operation before
+        // the cache is churned; no timing assumption.
+        timeout(LIMIT, async {
+            while svc.coalescer.test_callers() < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("second caller did not join the operation in flight");
+        // fill and churn the cache while key 1 is in flight
+        for key in 10..20 {
+            get(&svc, key, 60).await;
+        }
+        release.add_permits(1);
+        let slow = slow.await.unwrap();
+        let joined = joined.await.unwrap();
+        assert_eq!(slow.kind, ServiceRunKind::Executed);
+        assert_eq!(joined.kind, ServiceRunKind::Coalesced);
+        assert!(Arc::ptr_eq(
+            slow.result.as_ref().unwrap(),
+            joined.result.as_ref().unwrap()
+        ));
+        assert!(svc.cached_weight() <= 100);
     }
 }
