@@ -1,0 +1,20 @@
+body {
+  margin: 0;
+  font: 14px/1.5 system-ui, sans-serif;
+  background: #f6f6f6;
+  color: #1f1f1f;
+}
+main {
+  padding: 16px;
+}
+pre {
+  white-space: pre-wrap;
+}
+table {
+  border-collapse: collapse;
+  font-size: 12px;
+}
+td {
+  padding: 1px 6px;
+  border-bottom: 1px solid #ddd;
+}

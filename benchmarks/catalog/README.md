@@ -1,0 +1,65 @@
+# Memory benchmark: scenario M (shared catalog)
+
+The app for the memory pilot in `docs/benchmark/memory-pilot-protocol.md` (PR #33). It asks one question: when several windows show the same data set, how much memory does the process tree save if the data lives once in Rust instead of once per window, and what does the framework cost on top of a hand-written service?
+
+One source, one executable per arm. Only the data source differs:
+
+| Arm | Cargo feature | Where the catalog lives | What crosses IPC per step |
+|---|---|---|---|
+| **A** per-window | none | each window calls `catalog_load` once, keeps the whole catalog in its JS heap and builds its own indexes | nothing |
+| **B** shared, hand-written | `shared` | one `Catalog` with its indexes, managed Tauri state; `catalog_page`, `catalog_aggregate`, `catalog_get` | one page (≤ 100 rows), the 32 totals or ≤ 20 records |
+| **C** framework | (later) | the catalog as an `Operation` in `shared-runtime`, pages and totals as `View`s, the same three commands | as B |
+
+Arm C is added in a separate change after the `shared-runtime` review (PR #35) and a green CI at its exact head. Until then the runner refuses `-Phase Pilot` and accepts only arms A and B.
+
+Everything else is the same in all arms: the frontend (`src/window.ts` runs one window; only `setupSource` picks the source), the table, the windows (`main`, `w1`…), the workload, the timing, the release profile, `Cargo.lock` (the crate is a member of the root workspace) and `--locked`. Runtime Lab and its public IPC contract are not touched; the `catalog_*` commands exist only in this app.
+
+## Data set
+
+`catalog::generate(seed, D)` builds records (id, name, category 0–31, price, two timestamps, a short note) from a xorshift generator until the Rust representation reaches `D` bytes: struct sizes, string capacities and the three `u32` indexes (`catalog::data_bytes`). The app reports that exact size (`config.rustDataBytes`) and the record count in every report. D16 is on the order of 100 k records; the exact count is in every report. Both arms generate the catalog once at startup so that they do the same work before the measured phases; arm B keeps it, arm A drops it and serves `catalog_load` from a fresh copy per call, as a plain backend reading a file would.
+
+Arm A builds in JS the same indexes the Rust service has (by name, by price, by category and price, and the per-category totals), so in both arms each step costs work proportional to its response, not to the data set.
+
+## Workload
+
+Every window runs the same 15-step cycle (`workload::cycle`), one step every `--step-interval-ms` (default 500 ms): page 1 of 100 rows sorted by name, 10 more pages, sort by price, filter one category sorted by price, the per-category totals, 20 records by id. Windows start at different pages, filter different categories and read different ids. Each response is rendered into the table and its checksum (FNV-1a 32 over a canonical text, `catalog.ts`/`catalog.rs`) compared with the one computed by a naive reference implementation from a separate, transient copy of the data before the load. `src/fixtures/catalog-small.json` is written by a Rust test so the frontend tests check arm A against the Rust reference.
+
+A run: every window sets up its source and shows the first page → main fixes the plan once all are ready → idle (`--idle-before`, 20 s) → warm-up (`--warmup`, 30 s, the workload runs, not measured) → load (`--duration`, 120 s) → idle (`--idle-after`, 30 s) → every window reports → main writes the report → exit. Steps are due at fixed times (`warmupAt + i × interval`); one that ends after the next was due is an overrun, and the next starts at once. A window passes only if every step succeeded with the right checksum and it completed every scheduled load step. The report records each phase's start so the monitor samples can be split by phase, and per window: time to first page, arm A's load and index time, p50/p95/max latency per step kind, and `performance.memory.usedJSHeapSize` samples (diagnostic).
+
+## Limits
+
+| Limit | Where |
+|---|---|
+| `--data-mib` 0–256, `--windows` 1–8, `--step-interval-ms` 100–10 000, phases ≤ 600 s | `config.rs`; an invalid value exits with code 2 and, with `--report`, writes `{"configError": …, "passed": false}` |
+| page `limit` ≤ 100, valid sort/category, ≤ 20 ids per `catalog_get` | `commands.rs` (arm B), the same values as the workload |
+| one report per window, once, ≤ 1 MiB each | `coordinator.rs` |
+| `catalog_begin`, `catalog_collect`, `catalog_write_report`, `catalog_exit` only from `main` | `commands.rs` and `capabilities/main.json` |
+
+## Running
+
+```powershell
+cd benchmarks\catalog
+npm ci
+npm test
+# Smoke run (arms A and B, short phases), builds both arms first:
+.\scripts\Run-CatalogTriplets.ps1 -Phase Smoke -Arms A,B -Cells N2D0,N2D16 -Triplets 1 -IdleBeforeSeconds 5 -WarmupSeconds 5 -LoadSeconds 20 -IdleAfterSeconds 5 -PauseSeconds 10 -MonitorScript C:\path\to\Measure-ProcessTree.ps1 -OutputDirectory C:\results\catalog-smoke
+.\scripts\Summarize-CatalogRuns.ps1 -ResultsDirectory C:\results\catalog-smoke
+```
+
+One run by hand: `catalog-bench.exe --data-mib 16 --windows 2 --report out.json` (`--seed`, `--step-interval-ms`, `--idle-before`, `--warmup`, `--duration`, `--idle-after`). Without `--report` the app starts interactively and does not exit by itself.
+
+`Run-CatalogTriplets.ps1` builds each arm (`bin\arm-A.exe`, `bin\arm-B.exe`), writes `configuration.json` (git SHA and status, OS, CPU, RAM, power plan, WebView2, tool versions, SHA256 of every executable, of the monitor and of the scripts, this README and the protocol if present) and `schedule.csv` before the first run, pauses before every run (`-PauseSeconds`, default 30), starts each run as a fresh process with its own WebView2 user data folder (`profiles\<run>`, via `WEBVIEW2_USER_DATA_FOLDER`), samples the whole process tree every 1 s with the monitor, and keeps every report, monitor CSV, diagnostics CSV and log, failed runs included. A results directory is used once.
+
+**Order** (`CatalogSchedule.ps1`, protocol §6): the unit is a triplet, one run per arm, adjacent in time, same cell. Cells are interleaved block by block (one triplet per cell, cell order rotated each block). Arm orders come from Latin squares taken whole and in turn (the three cyclic shifts of A,B,C, then those of C,B,A), so over the pilot's 20 triplets every arm takes every position 6–7 times and every permutation is used 3–4 times, and each cell starts at a different order. The seed (`-ScheduleSeed`) is recorded. With two arms the same rules give alternating pairs.
+
+`Summarize-CatalogRuns.ps1` writes into a new `analysis-<time>` directory: `runs.csv` (one row per scheduled run with validity and reasons), `triplets.csv` (B − A, C − A, C − B per triplet, valid runs only), `processes.csv` (each process's mean Private Bytes during load), `summary.csv` and `summary.md`. It is **descriptive only** and marks every result "descriptive, no conclusion"; the confirmatory analysis (protocol §8b) is written and reviewed separately, before any confirmatory run.
+
+- Primary measure: `LoadPrivateMBAvg`, the time average over the load phase of Σ Private Bytes over the host and every WebView2 process. `ExePrivateMBLoadAvg` and `WebViewPrivateMBLoadAvg` split it. Working Set appears only as `LoadWorkingSetMBUpperBound` (shared pages counted once per process) and is never used for a claim.
+- Validity (protocol §7): report passed; exit codes 0; ≥ 80 % of expected load samples; median load interval within 20 % of 1 s and no gap over 5 s; the same process count in every load sample; finite primary measure. Invalid runs stay in the tables with their reasons.
+- Retained size (protocol §4): host and WebView2 Private above the D0 cell with the same windows and arm, next to the generator size and the JS heap.
+
+`Test-CatalogScripts.ps1` checks the schedule's balance for the pilot shape and the summarizer end to end on synthetic data, in Windows PowerShell 5.1 and PowerShell 7 (CI).
+
+## What this does not show
+
+WebView2 processes exist in every arm, one renderer per window; nothing here shares them. A smaller process tree in arm B or C means the renderers hold less data, not that any process is shared. CI runs on the Actions Windows Server image and is a build and correctness check only; measurements come from native runs on a named machine, reported with that machine's OS, at an exact SHA.

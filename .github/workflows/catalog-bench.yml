@@ -1,0 +1,91 @@
+name: Catalog benchmark
+
+on:
+  pull_request:
+    paths:
+      - "benchmarks/catalog/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/catalog-bench.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  # Builds and tests arms A and B and runs each briefly. This is a build and
+  # correctness check on the Actions Windows Server runner, not a native
+  # Windows 10/11 measurement.
+  windows-release:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: benchmarks/catalog
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: benchmarks/catalog/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: Script tests, PowerShell 7 and Windows PowerShell 5.1
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File scripts/Test-CatalogScripts.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Test-CatalogScripts.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - run: cargo fmt --all -- --check
+      - name: Clippy, arms A and B
+        run: |
+          cargo clippy -p catalog-bench --locked --all-targets -- -D warnings
+          cargo clippy -p catalog-bench --locked --all-targets --features shared -- -D warnings
+      - name: Rust tests, arms A and B
+        run: |
+          cargo test -p catalog-bench --locked
+          cargo test -p catalog-bench --locked --features shared
+      - name: Release builds
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force bin | Out-Null
+          npm run tauri -- build --no-bundle -- --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item ..\..\target\release\catalog-bench.exe bin\arm-A.exe
+          npm run tauri -- build --no-bundle --features shared -- --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item ..\..\target\release\catalog-bench.exe bin\arm-B.exe
+          git diff --exit-code -- ../../Cargo.lock
+          Get-FileHash bin\*.exe | Format-Table -AutoSize | Out-String | Write-Host
+      - name: Short runs of each arm (D0 and D16, two windows)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force reports | Out-Null
+          foreach ($data in 0, 16) {
+            foreach ($arm in 'A', 'B') {
+              $report = Join-Path (Resolve-Path reports) "N2D$data-$arm.json"
+              $env:WEBVIEW2_USER_DATA_FOLDER = Join-Path (Resolve-Path reports) "profile-N2D$data-$arm"
+              $app = Start-Process -FilePath "bin\arm-$arm.exe" -PassThru -ArgumentList @('--data-mib', $data, '--windows', '2', '--report', "`"$report`"", '--idle-before', '1', '--warmup', '2', '--duration', '10', '--idle-after', '1')
+              $null = $app.Handle
+              if (-not $app.WaitForExit(180000)) { Stop-Process -Id $app.Id -Force; throw "arm $arm D$data did not finish within 180 s" }
+              if (-not (Test-Path $report)) { throw "arm $arm D$data wrote no report (exit code $($app.ExitCode))" }
+              $result = Get-Content $report -Raw | ConvertFrom-Json
+              Write-Host ("arm {0} D{1}: passed={2}, records {3}, rust MB {4:F1}, steps {5}/{6}, max p95 {7} ms, first page {8} ms, exit {9}" -f $arm, $data, $result.passed, $result.config.records, ($result.config.rustDataBytes / 1MB), $result.totals.completedSteps, $result.totals.scheduledSteps, $result.totals.maxP95LatencyMs, $result.totals.maxTimeToFirstPageMs, $app.ExitCode)
+              if (-not $result.passed) { throw "arm $arm D$data report did not pass: $($result.problems -join '; ')" }
+              if ($app.ExitCode -ne 0) { throw "arm $arm D$data exited with $($app.ExitCode)" }
+            }
+          }
+      - name: Upload reports and binaries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: catalog-bench-ci-${{ github.sha }}
+          path: |
+            benchmarks/catalog/reports/*.json
+            benchmarks/catalog/bin/
+          if-no-files-found: warn
