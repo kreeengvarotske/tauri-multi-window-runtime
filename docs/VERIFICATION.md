@@ -1,6 +1,6 @@
 # Verification status
 
-Status as of 2026-10-26 (rows for #34–#38 added about 23:00 UTC). This file records what has been checked, at which
+Status as of 2026-10-26 22:52 UTC (rows refreshed through #39). This file records what has been checked, at which
 exact commit, on which platform, and what has not been checked. An open pull
 request is **not** an integrated feature: only commits on `main` are
 integrated. Hosted CI is not native verification.
@@ -16,10 +16,11 @@ Linux entries: container with rustc 1.97.0 and Node 22.
 | Category | Meaning | PRs |
 |---|---|---|
 | **A. Integrated and verified** | merged into `main`, tests pass at the `main` commit | #3, #4, #5 (`main` @ `4bf7da3`) |
-| **B. Complete, verified natively and in CI, waiting for review or merge** | exact head has green CI and a native run | #8, #12, #14, #16, #24, #28, #31, #29 (research only) |
-| **C. Verified in CI only** | exact head has green CI, no native run at that head | #7, #10, #11, #17, #20, #23, #25 |
+| **B. Complete, verified natively and in CI, waiting for review or merge** | exact head has green CI and a native run | #8, #12, #14, #16, #24, #28, #31, #29 (research only), #34 |
+| **C. Verified in CI only** | exact head has green CI, no native run at that head | #7, #10, #11, #17, #20, #23, #25, #36 (A/B scenario; native smoke pending) |
 | **C′. CI green, native run fails** | exact head has green CI, the native run found a defect fixed in a follow-up | #27 (fixed in #29) |
-| **D. No verification at the exact head** | no CI run and no native run at the head | #2, #9, #18; documentation-only PRs #1, #26, #30, #32, #33 (no checks apply) |
+| **D. No verification at the exact head** | no CI run and no native run at the head | #2, #9, #18; documentation-only PRs #1, #26, #30, #32, #33 (no build checks; #33 protocol is being revised) |
+| **E. Checks in progress** | one or more exact-head workflows have not finished; no complete CI/native acceptance yet | #35 (`b65177d`), #37 (`9e8c4eb`), #39 (`272c408`) |
 
 #29 and #27 are research under `experiments/` and are not part of the product
 whatever their category (see `docs/ROADMAP.md`, Phase 5).
@@ -45,7 +46,7 @@ whatever their category (see `docs/ROADMAP.md`, Phase 5).
 | #16 | `ea8014b` | CI 40203656477 green | native report published at this head (2026-10-25) | superseded as evidence |
 | #20 | `9c40dd5` | CI 40218090430 and Windows Release 40218090495 green | none | |
 | #23 | `3f70b7d` | CI 40219219157 and Windows Release 40219219142 green | none | |
-| #25 | `ed756a8` | CI 40224027381 and Windows Release 40224027347 green | none | its pilot must not run with the old parameters (RAM is now primary) |
+| #25 | `ed756a8` | CI 40224027381 and Windows Release 40224027347 green | none | its pilot must not run with old parameters; #33 revision 2 is being recalculated for co-primary RAM and CPU |
 | #27 | `491486b` | CI 40231896110 and spike workflow 40231896114 green (Linux) | 2026-10-26: fmt and clippy pass; tests fail 3/3 (see §3) | |
 | #29 | `4e6d19b` | CI 40367216064 and spike workflow 40367215939 green, including hosted `windows-latest` | 2026-10-26: fmt and clippy pass; 9/9 unit and 12/12 cross-process tests in 9/9 runs (see §3) | |
 | #34 | `d8106fa` | CI 40390472644 green | 2026-10-26: fmt, clippy, workspace tests (runtime-core 58); overflow test in release; stress 0/200 (logs `r1r2-review\pr34\`) | |
@@ -53,8 +54,9 @@ whatever their category (see `docs/ROADMAP.md`, Phase 5).
 | #35 | `b65177d` | CI 40414428677 running at snapshot time | not run | current head; Linux: 27 tests, stress 0/300 under CPU load |
 | #36 | `d0b2893` | CI 40395314459, catalog 40395314302, symmetric 40395314370 green | smoke requested, not reported | |
 | #37 | `fd124c1` | CI 40410490212 green; adapter workflow 40410490586 **failed** (Windows: IPC test binary did not start; Ubuntu: dependency check matched the path) | not run | fix `cfe6b65` local, not pushed |
-| #37 | `9e8c4eb` | CI 40414574329 green; adapter workflow 40414574511 running at snapshot time | not run | current head; Linux: tests and Xvfb self-test pass |
-| #38 | `353bba5` | CI 40414174848 green | PR body reports Windows native `cargo test -p shared-runtime` 24 passed (owner's run) | owner's PR on `claude/shared-runtime` |
+| #37 | `9e8c4eb` | CI 40414574329 green; adapter workflow 40414574511 running at snapshot time | not run at this head | Current head adds ResponseBudget integration and view shutdown wording; operation error sanitization is handled in #39 |
+| #38 | `353bba5` | CI 40414174848 green | Local Windows `cargo test -p shared-runtime`: 24 passed | Closed without merge after #35 `b65177d` implemented the lifecycle fix and ResponseBudget |
+| #39 | `272c408` | CI 40415000619 and Runtime adapter workflow 40415000620 running at snapshot time | Adapter tests 13/13; clippy passes; demo IPC test executable failed to start locally (`STATUS_ENTRYPOINT_NOT_FOUND`) | Sanitizes operation error details; based on exact #37 head `9e8c4eb` |
 
 ## 3. Native results for #28 and #29
 
@@ -127,5 +129,6 @@ Not verified, needs a special environment:
 - #2, #9 and #18 at their exact heads.
 - Native runs of #20, #23 and #25 at their exact heads.
 - Closing the secondary window while a series is running.
-- Any memory measurement under the RAM-primary plan (`docs/ROADMAP.md`).
+- Any pilot or confirmatory measurement under the co-primary RAM + CPU plan. #33 revision 2 must be recalculated before any run.
+- Native Windows smoke for #36 and exact-head native verification for #35, #37 and #39.
 - Windows 11.
