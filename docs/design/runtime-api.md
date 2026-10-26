@@ -320,6 +320,8 @@ WebView-facing:
   before it is deserialized, and the serialized response against
   `max_response_bytes` before it is sent to the WebView (the runtime's view
   limits are checked first, on the view's own measure);
+- builds and serializes view responses inside `ViewHandle::get_with`, so the
+  runtime's `max_concurrent_projections` also bounds the serialized copies;
 - calls `Runtime::forget_window` when Tauri reports a window destroyed, so
   that a closed window's `PerWindow` outputs are dropped;
 - maps `CallError` to the existing `{ code, message }` error shape with
@@ -406,7 +408,7 @@ so and is reviewed for exactly that.
 |---|---|---|---|---|
 | R1 | #34 | `runtime-core`: optional weight budget with LRU eviction (`CacheBudget`). Existing constructors unchanged. | none (additive Rust API) | eviction order, oversize value, invalidate/clear, in-flight unaffected |
 | R2 | #35 | New crate `shared-runtime`: registry, `Shared`/`PerWindow`, execution slots + bounded queue, per-caller deadline, shutdown, bounded views, terminal-outcome stats. No Tauri dependency. | none (new crate) | budget/eviction, scope separation, cancellation, overload, deadline, shutdown, view size limit, registry, invariant |
-| R3 | not started | Tauri adapter: `Caller` from the injected window, hand-written commands, error mapping to `{ code, message }`, `shutdown` on exit. The existing `runtime_*` commands are reimplemented on it with identical names, payloads and capabilities. | none; new error codes only appear where limits are enabled (§9) | contract tests for every existing command; a frontend argument cannot change scope; capability checks unchanged |
+| R3 | not started (mandatory criteria in `docs/ROADMAP.md`, Phase 3) | Tauri adapter: `Caller` from the injected window, hand-written commands, error mapping to `{ code, message }`, `shutdown` on exit. The existing `runtime_*` commands are reimplemented on it with identical names, payloads and capabilities. | none; new error codes only appear where limits are enabled (§9) | contract tests for every existing command; a frontend argument cannot change scope; capability checks unchanged |
 | R4 | not started | Optional: additive fields in `RuntimeDebugStats` (`cancelledRequests`, `deadlineExceeded`, `overloaded`, `shuttingDown`, `cacheWeightBytes`, `cacheBudgetBytes`, `evictions`). | additive DTO fields only; separate review | DTO compatibility test (old fields unchanged) |
 | R5 | not started | Sample migration: a realistic Rust-owned catalog operation and page view in the demo, used by the memory benchmark (#33). | new commands for the new view only | as R3, plus view limit end to end |
 
@@ -421,6 +423,7 @@ so and is reviewed for exactly that.
 | Caller deadline | `RuntimeConfig::default_deadline` / `CallOptions::deadline` | none | temporary, above the p99 cold-load latency measured in #33 | `deadline_exceeded` stays 0 at intended load |
 | Shutdown grace | `RuntimeConfig::shutdown_grace` | none | temporary, e.g. 2 s | time from close to process exit on Windows |
 | View response size | `View::max_items` and `View::max_response_bytes` | none (per view) | temporary, e.g. 200 rows and 256 KiB per page | serialized response bytes per call (§12b), renderer memory per window; a test with one huge item checks that the byte limit applies when the item count does not |
+| Concurrent view projections | `RuntimeConfig::max_concurrent_projections` | none | temporary, e.g. 2 | transient host Private Bytes when N windows request the largest page at once ≈ limit × `max_response_bytes`; p95 latency guardrail |
 | IPC request / response bytes | adapter, per command: `max_request_bytes`, `max_response_bytes` (R3) | none | temporary, e.g. 16 KiB request, 512 KiB response | largest legitimate request and page in the sample, times a margin |
 | Closed windows | `Runtime::forget_window`, called by the adapter on window destroy | always on | n/a | PerWindow cache entries and weight return to the pre-open value after a window closes (R3 test) |
 
