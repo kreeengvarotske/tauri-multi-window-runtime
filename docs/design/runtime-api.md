@@ -1,8 +1,10 @@
 # Proposal: stable Rust API for the in-process runtime
 
-Status: **proposal for review** (roadmap Phase 3, see `docs/ROADMAP.md` in
-#30). Nothing here is implemented yet. No existing public type, IPC command,
-SDK type or capability changes until this proposal is agreed.
+Status: **shape approved in principle** (review on #32, 2026-10-26; roadmap
+Phase 3, see `docs/ROADMAP.md` in #30). The decisions are recorded in §10 and
+the implementation is split into small Draft PRs (§12). No existing public
+IPC command, SDK type, capability or error envelope changes as part of this
+work; any such change is its own reviewable step.
 
 ## 1. Goals and non-goals
 
@@ -203,6 +205,18 @@ pub enum CallError<E> {
 }
 ```
 
+Differences in the implementation (#35), kept deliberately:
+
+- The cache budget is per operation (`OperationConfig::cache_budget_bytes`,
+  passed to `register`), so one large operation cannot evict another's
+  outputs. `RuntimeConfig` adds `max_queued_operations`.
+- `max_params_bytes` and `InvalidArgument` belong to the adapter (R3): params
+  are validated before a request reaches the runtime, so `CallError` has no
+  `InvalidArgument`.
+- `Runtime::operation::<O>()` and `Runtime::view::<O, V>()` return
+  `Result<_, RegistryError>` instead of panicking on an unregistered type.
+- `get` borrows the `Caller`.
+
 The cache key is `(O::NAME, scope, params)`, where `scope` is `()` for
 `Shared` and the window label for `PerWindow`. This closes V6/T-1/T-2 by
 construction: a caller cannot choose its scope.
@@ -242,29 +256,46 @@ cached. Eviction never affects in-flight operations or their waiters.
   shared operation keeps running while any caller still waits (current
   semantics); when the last caller leaves, it is dropped, as today.
 - **Cancellation**: dropping the call future is the cancellation signal, as
-  today. `OpContext` exposes `is_cancelled()` for long operations that want to
-  stop early between steps.
+  today, and is counted as `cancelled`. The execution runs in the task of the
+  caller that started it; if that caller leaves before the result is
+  published, one remaining caller restarts it (core semantics B3).
+  `OpContext::is_shutting_down()` lets long operations stop early between
+  steps during shutdown.
 - **Shutdown**: `shutdown()` stops new calls (`ShuttingDown`), waits up to
   `shutdown_grace` for in-flight operations, then drops them and clears the
   caches. The adapter calls it on `RunEvent::Exit`.
-- **Panic policy (decision)**: either keep `panic = "abort"` and document that
-  an operation panic ends the app, or switch to `unwind` and turn an operation
-  panic into `CallError::Operation`-like `Internal` for its callers with the
-  operation's waiters released. The second is recommended for a framework;
-  verified today only under the test profile (a waiter re-runs after the
-  initializer panics).
+- **Panics (decided: no change in v1)**: the global panic profile stays as it
+  is (`panic = "abort"` in release) and v1 promises no panic isolation. An
+  operation panic in a release build ends the application. No `catch_unwind`
+  is added until a state-recovery strategy is proven. Options for a later
+  decision are in §13.
 
 ## 6. Diagnostics
 
 `RuntimeStats` contains only aggregate numbers: per operation `requests`,
-`executed`, `coalesced`, `cache_hits`, `failed`, `cancelled`,
-`deadline_exceeded`, `overloaded`, `in_flight`; and `cache_entries`,
+`cache_hits`, `executed`, `coalesced`, `overloaded`, `deadline_exceeded`,
+`shutting_down`, `cancelled`, `failed`, `in_flight`; and `cache_entries`,
 `cache_weight_bytes`, `cache_budget_bytes`, `evictions`. No keys, params,
-values or window labels, so stats are safe to show in any window. Every
-counted request ends in exactly one outcome, so at quiescence
-`requests = executed + coalesced + cache_hits + cancelled + deadline_exceeded
-+ overloaded`; `failed` is a subset of `executed + coalesced`. Invalid
-arguments are rejected before a request is counted, as today.
+values or window labels, so stats are safe to show in any window.
+
+Every counted request ends in exactly one terminal outcome, so at quiescence
+(`in_flight = 0`):
+
+`requests = cache_hits + executed + coalesced + overloaded + deadline_exceeded
++ shutting_down + cancelled`
+
+| Outcome | Caller receives | In `failed`? |
+|---|---|---|
+| `cache_hits` | cached value | no |
+| `executed`, `coalesced` | the operation's value or its own error | only when the operation returned an error |
+| `overloaded` | `Overloaded` | yes |
+| `deadline_exceeded` | `DeadlineExceeded` | yes |
+| `shutting_down` | `ShuttingDown` | yes |
+| `cancelled` | nothing (caller dropped the call) | no |
+
+Invalid arguments are rejected by the adapter before a request is counted, as
+today. Implemented in #35 (`crates/shared-runtime/src/stats.rs`) and checked
+by every test there.
 
 Exposure of stats and of `invalidate`/`clear` to windows is an adapter
 setting (default: stats to all windows, admin to `main` only, enforced in Rust
@@ -278,10 +309,10 @@ WebView-facing:
 - registers the runtime as Tauri state and calls `shutdown` on exit;
 - builds `Caller` from the injected `WebviewWindow`; never reads identity,
   scope or visibility from command arguments;
-- exposes **one command per registered view and operation** (generated by a
-  macro), so Tauri capabilities can allow or deny each one per window. A
-  single generic `call(op, params)` command is rejected because it would
-  bypass per-command permissions;
+- exposes **one hand-written Tauri command per exposed operation or view**
+  (decided: no macro in v1), so Tauri capabilities can allow or deny each one
+  per window. A single generic `call(op, params)` command is rejected because
+  it would bypass per-command permissions;
 - validates request size (`max_params_bytes`) and view limits before work
   starts;
 - maps `CallError` to the existing `{ code, message }` error shape with
@@ -330,22 +361,80 @@ Migration is one later PR that moves the demo onto the adapter without
 changing any row above; anything that would change a row needs its own
 review.
 
-## 10. Decisions needed
+## 10. Decisions (review on #32, 2026-10-26)
 
-1. Accept the shape in §3–§7 (or amend it) before implementation starts.
-2. `cancelled` and `rejected` counters in stats (changes the invariant; C-1).
-3. Panic policy (§5).
-4. Per-command generation by macro vs a hand-written command per operation.
-5. Default limits for the sample application (budget, concurrency, deadline).
-6. Whether `PerWindow` is needed in the first version or only `Shared`.
+| # | Question | Decision | Where it is implemented |
+|---|---|---|---|
+| 1 | API shape (§3–§7) | Approved in principle. Implemented in small Draft PRs; existing public IPC/SDK are not migrated in one general change. | §12 |
+| 2 | Macro vs hand-written commands | v1: one hand-written Tauri command per exposed operation or view. No macros. | R3 |
+| 3 | `Shared` / `PerWindow` | Both in model and tests. Scope is computed only in Rust from the Tauri context. A window label separates data; it is not proof of access rights. | #35 (`ScopeRule`, `Caller`) |
+| 4 | Counters | Explicit terminal outcomes for cancelled, overloaded, deadline and shutdown, so stats balance (§6). `failed` subsets documented. DTO changes, if any, are additive only. | #35 (Rust); R4 (DTO) |
+| 5 | Limits | All configurable. No library defaults. Values for the sample app are example config, marked temporary, validated by memory and load (§12a). | #34, #35 (`RuntimeConfig`, `OperationConfig`) |
+| 6 | Panics | Global profile unchanged; no panic isolation promised in v1; no `catch_unwind` without a proven recovery strategy. Options described for a later decision (§13). | nothing to implement |
+| 7 | IPC compatibility | Current command names and shapes, capability boundaries and the `{ code, message }` envelope stay. Counter exposure over IPC is a separate reviewable step. | R3 keeps §9; R4 |
+
+The cross-app broker is not part of this work; it stays a separate,
+conditional research stage (roadmap §5, experiments/).
 
 ## 11. Acceptance criteria for the implementation
 
 - Unit tests for budget eviction (including a value larger than the budget),
   deadline, overload, shutdown during in-flight work, scope separation (same
-  params, two windows, `PerWindow` → two executions, no cross-scope hit), and
-  that a frontend argument cannot change the scope.
+  params, two windows, `PerWindow` → two executions, no cross-scope hit),
+  cancellation and the outcome invariant, view size limit, and that a
+  frontend argument cannot change the scope (adapter test, R3). These tests
+  must exist and pass before the demo migration (R5).
 - Existing Phase 1 tests keep passing unchanged.
 - The adapter exposes no runtime internals; a test lists the generated
   commands.
 - fmt, clippy `-D warnings`, workspace tests; a native Windows run recorded.
+
+## 12. Implementation plan
+
+Each step is a separate Draft PR, stacked on the previous one, reviewed on
+its own. No step changes the current IPC contract (§9) unless the step says
+so and is reviewed for exactly that.
+
+| Step | PR | Content | Public contract change | Tests required |
+|---|---|---|---|---|
+| R1 | #34 | `runtime-core`: optional weight budget with LRU eviction (`CacheBudget`). Existing constructors unchanged. | none (additive Rust API) | eviction order, oversize value, invalidate/clear, in-flight unaffected |
+| R2 | #35 | New crate `shared-runtime`: registry, `Shared`/`PerWindow`, execution slots + bounded queue, per-caller deadline, shutdown, bounded views, terminal-outcome stats. No Tauri dependency. | none (new crate) | budget/eviction, scope separation, cancellation, overload, deadline, shutdown, view size limit, registry, invariant |
+| R3 | not started | Tauri adapter: `Caller` from the injected window, hand-written commands, error mapping to `{ code, message }`, `shutdown` on exit. The existing `runtime_*` commands are reimplemented on it with identical names, payloads and capabilities. | none; new error codes only appear where limits are enabled (§9) | contract tests for every existing command; a frontend argument cannot change scope; capability checks unchanged |
+| R4 | not started | Optional: additive fields in `RuntimeDebugStats` (`cancelledRequests`, `deadlineExceeded`, `overloaded`, `shuttingDown`, `cacheWeightBytes`, `cacheBudgetBytes`, `evictions`). | additive DTO fields only; separate review | DTO compatibility test (old fields unchanged) |
+| R5 | not started | Sample migration: a realistic Rust-owned catalog operation and page view in the demo, used by the memory benchmark (#33). | new commands for the new view only | as R3, plus view limit end to end |
+
+### 12a. Limits: what is configured where
+
+| Limit | Config field | Library default | Sample app value | How to validate it |
+|---|---|---|---|---|
+| Cache size per operation | `OperationConfig::cache_budget_bytes` | none | temporary, set from the benchmark data size (e.g. 2× one D64 catalog) | Private Bytes of the app process at idle after N windows load (#33, scenario M); evictions in stats must stay 0 for the intended working set |
+| Concurrent executions | `RuntimeConfig::max_concurrent_operations` | none | temporary, e.g. number of logical CPUs | CPU and latency guardrails under the #33 load; peak RAM during cold load |
+| Queue length | `RuntimeConfig::max_queued_operations` | none | temporary, e.g. 4× concurrency | `overloaded` must stay 0 at the intended load and rise only under deliberate overload |
+| Caller deadline | `RuntimeConfig::default_deadline` / `CallOptions::deadline` | none | temporary, above the p99 cold-load latency measured in #33 | `deadline_exceeded` stays 0 at intended load |
+| Shutdown grace | `RuntimeConfig::shutdown_grace` | none | temporary, e.g. 2 s | time from close to process exit on Windows |
+| View response size | `View::max_items` | none (per view) | temporary, e.g. 200 rows per page | serialized response bytes per call (§12b), renderer memory per window |
+
+"Temporary" means the value is a starting point for the sample application
+only; it is replaced by the measured value and is not a recommendation for
+other applications.
+
+### 12b. Memory and serialization per step
+
+| Step | Where data lives | What is serialized to a window |
+|---|---|---|
+| R1 | Cached outputs in the Rust process, at most `cache_budget_bytes` (estimated) per service; eviction drops the cache's `Arc`. | nothing (no IPC change) |
+| R2 | One `Arc<Output>` per scope key in Rust (`Shared`: one per app; `PerWindow`: one per window). Coalesced callers share it. Per-window bookkeeping: labels only. | nothing (no IPC) |
+| R3 | As R2. Existing commands return the same DTOs as today. | same bytes per call as today (`ProjectMetadata`, stats) |
+| R4 | As R2. | stats DTO grows by about seven numbers |
+| R5 | Catalog output once in Rust, bounded by its budget. | one page per call, at most `max_items` rows; size recorded per run in the benchmark |
+
+## 13. Panic handling: options for a later decision
+
+Not decided for v1 (decision 6). Recorded so that a later decision has the
+facts.
+
+| Option | Behaviour | Consequences | Tests a decision would need |
+|---|---|---|---|
+| A. Keep `panic = "abort"` (current) | Any panic ends the process. | Simple, no inconsistent state; one buggy operation closes every window. | none beyond today |
+| B. `panic = "unwind"`, no catching | A panic unwinds the task that runs the execution; the coalescer drops the entry and a remaining caller re-runs it (seen under the test profile). | The same panic can repeat for each waiter; mutex poisoning is tolerated (`into_inner`) but state an operation left half-written is not repaired. Binary size and code generation change. | repeated panic is bounded; no stale cache entry; stats still balance |
+| C. `unwind` + `catch_unwind` around `Operation::run`, mapped to an `Internal` error | Callers get an error instead of a crash. | Requires every operation's shared state to be safe after a partial run, which the runtime cannot check. Not adopted without a proven recovery strategy. | per operation: state after an injected panic is consistent; error not cached; waiters released |
