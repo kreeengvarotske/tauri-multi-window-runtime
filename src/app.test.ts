@@ -412,6 +412,58 @@ describe("Runtime Lab UI", () => {
     expect($<HTMLInputElement>("#project-id").value).not.toBe("42");
   });
 
+  it("ignores repeated series requests while a requested series is still running", async () => {
+    // A valid payload bounds one request, not how often it is sent: a window
+    // may emit the same event many times.
+    const bridge = fakeBridge();
+    const gate = deferred<void>();
+    const transport = fakeCoreTransport();
+    const answer = transport.getProjectMetadata;
+    transport.getProjectMetadata = async (params) => {
+      await gate.promise;
+      return answer(params);
+    };
+    mountTauri(transport, vi.fn(), SECONDARY, bridge);
+    await flush();
+    for (let i = 0; i < 5; i++) bridge.deliver({ projectId: "demo", size: 50 });
+    gate.resolve();
+    await flush();
+    await flush();
+    expect(transport.calls).toBe(50);
+
+    bridge.deliver({ projectId: "demo", size: 10 });
+    await flush();
+    await flush();
+    expect(transport.calls).toBe(60);
+  });
+
+  it("ignores a malformed cache-invalidated payload but still refreshes stats", async () => {
+    // The event is a hint that any window can emit; its payload is not trusted.
+    let emit: ((event: unknown) => void) | null = null;
+    const getDebugStats = vi.fn(async () => SAMPLE_STATS);
+    mountTauri(
+      {
+        ...fakeCoreTransport(),
+        getDebugStats,
+        async onCacheInvalidated(handler) {
+          emit = handler as (event: unknown) => void;
+          return () => {};
+        },
+      },
+      vi.fn(),
+      SECONDARY,
+    );
+    button("Выполнить серию запросов").click();
+    await flush();
+    await flush();
+    const calls = getDebugStats.mock.calls.length;
+
+    for (const payload of [null, undefined, 42, { projectId: 42 }]) expect(() => emit!(payload)).not.toThrow();
+    await flush();
+    expect(getDebugStats.mock.calls.length).toBeGreaterThan(calls);
+    expect($('[data-stat="cache-timer"]').textContent).not.toContain("сброшен");
+  });
+
   it("exports the series history as JSON", async () => {
     const writeText = vi.fn(async (_text: string) => {});
     Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
