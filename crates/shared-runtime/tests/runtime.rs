@@ -129,6 +129,13 @@ async fn wait_until(mut condition: impl FnMut() -> bool, what: &str) {
     .unwrap_or_else(|_| panic!("timed out waiting for: {what}"));
 }
 
+/// Under paused time a sleep completes only once every other task is
+/// blocked, so after `settle` each spawned call has registered wherever it
+/// waits (slot queue, in-flight entry, gate). No wall-clock assumption.
+async fn settle() {
+    tokio::time::sleep(Duration::from_millis(1)).await;
+}
+
 fn window(label: &str) -> Caller {
     Caller::window(label)
 }
@@ -242,7 +249,7 @@ async fn per_window_scope_does_not_coalesce_across_windows() {
 
 // ---------------------------------------------------------- cancellation
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn cancelled_caller_is_counted_and_remaining_caller_gets_result() {
     let (op, gate) = Load::gated(ScopeRule::Shared);
     let runtime = Arc::new(runtime_with(op.clone(), 1024));
@@ -257,7 +264,8 @@ async fn cancelled_caller_is_counted_and_remaining_caller_gets_result() {
         let load = load.clone();
         tokio::spawn(async move { load.get(&window("b"), 8, NO_OPTIONS).await })
     };
-    wait_until(|| stats(&runtime).in_flight == 2, "second caller joined").await;
+    settle().await;
+    assert_eq!(stats(&runtime).in_flight, 2, "second caller joined");
 
     first.abort();
     assert!(first.await.unwrap_err().is_cancelled());
@@ -275,7 +283,7 @@ async fn cancelled_caller_is_counted_and_remaining_caller_gets_result() {
 
 // -------------------------------------------------------------- overload
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(start_paused = true)]
 async fn full_slots_and_queue_return_overloaded() {
     let (op, gate) = Load::gated(ScopeRule::Shared);
     let runtime = Arc::new(
@@ -298,9 +306,11 @@ async fn full_slots_and_queue_return_overloaded() {
     let running = spawn(1); // takes the only slot
     wait_until(|| op.executions() == 1, "first execution holds the slot").await;
     let queued = spawn(2); // waits in the queue
-    wait_until(|| stats(&runtime).in_flight == 2, "second call queued").await;
+    settle().await;
+    assert_eq!(stats(&runtime).in_flight, 2, "second call queued");
     let joined = spawn(1); // coalesces, needs no slot
-    wait_until(|| stats(&runtime).in_flight == 3, "third call joined").await;
+    settle().await;
+    assert_eq!(stats(&runtime).in_flight, 3, "third call joined");
 
     let rejected = load.get(&window("main"), 3, NO_OPTIONS).await;
     assert!(
