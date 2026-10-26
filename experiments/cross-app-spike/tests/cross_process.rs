@@ -532,21 +532,34 @@ async fn a_broker_crash_is_survived_by_reconnecting_to_a_new_instance() {
 async fn only_one_broker_owns_an_endpoint_and_it_exits_when_idle() {
     with_timeout(async {
         let fx = Fixture::new("single");
-        let mut first = fx.broker(&["--idle-exit-ms", "300"]).await;
+        // On a cold Windows 10 machine a process start took longer than a
+        // 300 ms idle window, so the first broker exited before the second one
+        // ran. A generous idle window plus a connected client keeps the first
+        // broker alive for the single-instance check.
+        let mut first = fx.broker(&["--idle-exit-ms", "3000"]).await;
+        let mut holder = fx.client(&fx.beta, "demo.beta", &["listen", "4000"]);
+        let mut holder_lines = BufReader::new(holder.stdout.take().unwrap()).lines();
+        let welcome = holder_lines.next_line().await.unwrap().unwrap();
+        assert!(welcome.contains("welcome"), "{welcome}");
 
         let second = Command::new(BROKER)
             .arg("--endpoint")
             .arg(&fx.endpoint.0)
             .arg("--manifest")
             .arg(&fx.manifest)
-            .output()
+            .kill_on_drop(true)
+            .output();
+        let second = tokio::time::timeout(Duration::from_secs(15), second)
             .await
+            .expect("a second broker must refuse the endpoint, not serve it")
             .unwrap();
         assert_eq!(second.status.code(), Some(3), "{second:?}");
 
         let (_, lines) = finish(fx.client(&fx.alpha, "demo.alpha", &["checksum", "1", "1"])).await;
         last_event(&lines, "result");
-        let status = tokio::time::timeout(Duration::from_secs(10), first.child.wait())
+        while holder_lines.next_line().await.unwrap().is_some() {}
+        assert!(holder.wait().await.unwrap().success());
+        let status = tokio::time::timeout(Duration::from_secs(15), first.child.wait())
             .await
             .expect("broker should exit when idle")
             .unwrap();

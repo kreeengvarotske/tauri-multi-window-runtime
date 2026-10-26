@@ -13,7 +13,7 @@ src/ops.rs        typed synthetic operations (Public checksum, App note, failing
 src/broker.rs     handshake, grants, scope derivation, CachedService per op, notices
 src/client.rs     typed client, cancellation, late-reply drop, reconnecting Session
 src/bin/          spike-broker, spike-client (a headless "test application")
-tests/cross_process.rs  11 tests with real separate processes
+tests/cross_process.rs  12 tests with real separate processes
 ```
 
 ## Run
