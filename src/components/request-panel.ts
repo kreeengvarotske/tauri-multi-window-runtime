@@ -19,7 +19,10 @@ export interface RequestPanelOptions {
 
 export interface RequestPanel {
   element: HTMLElement;
-  /** Runs a series as if started from this panel; used for requests from another window. */
+  /**
+   * Runs a series as if started from this panel; used for requests from another window.
+   * Does nothing while a series is already running, like the disabled buttons.
+   */
   run(projectId: string, size: number, origin?: string): Promise<void>;
 }
 
@@ -136,8 +139,10 @@ export function createRequestPanel({
   clearCacheButton.addEventListener("click", () => void runCacheAdmin("clear"));
 
   let lastSeries: { projectId: string; size: number } | null = null;
+  let running = false;
 
   async function run(projectId: string, size: number, origin?: string): Promise<void> {
+    running = true;
     lastSeries = { projectId, size };
     runButton.disabled = true;
     retryButton.disabled = true;
@@ -167,6 +172,7 @@ export function createRequestPanel({
         ? `Серия завершена с ошибками: ${result.failed} из ${size} (${codes}).`
         : `Серия завершена: все ${size} ответов успешны.`;
 
+    running = false;
     runButton.disabled = false;
     retryButton.disabled = false;
     bothButton.disabled = false;
@@ -253,7 +259,8 @@ export function createRequestPanel({
 
   return {
     element,
-    run(projectId, size, origin) {
+    async run(projectId, size, origin) {
+      if (running) return;
       projectInput.value = projectId;
       if (SERIES_SIZES.some((n) => n === size)) sizeSelect.value = String(size);
       return run(projectId, size, origin);
