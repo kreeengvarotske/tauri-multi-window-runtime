@@ -16,8 +16,8 @@ Linux entries: container with rustc 1.97.0 and Node 22.
 | Category | Meaning | PRs |
 |---|---|---|
 | **A. Integrated and verified** | merged into `main`, tests pass at the `main` commit | #3, #4, #5 (`main` @ `4bf7da3`) |
-| **B. Complete, verified natively and in CI, waiting for review or merge** | exact head has green CI and a native run | #8, #12, #14, #16, #24, #28, #29 (research only) |
-| **C. Verified in CI only** | exact head has green CI, no native run at that head | #7, #10, #11, #17, #20, #23, #25, #31 |
+| **B. Complete, verified natively and in CI, waiting for review or merge** | exact head has green CI and a native run | #8, #12, #14, #16, #24, #28, #31, #29 (research only) |
+| **C. Verified in CI only** | exact head has green CI, no native run at that head | #7, #10, #11, #17, #20, #23, #25 |
 | **C′. CI green, native run fails** | exact head has green CI, the native run found a defect fixed in a follow-up | #27 (fixed in #29) |
 | **D. No verification at the exact head** | no CI run and no native run at the head | #2, #9, #18; documentation-only PRs #1, #26, #30, #32, #33 (no checks apply) |
 
@@ -35,7 +35,7 @@ whatever their category (see `docs/ROADMAP.md`, Phase 5).
 | #12 | `c728538` | CI 40190883397 green | 2026-10-25 (#12 comment 6397626213) and 2026-10-26: 55 tests pass | approved by the owner; must follow #8 |
 | #14 | `772155d` | CI 40193472340 green | 2026-10-26: 62 tests pass; `runtime-core` + `runtime-ipc` tests 10/10 debug, 5/5 release | |
 | #28 | `85f2937` | CI 40305176144 green | 2026-10-26: all checks, Release build, manual two-window run (see §3) | |
-| #31 | `29adfed` | CI 40374808849 green | none yet | tests red on `85f2937` (commit `0ab78a9`) |
+| #31 | `29adfed` | CI 40374808849 green | 2026-10-26: 87/87 vitest, tsc, build, fmt, clippy, 63 Rust tests, Release build, two-window run and forged events (see §3) | tests red on `85f2937` (commit `0ab78a9`) |
 | #9 | `1f71b84` | none | stage 4 runs on 2026-10-25 used this stack | head has no CI |
 | #18 | `1d57f6f` | none | native report exists for an earlier head `0784578` only | |
 | #24 | `6952886` | Windows smoke 40220356939 green | 2026-10-26: fail-closed tests and smoke pass; median interval 0.214 s at 0.2 s, 0.9995 s at 1.0 s | another machine (Windows 10 Home 25H2, build 26200) measured 0.310 s at 0.2 s |
@@ -64,10 +64,33 @@ Windows 10 Home 22H2 (19045.6466), 2026-10-26. Logs:
 | Manual: two real Tauri windows, series of 20 in both windows | 40 requests, 1 execution, 39 coalesced; invariant adds up once both series finish |
 | Manual: forged `lab://run-series` with `size: 100000` from a window | ignored |
 
-Not checked natively: #31 (repeated and malformed window events). Limits: the repeated-event and malformed-invalidation cases fixed in #31 were
+Limits: the repeated-event and malformed-invalidation cases fixed in #31 were
 not part of this run. `tauri build` rewrites `src-tauri/Cargo.toml`
 (`features = []`) and converts four generated permission files to CRLF; the
 content is unchanged and the files were restored.
+
+### #31 @ `29adfed` (Runtime Lab: repeated and malformed window events)
+
+Windows 10 Home 22H2 (19045.6466), Node 24.22.1, 2026-10-26. Logs:
+`C:\Users\maxim\Projects\tmwr-logs\2026-10-26\pr31\`. Windows were driven by
+script through the WebView2 DevTools protocol (`--remote-debugging-port`
+bound to 127.0.0.1): real DOM clicks, no mouse.
+
+| Check | Result |
+|---|---|
+| `npm test`, `tsc --noEmit`, `npm run build` | 87/87, pass, pass |
+| fmt, clippy `-D warnings`, `cargo test --workspace` | pass, pass, 63 tests |
+| `tauri build` (Release, exe + MSI + NSIS) | pass |
+| Two windows, project-42 × 20 in both | 40 requests, 1 execution, 39 coalesced, 0 cache hits; one `computedAtMs`; both windows in one process |
+| Forged `lab://run-series` (size 1000, "20", 21, missing, null payload, numeric projectId) | ignored |
+| 5 identical valid `lab://run-series` events | exactly one series (+50 requests) |
+| Valid event emitted by the secondary window to itself | series runs (+10): events carry no sender identity; the guard checks shape only |
+| projectId of 10 000 characters | passes the frontend guard; Core rejects it with `INVALID_ARGUMENT` before counting |
+| Forged `runtime://cache-invalidated` from secondary to main | Core cache unchanged; malformed payload (`123`) ignored; a well-formed `{projectId}` or `{projectId:null}` still shows the "dropped" hint in main (known limit, C-2) |
+| `runtime_clear_cache` / `runtime_invalidate_project` from secondary | denied by the capability ACL |
+| Final counters | 100 requests = 3 executions + 97 coalesced + 0 hits; 50 failed |
+
+Not run: closing the secondary window during a series.
 
 ### #29 @ `4e6d19b` (cross-app spike hardening, research)
 
@@ -95,6 +118,7 @@ Not verified, needs a special environment:
 ## 4. What has not been verified anywhere
 
 - #2, #9 and #18 at their exact heads.
-- Native runs of #20, #23, #25 and #31 at their exact heads.
+- Native runs of #20, #23 and #25 at their exact heads.
+- Closing the secondary window while a series is running.
 - Any memory measurement under the RAM-primary plan (`docs/ROADMAP.md`).
 - Windows 11.
