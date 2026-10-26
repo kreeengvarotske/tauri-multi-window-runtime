@@ -14,9 +14,11 @@ pub struct RuntimeConfig {
     pub max_queued_operations: usize,
     /// View projections (building a response from a shared output, plus
     /// whatever the caller does with it inside `ViewHandle::get_with`, such
-    /// as serializing it) that may run at the same time. Bounds the transient
-    /// memory of responses to about this many times `max_response_bytes`,
-    /// however many windows ask at once. Others wait, up to their deadline.
+    /// as serializing it) that may run at the same time. The runtime checks
+    /// `max_response_bytes` after `View::project` returns; this is not a hard
+    /// peak-memory bound if a view first constructs an oversized response.
+    /// Views must clamp inputs and build bounded outputs themselves. Others
+    /// wait, up to their deadline.
     pub max_concurrent_projections: usize,
     /// How long a caller waits when the call sets no deadline of its own.
     pub default_deadline: Duration,

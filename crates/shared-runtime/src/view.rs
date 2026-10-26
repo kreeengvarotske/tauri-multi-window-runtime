@@ -17,12 +17,18 @@ pub trait View<O: Operation>: Send + Sync + 'static {
     fn max_items(&self) -> usize;
 
     /// Most bytes one response may carry, as measured by `response_bytes`.
-    /// Bounds the size of the items, which `max_items` does not: one item
-    /// can hold an arbitrarily long string.
+    /// The runtime checks this after response construction; it does not cap
+    /// allocations made while building the response. Views must enforce a
+    /// construction-time bound themselves. `max_items` alone does not bound
+    /// bytes: one item can hold an arbitrarily long string.
     fn max_response_bytes(&self) -> usize;
 
     /// Builds the response. `max_items` is passed so that the view can
-    /// clamp its own page size.
+    /// clamp its own page size. The runtime checks the returned response's
+    /// byte count after construction; this check does not prevent a view from
+    /// allocating an oversized response first. Implementations must bound
+    /// their output during construction (for example, clamp page sizes and
+    /// string lengths).
     ///
     /// Must be cheap and bounded: work proportional to the response (at most
     /// `max_items` items), not to the whole output. It runs once per call,

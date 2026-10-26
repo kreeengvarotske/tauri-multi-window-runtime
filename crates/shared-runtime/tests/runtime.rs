@@ -1078,6 +1078,108 @@ async fn waiting_for_a_projection_slot_respects_the_deadline() {
     );
 }
 
+struct ShutdownView;
+
+impl View<Load> for ShutdownView {
+    const NAME: &'static str = "test.shutdown-view";
+    type Request = ();
+    type Response = usize;
+
+    fn source(&self, _: &()) -> u32 {
+        1
+    }
+    fn max_items(&self) -> usize {
+        1
+    }
+    fn max_response_bytes(&self) -> usize {
+        std::mem::size_of::<usize>()
+    }
+    fn project(&self, output: &Vec<u8>, _: (), _: usize) -> Result<usize, ViewError> {
+        Ok(output.len())
+    }
+    fn items(_: &usize) -> usize {
+        1
+    }
+    fn response_bytes(_: &usize) -> usize {
+        std::mem::size_of::<usize>()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shutdown_tracks_full_view_lifecycle_and_aborts_projection_waiters() {
+    let runtime = Arc::new(
+        Runtime::builder(RuntimeConfig {
+            max_concurrent_projections: 1,
+            shutdown_grace: Duration::from_millis(50),
+            ..config()
+        })
+        .unwrap()
+        .register(Load::new(ScopeRule::Shared), budget(16))
+        .unwrap()
+        .view::<Load, _>(ShutdownView)
+        .unwrap()
+        .build(),
+    );
+    let operation = runtime.operation::<Load>().unwrap();
+    operation.get(&window("a"), 1, NO_OPTIONS).await.unwrap();
+    let view = runtime.view::<Load, ShutdownView>().unwrap();
+
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let active = {
+        let view = view.clone();
+        tokio::spawn(async move {
+            view.get_with(&window("a"), (), NO_OPTIONS, move |response| {
+                let _ = entered_tx.send(());
+                release_rx.recv().expect("test releases active finish");
+                response
+            })
+            .await
+        })
+    };
+    tokio::time::timeout(LIMIT, entered_rx)
+        .await
+        .expect("active finish started")
+        .expect("entered sender remains alive");
+
+    let waiting = {
+        let view = view.clone();
+        tokio::spawn(async move { view.get(&window("b"), (), NO_OPTIONS).await })
+    };
+    wait_until(
+        || operation.stats().requests >= 3,
+        "second view request reaches source",
+    )
+    .await;
+
+    let shutdown = {
+        let runtime = Arc::clone(&runtime);
+        tokio::spawn(async move { runtime.shutdown().await })
+    };
+    assert!(
+        matches!(
+            tokio::time::timeout(LIMIT, waiting)
+                .await
+                .expect("projection waiter exits after shutdown abort")
+                .unwrap(),
+            Err(ViewCallError::Source(CallError::ShuttingDown))
+        ),
+        "projection waiter exits after abort"
+    );
+    assert!(!shutdown.is_finished(), "active finish remains tracked");
+
+    release_tx.send(()).unwrap();
+    assert_eq!(active.await.unwrap().unwrap(), 1);
+    tokio::time::timeout(LIMIT, shutdown)
+        .await
+        .expect("shutdown finishes after active view exits")
+        .unwrap();
+    assert_eq!(
+        runtime.stats().operation(Load::NAME).unwrap().cache_entries,
+        0
+    );
+}
+
 #[test]
 fn zero_projection_slots_is_rejected() {
     let bad = RuntimeConfig {

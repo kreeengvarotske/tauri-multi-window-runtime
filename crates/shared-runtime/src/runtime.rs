@@ -396,20 +396,30 @@ impl Runtime {
 /// Decrements the in-flight counters when a call ends in any way.
 struct InFlight<'a> {
     shared: &'a Shared,
-    op: &'a AtomicU64,
+    op: Option<&'a AtomicU64>,
 }
 
 impl<'a> InFlight<'a> {
     fn enter(shared: &'a Shared, op: &'a AtomicU64) -> Self {
         shared.in_flight.fetch_add(1, Ordering::SeqCst);
         op.fetch_add(1, Ordering::Relaxed);
-        Self { shared, op }
+        Self {
+            shared,
+            op: Some(op),
+        }
+    }
+
+    fn enter_view(shared: &'a Shared) -> Self {
+        shared.in_flight.fetch_add(1, Ordering::SeqCst);
+        Self { shared, op: None }
     }
 }
 
 impl Drop for InFlight<'_> {
     fn drop(&mut self) {
-        self.op.fetch_sub(1, Ordering::Relaxed);
+        if let Some(op) = self.op {
+            op.fetch_sub(1, Ordering::Relaxed);
+        }
         if self.shared.in_flight.fetch_sub(1, Ordering::SeqCst) == 1 {
             self.shared.idle.notify_waiters();
         }
@@ -630,8 +640,12 @@ impl<O: Operation, V: View<O>> ViewHandle<O, V> {
         finish: impl FnOnce(V::Response) -> T,
     ) -> Result<T, ViewCallError<O::Error>> {
         let shared = &*self.source.shared;
+        // Keep the whole view call visible to shutdown, including time spent
+        // waiting for a projection slot and the caller's `finish` closure.
+        let _in_flight = InFlight::enter_view(shared);
         let deadline = options.deadline.unwrap_or(shared.config.default_deadline);
         let started = tokio::time::Instant::now();
+        let mut phase = shared.phase.subscribe();
         let params = self.view.source(&request);
         let output = self
             .source
@@ -639,10 +653,19 @@ impl<O: Operation, V: View<O>> ViewHandle<O, V> {
             .await
             .map_err(ViewCallError::Source)?;
         let remaining = deadline.saturating_sub(started.elapsed());
-        let _slot = tokio::time::timeout(remaining, shared.projections.acquire())
-            .await
-            .map_err(|_| ViewCallError::DeadlineExceeded)?
-            .expect("the projection semaphore is never closed");
+        let _slot = tokio::select! {
+            result = tokio::time::timeout(remaining, shared.projections.acquire()) => {
+                result
+                    .map_err(|_| ViewCallError::DeadlineExceeded)?
+                    .expect("the projection semaphore is never closed")
+            }
+            _ = phase.wait_for(|phase| *phase == Phase::Aborted) => {
+                return Err(ViewCallError::Source(CallError::ShuttingDown));
+            }
+        };
+        if *phase.borrow() == Phase::Aborted {
+            return Err(ViewCallError::Source(CallError::ShuttingDown));
+        }
 
         let max_items = self.view.max_items();
         let response = self
