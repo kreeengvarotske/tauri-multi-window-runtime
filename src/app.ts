@@ -1,9 +1,15 @@
 import { WINDOW_LABELS, type RuntimeSetup } from "./lib/runtime";
-import { createWindowBridge, type OpenResult, type WindowBridge, type WindowIdentity } from "./lib/windows";
+import {
+  createWindowBridge,
+  type OpenResult,
+  type SeriesRequest,
+  type WindowBridge,
+  type WindowIdentity,
+} from "./lib/windows";
 import { errorMessage, h } from "./components/dom";
 import { createStatusBar } from "./components/status-bar";
 import { createWindowPanel } from "./components/window-panel";
-import { createRequestPanel } from "./components/request-panel";
+import { SERIES_SIZES, createRequestPanel } from "./components/request-panel";
 import { createStatsPanel } from "./components/stats-panel";
 import { createHistoryPanel } from "./components/history-panel";
 
@@ -61,7 +67,10 @@ export function mountApp(root: HTMLElement, { setup, identity, openSecondary, br
     void stats.refresh();
   });
   if (!isMain) {
-    void windows.onSeriesRequest(({ projectId, size }) => void requests.run(projectId, size, "По команде из main"));
+    void windows.onSeriesRequest((request) => {
+      if (!isOfferedSeries(request)) return;
+      void requests.run(request.projectId, request.size, "По команде из main");
+    });
   }
 
   root.replaceChildren(
@@ -73,4 +82,14 @@ export function mountApp(root: HTMLElement, { setup, identity, openSecondary, br
       h("div", { class: "column" }, stats.element, createWindowPanel(identity, openSecondary), history.element),
     ),
   );
+}
+
+/**
+ * Window events are not authenticated: any window may emit them. A request
+ * drives work here only if it is a series this UI itself offers.
+ */
+function isOfferedSeries(request: unknown): request is SeriesRequest {
+  if (typeof request !== "object" || request === null) return false;
+  const { projectId, size } = request as Record<string, unknown>;
+  return typeof projectId === "string" && SERIES_SIZES.some((n) => n === size);
 }

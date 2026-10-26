@@ -92,6 +92,8 @@ SDK проверяет это до вызова и сразу отвечает `
 
 Инвариант, который UI проверяет и показывает: `requestsReceived = operationsExecuted + coalescedRequests + cacheHits`.
 
+The invariant holds only while no request is in flight: `requestsReceived` is counted when a valid call enters `RuntimeIpc`, and the outcome counter when it completes (test `stats_disagree_while_a_request_is_in_flight` in `crates/runtime-ipc`). The counters are shared by all windows, so one window cannot tell another window's unfinished calls from a bug. The UI therefore reports a mismatch as "does not add up, refresh after every series has finished", not as a proven violation.
+
 **Ошибки:** `INTERNAL`.
 
 **Права:** все окна, `allow-runtime-get-debug-stats` в `capabilities/default.json`. Только диагностика, не используется как контроль доступа.
@@ -126,6 +128,8 @@ Payload `{ projectId: string | null }` (`null` после `clear`), рассыл
 
 - SDK: `runtime.events.onCacheInvalidated(handler)` возвращает функцию отписки. Вне Tauri и в MOCK подписка ничего не делает.
 - UI: каждое окно при событии обновляет статистику и показывает в таймере кэша, что результат сброшен.
+
+Window events are not authenticated: with `core:default` every window may `emit`/`emitTo` any event, including `runtime://cache-invalidated` and the frontend-only `lab://run-series`. They are hints, never a source of data or rights. The UI only re-requests stats on `runtime://cache-invalidated`, and the secondary window starts a series from `lab://run-series` only when the payload is a string `projectId` and one of the series sizes the UI offers (1, 10, 20, 50); anything else is ignored.
 
 
 ## Rust demo-provider fixtures (not the frontend mock)
