@@ -14,6 +14,15 @@ export const COUNTERS: { key: Counter; label: string }[] = [
   { key: "cachedEntries", label: "Записей в кэше" },
 ];
 
+/**
+ * Counters are shared by all windows and `requestsReceived` is counted before
+ * the outcome, so a mismatch may only mean that another window still has calls
+ * in flight. This window cannot tell that apart from a bug.
+ */
+const MISMATCH_TEXT =
+  "Инвариант не сходится: принятые ≠ выполнения + присоединившиеся + попадания в кэш. " +
+  "Если в другом окне ещё идёт серия, это ожидаемо: обновите после её завершения.";
+
 export interface StatsPanel {
   element: HTMLElement;
   /**
@@ -85,7 +94,7 @@ export function createStatsPanel(runtime: RuntimeClient, timer: CacheTimer = cre
         invariant.className = ok ? "hint text-ok" : "hint text-error";
         invariant.textContent = ok
           ? "Инвариант выполнен: принятые = выполнения + присоединившиеся + попадания в кэш."
-          : "Инвариант нарушен: принятые ≠ выполнения + присоединившиеся + попадания в кэш.";
+          : MISMATCH_TEXT;
       }
       status.className = "hint";
       status.textContent = `${live ? "Автообновление" : "Обновлено"} в ${new Date().toLocaleTimeString()}.`;
