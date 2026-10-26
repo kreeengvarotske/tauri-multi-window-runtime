@@ -65,7 +65,7 @@ Each base SHA equals the current head of its parent branch, except #1. Closed an
 | Window label as the only authority; `core:event:default` allows emit/emit-to from any window | **Open**. Stage 10 is memo-only | #15 F2/F3; stage 10 memo v2 |
 | No protocol/SDK version | **Open** | #15 F5 |
 | Symmetric benchmark protocol (#25, fixed N=20, one Holm family of 8) | **Proposal**. CI green on `ed756a8`, not approved by Group 1 | runs 40224027381 / 40224027347 |
-| CPU as a confirmatory outcome | **Undecided**. The task prompt says RAM and CPU are equal; the north-star proposal says CPU is descriptive | #13 comment 6402306556 |
+| CPU as a confirmatory outcome | **Decided 2026-10-26: RAM and CPU are equal confirmatory metrics** (Maxim's assignment, which records it as already decided). This supersedes the memory-first wording of the north-star proposal for measurement purposes | #13 comment 6402306556 (proposal); assignment of 2026-10-26 |
 | Native pilot on final runner/monitor SHAs | **Not run** | none |
 | Windows 11 coverage | **None**. Every native result is Windows 10 (19045 on Maxim's PC; one Codex smoke on 26200) | #13 |
 | Cross-app runtime | **Not a decision.** Old standing rules put a daemon and cross-app auth out of scope; the north star proposes it; `AGENTS.md` (#26) still says "not a daemon" | this package |

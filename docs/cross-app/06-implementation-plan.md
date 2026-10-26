@@ -37,7 +37,7 @@ If P4 finds no break-even for realistic `D` and `T`, the plan stops at P6 with O
 | **Q5** | Which platforms are required for P2? | Windows 10/11 only; + Linux; + macOS | Windows 10/11 first; Linux as dev/CI; macOS later (`getpeereid` + `proc_pidpath`) |
 | **Q6** | Panic policy in the broker | keep `panic = "abort"` + crash recovery; separate profile; `catch_unwind` per op | Separate broker profile with `panic = "unwind"` + per-op isolation; Core's profile unchanged |
 | **Q7** | Behaviour without a broker | in-process fallback per op; explicit "unavailable" | Fallback by default (it is also the plain arm) |
-| **Q8** | Role of CPU in cross-app measurements | co-primary with RAM (task prompt); descriptive (north star) | Decide together with #25; record CPU and latency in every case |
+| ~~Q8~~ | Role of CPU in cross-app measurements | **Decided 2026-10-26: co-primary with RAM** (equal confirmatory metrics) | Applied in 05; #25 already uses one family of CPU + RAM tests |
 | **Q9** | Wire format beyond the spike | JSON (spike); a binary codec; shared memory for large Public data (O4) | JSON until P4 shows copy cost matters |
 
 ## 4. What this package deliberately does not do
