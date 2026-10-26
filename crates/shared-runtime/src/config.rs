@@ -12,6 +12,12 @@ pub struct RuntimeConfig {
     pub max_concurrent_operations: usize,
     /// Executions that may wait for a slot. One more fails with `Overloaded`.
     pub max_queued_operations: usize,
+    /// View projections (building a response from a shared output, plus
+    /// whatever the caller does with it inside `ViewHandle::get_with`, such
+    /// as serializing it) that may run at the same time. Bounds the transient
+    /// memory of responses to about this many times `max_response_bytes`,
+    /// however many windows ask at once. Others wait, up to their deadline.
+    pub max_concurrent_projections: usize,
     /// How long a caller waits when the call sets no deadline of its own.
     pub default_deadline: Duration,
     /// How long `shutdown` lets calls in flight finish before ending them.
@@ -27,6 +33,9 @@ impl RuntimeConfig {
     pub(crate) fn validate(&self) -> Result<(), ConfigError> {
         if self.max_concurrent_operations == 0 {
             return Err(ConfigError("max_concurrent_operations must be at least 1"));
+        }
+        if self.max_concurrent_projections == 0 {
+            return Err(ConfigError("max_concurrent_projections must be at least 1"));
         }
         if self.default_deadline.is_zero() {
             return Err(ConfigError("default_deadline must be greater than zero"));

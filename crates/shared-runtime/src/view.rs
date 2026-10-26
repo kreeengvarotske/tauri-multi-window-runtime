@@ -23,6 +23,12 @@ pub trait View<O: Operation>: Send + Sync + 'static {
 
     /// Builds the response. `max_items` is passed so that the view can
     /// clamp its own page size.
+    ///
+    /// Must be cheap and bounded: work proportional to the response (at most
+    /// `max_items` items), not to the whole output. It runs once per call,
+    /// synchronously, under the runtime's projection limit. Sorting,
+    /// indexing or scanning the whole output belong in the operation, whose
+    /// result is cached and shared.
     fn project(
         &self,
         output: &O::Output,
@@ -67,9 +73,12 @@ impl fmt::Display for ViewError {
 
 impl std::error::Error for ViewError {}
 
-/// A view call fails either while getting the source output or in the view.
+/// A view call fails while getting the source output, while waiting for a
+/// projection slot, or in the view.
 pub enum ViewCallError<E> {
     Source(CallError<E>),
+    /// The caller's deadline passed while waiting for a projection slot.
+    DeadlineExceeded,
     View(ViewError),
 }
 
@@ -77,6 +86,7 @@ impl<E: fmt::Debug> fmt::Debug for ViewCallError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Source(error) => f.debug_tuple("Source").field(error).finish(),
+            Self::DeadlineExceeded => f.write_str("DeadlineExceeded"),
             Self::View(error) => f.debug_tuple("View").field(error).finish(),
         }
     }

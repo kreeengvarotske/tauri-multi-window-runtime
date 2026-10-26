@@ -22,6 +22,7 @@ fn config() -> RuntimeConfig {
     RuntimeConfig {
         max_concurrent_operations: 4,
         max_queued_operations: 16,
+        max_concurrent_projections: 2,
         default_deadline: Duration::from_secs(30),
         shutdown_grace: Duration::from_secs(1),
         cache_budget_bytes: 4 << 20,
@@ -922,4 +923,169 @@ async fn result_of_a_forgotten_window_in_flight_is_not_cached() {
     );
     assert_eq!(stats(&runtime).cache_entries, 0);
     assert_balanced(&stats(&runtime));
+}
+
+// ------------------------------------------------------ projection limit
+
+/// A large shared blob; each response copies `params` bytes of it.
+struct Blob;
+
+impl Operation for Blob {
+    const NAME: &'static str = "test.blob";
+    type Params = ();
+    type Output = Vec<u8>;
+    type Error = String;
+
+    fn policy(&self) -> CachePolicy {
+        CachePolicy::Forever
+    }
+    fn weight(&self, output: &Vec<u8>) -> usize {
+        output.len()
+    }
+    async fn run(&self, _ctx: OpContext, _: ()) -> Result<Vec<u8>, String> {
+        Ok(vec![7; 4 << 20])
+    }
+}
+
+/// Copies a large chunk; records how many projections run at once. While
+/// `hold` is set, a projection waits until a second one is running (or the
+/// hold is released, or 2 s pass), so projections overlap whenever the
+/// limit allows it and the peak shows the limit.
+struct Chunk {
+    active: Arc<AtomicUsize>,
+    peak: Arc<AtomicUsize>,
+    hold: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl View<Blob> for Chunk {
+    const NAME: &'static str = "test.blob.chunk";
+    type Request = usize;
+    type Response = Vec<u8>;
+
+    fn source(&self, _: &usize) {}
+    fn max_items(&self) -> usize {
+        1 << 20
+    }
+    fn max_response_bytes(&self) -> usize {
+        1 << 20
+    }
+    fn project(&self, output: &Vec<u8>, len: usize, _: usize) -> Result<Vec<u8>, ViewError> {
+        let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(now, Ordering::SeqCst);
+        let until = std::time::Instant::now() + Duration::from_secs(2);
+        while self.hold.load(Ordering::SeqCst)
+            && self.active.load(Ordering::SeqCst) < 2
+            && std::time::Instant::now() < until
+        {
+            std::thread::yield_now();
+        }
+        let response = output[..len].to_vec();
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        Ok(response)
+    }
+    fn items(response: &Vec<u8>) -> usize {
+        response.len()
+    }
+    fn response_bytes(response: &Vec<u8>) -> usize {
+        response.len()
+    }
+}
+
+fn chunk_runtime(
+    projections: usize,
+) -> (
+    Runtime,
+    Arc<AtomicUsize>,
+    Arc<std::sync::atomic::AtomicBool>,
+) {
+    let peak = Arc::new(AtomicUsize::new(0));
+    let hold = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let runtime = Runtime::builder(RuntimeConfig {
+        max_concurrent_projections: projections,
+        ..config()
+    })
+    .unwrap()
+    .register(Blob, budget(4 << 20))
+    .unwrap()
+    .view::<Blob, _>(Chunk {
+        active: Arc::default(),
+        peak: Arc::clone(&peak),
+        hold: Arc::clone(&hold),
+    })
+    .unwrap()
+    .build();
+    (runtime, peak, hold)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_windows_build_at_most_the_limit_of_large_responses() {
+    let (runtime, peak, _hold) = chunk_runtime(2);
+    let runtime = Arc::new(runtime);
+    let chunk = runtime.view::<Blob, Chunk>().unwrap();
+    let mut calls = Vec::new();
+    for i in 0..8 {
+        let chunk = chunk.clone();
+        calls.push(tokio::spawn(async move {
+            chunk
+                .get_with(&window(&format!("w{i}")), 1 << 20, NO_OPTIONS, |r| r.len())
+                .await
+        }));
+    }
+    for call in calls {
+        let len = tokio::time::timeout(Duration::from_secs(60), call)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(len.unwrap(), 1 << 20);
+    }
+    assert_eq!(
+        peak.load(Ordering::SeqCst),
+        2,
+        "projections ran beyond the limit (or never in parallel)"
+    );
+    let s = runtime.stats();
+    let blob = s.operation(Blob::NAME).unwrap();
+    assert_eq!(blob.executed, 1, "source shared by all windows");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn waiting_for_a_projection_slot_respects_the_deadline() {
+    let (runtime, _peak, hold) = chunk_runtime(1);
+    let runtime = Arc::new(runtime);
+    let chunk = runtime.view::<Blob, Chunk>().unwrap();
+    // Load the source first so the second call reaches the slot quickly.
+    let blob = runtime.operation::<Blob>().unwrap();
+    blob.get(&window("a"), (), NO_OPTIONS).await.unwrap();
+
+    let first = {
+        let chunk = chunk.clone();
+        tokio::spawn(async move { chunk.get(&window("a"), 16, NO_OPTIONS).await })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await; // first holds the slot
+    let short = CallOptions {
+        deadline: Some(Duration::from_millis(50)),
+    };
+    let late = chunk.get(&window("b"), 16, short).await;
+    assert!(
+        matches!(late, Err(ViewCallError::DeadlineExceeded)),
+        "{late:?}"
+    );
+    hold.store(false, Ordering::SeqCst);
+    assert_eq!(first.await.unwrap().unwrap().len(), 16);
+    assert_eq!(
+        chunk.get(&window("b"), 16, NO_OPTIONS).await.unwrap().len(),
+        16
+    );
+}
+
+#[test]
+fn zero_projection_slots_is_rejected() {
+    let bad = RuntimeConfig {
+        max_concurrent_projections: 0,
+        ..config()
+    };
+    assert!(matches!(
+        Runtime::builder(bad),
+        Err(RegistryError::Config(_))
+    ));
 }

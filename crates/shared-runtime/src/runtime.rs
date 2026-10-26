@@ -84,6 +84,7 @@ struct Shared {
     config: RuntimeConfig,
     slots: Arc<Semaphore>,
     queued: AtomicUsize,
+    projections: Semaphore,
     phase: watch::Sender<Phase>,
     in_flight: AtomicUsize,
     idle: Notify,
@@ -210,6 +211,7 @@ impl RuntimeBuilder {
         Ok(Self {
             shared: Arc::new(Shared {
                 slots: Arc::new(Semaphore::new(config.max_concurrent_operations)),
+                projections: Semaphore::new(config.max_concurrent_projections),
                 config,
                 queued: AtomicUsize::new(0),
                 phase,
@@ -606,19 +608,42 @@ impl<O: Operation, V: View<O>> ViewHandle<O, V> {
     /// Reads the source output (shared, cached, coalesced) and returns a
     /// bounded projection of it. A response with more than `max_items`
     /// items or more than `max_response_bytes` bytes is refused, never
-    /// truncated.
+    /// truncated. `max_items` alone bounds the count, not the bytes.
     pub async fn get(
         &self,
         caller: &Caller,
         request: V::Request,
         options: CallOptions,
     ) -> Result<V::Response, ViewCallError<O::Error>> {
+        self.get_with(caller, request, options, |response| response)
+            .await
+    }
+
+    /// Like `get`, but runs `finish` on the response while still holding the
+    /// projection slot, so that an adapter can serialize the response
+    /// within the same concurrency bound.
+    pub async fn get_with<T>(
+        &self,
+        caller: &Caller,
+        request: V::Request,
+        options: CallOptions,
+        finish: impl FnOnce(V::Response) -> T,
+    ) -> Result<T, ViewCallError<O::Error>> {
+        let shared = &*self.source.shared;
+        let deadline = options.deadline.unwrap_or(shared.config.default_deadline);
+        let started = tokio::time::Instant::now();
         let params = self.view.source(&request);
         let output = self
             .source
             .get(caller, params, options)
             .await
             .map_err(ViewCallError::Source)?;
+        let remaining = deadline.saturating_sub(started.elapsed());
+        let _slot = tokio::time::timeout(remaining, shared.projections.acquire())
+            .await
+            .map_err(|_| ViewCallError::DeadlineExceeded)?
+            .expect("the projection semaphore is never closed");
+
         let max_items = self.view.max_items();
         let response = self
             .view
@@ -639,7 +664,7 @@ impl<O: Operation, V: View<O>> ViewHandle<O, V> {
                 max_bytes,
             }));
         }
-        Ok(response)
+        Ok(finish(response))
     }
 
     pub fn max_items(&self) -> usize {
