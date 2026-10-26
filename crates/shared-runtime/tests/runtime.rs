@@ -1089,3 +1089,99 @@ fn zero_projection_slots_is_rejected() {
         Err(RegistryError::Config(_))
     ));
 }
+
+// ------------------------------------------------ shutdown during a view
+
+/// A view call is in flight from its start until `get_with` returns,
+/// `finish` (the adapter's serialization) included. Shutdown waits for it;
+/// a call waiting for a projection slot gives up when the grace ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shutdown_waits_for_a_view_in_progress_and_ends_one_waiting_for_a_slot() {
+    let hold = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let runtime = Arc::new(
+        Runtime::builder(RuntimeConfig {
+            max_concurrent_projections: 1,
+            shutdown_grace: Duration::from_millis(100),
+            ..config()
+        })
+        .unwrap()
+        .register(Blob, budget(4 << 20))
+        .unwrap()
+        .view::<Blob, _>(Chunk {
+            active: Arc::default(),
+            peak: Arc::default(),
+            hold,
+        })
+        .unwrap()
+        .build(),
+    );
+    let chunk = runtime.view::<Blob, Chunk>().unwrap();
+    // The source output is cached: the operation itself is no longer running.
+    runtime
+        .operation::<Blob>()
+        .unwrap()
+        .get(&window("a"), (), NO_OPTIONS)
+        .await
+        .unwrap();
+
+    // A holds the only projection slot inside `finish`.
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let first = {
+        let chunk = chunk.clone();
+        tokio::spawn(async move {
+            chunk
+                .get_with(&window("a"), 16, NO_OPTIONS, move |response| {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    response.len()
+                })
+                .await
+        })
+    };
+    tokio::task::spawn_blocking(move || entered_rx.recv().unwrap())
+        .await
+        .unwrap();
+    // B waits for the slot.
+    let second = {
+        let chunk = chunk.clone();
+        tokio::spawn(async move { chunk.get(&window("b"), 16, NO_OPTIONS).await })
+    };
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let shutdown = {
+        let runtime = Arc::clone(&runtime);
+        tokio::spawn(async move { runtime.shutdown().await })
+    };
+    // Past the grace: B is ended, but shutdown still waits for A.
+    let late = tokio::time::timeout(LIMIT, second).await.unwrap().unwrap();
+    assert!(
+        matches!(late, Err(ViewCallError::Source(CallError::ShuttingDown))),
+        "a call waiting for a slot ends with the grace: {late:?}"
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !shutdown.is_finished(),
+        "shutdown returned while a view was still serializing"
+    );
+    // New view calls are refused at once.
+    assert!(matches!(
+        chunk.get(&window("c"), 16, NO_OPTIONS).await,
+        Err(ViewCallError::Source(CallError::ShuttingDown))
+    ));
+
+    release_tx.send(()).unwrap();
+    assert_eq!(
+        tokio::time::timeout(LIMIT, first)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        16,
+        "work already in finish completes"
+    );
+    tokio::time::timeout(LIMIT, shutdown)
+        .await
+        .expect("shutdown ends once the view returns")
+        .unwrap();
+}
