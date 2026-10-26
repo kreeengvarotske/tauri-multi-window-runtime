@@ -186,7 +186,8 @@ where
     /// Stores `value` unless the policy is `NoStore` or the value alone is
     /// heavier than the budget; in both cases an older value for `key` is
     /// removed and `false` is returned. With a budget, least recently used
-    /// entries are evicted until the total weight fits.
+    /// entries are evicted before the insert until the new value fits, so the
+    /// total weight never exceeds the budget and never overflows.
     pub fn insert_arc(&self, key: K, value: Arc<V>, policy: CachePolicy) -> bool {
         if !policy.should_store() {
             self.invalidate(&key);
@@ -210,8 +211,29 @@ where
         let replaced = {
             let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
             let replaced = entries.remove(&key);
+
+            if let Some(budget) = &self.budget {
+                // Make room before inserting: `weight <= max_weight`, so the
+                // bound `max_weight - weight` cannot underflow, and the total
+                // after the insert is at most `max_weight` (no overflow).
+                let room = budget.max_weight - weight;
+                while entries.total_weight > room {
+                    match entries.evict_oldest() {
+                        Some(value) => evicted.push(value),
+                        None => break,
+                    }
+                }
+            }
+            let Some(total_weight) = entries.total_weight.checked_add(weight) else {
+                // Unreachable while the invariant above holds; refuse to store
+                // rather than let the total wrap.
+                drop(entries);
+                drop(replaced);
+                drop(evicted);
+                return false;
+            };
+            entries.total_weight = total_weight;
             let last_used = entries.tick();
-            entries.total_weight += weight;
             entries.map.insert(
                 key,
                 CacheEntry {
@@ -222,17 +244,6 @@ where
                     last_used,
                 },
             );
-
-            if let Some(budget) = &self.budget {
-                // The new entry has the newest tick and fits on its own, so it
-                // is evicted only after every other entry, which never happens.
-                while entries.total_weight > budget.max_weight {
-                    match entries.evict_oldest() {
-                        Some(value) => evicted.push(value),
-                        None => break,
-                    }
-                }
-            }
             replaced
         };
 
@@ -479,6 +490,38 @@ mod tests {
         // the expired entry no longer pushes a new one out
         assert!(cache.insert("k".into(), vec![0; 60], CachePolicy::Forever));
         assert_eq!(cache.evictions(), 0);
+    }
+
+    /// Weights near `usize::MAX` without allocating: the value is its weight.
+    fn weighted_by_value(max: usize) -> PolicyCache<u8, usize> {
+        PolicyCache::with_budget(super::CacheBudget::new(max, |weight: &usize| *weight))
+    }
+
+    #[test]
+    fn total_weight_never_overflows_or_exceeds_the_budget() {
+        let cache = weighted_by_value(usize::MAX);
+        assert!(cache.insert(1, usize::MAX - 1, CachePolicy::Forever));
+        assert_eq!(cache.weight(), usize::MAX - 1);
+        // usize::MAX - 1 + 2 would wrap to 0 with unchecked addition.
+        assert!(cache.insert(2, 2, CachePolicy::Forever));
+        assert_eq!(cache.weight(), 2, "the older heavy entry must be evicted");
+        assert_eq!((cache.len(), cache.evictions()), (1, 1));
+        assert!(cache.get(&1).is_none());
+
+        assert!(cache.insert(3, usize::MAX, CachePolicy::Forever));
+        assert_eq!(cache.weight(), usize::MAX);
+        assert_eq!((cache.len(), cache.evictions()), (1, 2));
+
+        // Replacing a key with the same weight frees its old weight first.
+        assert!(cache.insert(3, usize::MAX, CachePolicy::Forever));
+        assert_eq!((cache.weight(), cache.evictions()), (usize::MAX, 2));
+
+        let small = weighted_by_value(10);
+        for (key, weight) in [(1, 4), (2, 4), (3, 4), (4, 10), (5, 1)] {
+            assert!(small.insert(key, weight, CachePolicy::Forever));
+            assert!(small.weight() <= 10);
+        }
+        assert_eq!(small.weight(), 1);
     }
 
     #[test]
