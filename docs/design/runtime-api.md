@@ -20,6 +20,94 @@ Non-goals: a generic channel for copying large objects between windows,
 cross-application sharing (that is the conditional broker), network access,
 authentication of users, a plugin platform.
 
+## 1a. Short contract
+
+What an application developer can rely on once this is agreed:
+
+1. **One runtime per application.** Built once in Rust at startup, shared by
+   every window. Windows never construct it and cannot reach it except
+   through the commands the adapter generates.
+2. **Operations are typed and registered in Rust.** Name, parameters, output,
+   cache policy, scope and weight are fixed by the developer. Nothing a
+   window sends can change the policy, scope or visibility of a call.
+3. **Same key, same work.** Concurrent calls with the same
+   `(operation, scope, params)` share one execution; a stored result serves
+   later calls until TTL, invalidation, clear or eviction. Errors are never
+   cached or handed to calls that start after the error was published.
+4. **Large outputs stay in Rust.** Windows read them through views with
+   enforced size limits; there is no command that copies a whole output to a
+   window unless a view explicitly returns it within its limit.
+5. **Bounded.** Cache weight, concurrent executions, parameter size, view
+   size and per-call deadline are limited; a call that hits a limit fails
+   with a stable error code instead of waiting forever or growing memory.
+6. **Clean stop.** On application exit the runtime stops accepting calls,
+   waits a bounded time for in-flight work and drops its caches.
+7. **Safe diagnostics.** Stats contain counts and sizes only, never keys,
+   parameters, values or window identities.
+8. **Errors** keep the current `{ code, message }` shape.
+
+## 1b. Examples
+
+Registering an operation and a view (Rust, application side):
+
+```rust
+struct Catalog;                       // loads and decodes a large data set once
+
+impl Operation for Catalog {
+    const NAME: &'static str = "catalog.load";
+    type Params = CatalogId;          // validated newtype
+    type Output = CatalogIndex;       // stays in Rust
+    type Error = CatalogError;
+
+    fn policy(&self) -> CachePolicy { CachePolicy::Ttl(Duration::from_secs(300)) }
+    fn weight(&self, out: &CatalogIndex) -> usize { out.retained_bytes() }
+    async fn run(&self, ctx: OpContext, id: CatalogId) -> Result<CatalogIndex, CatalogError> {
+        load_and_index(&ctx, id).await
+    }
+}
+
+struct CatalogPage;                   // what a window actually renders
+
+impl View<Catalog> for CatalogPage {
+    const NAME: &'static str = "catalog.page";
+    type Request = PageRequest;       // { catalogId, offset, limit, sort }
+    type Response = Page<Row>;        // ≤ max_response_items rows + total
+    fn max_response_items(&self) -> usize { 200 }
+    fn project(&self, idx: &CatalogIndex, req: PageRequest) -> Result<Page<Row>, ViewError> {
+        idx.page(req.offset, req.limit, req.sort)
+    }
+}
+
+fn main() {
+    let runtime = Runtime::builder(RuntimeConfig {
+            cache_budget_bytes: 256 << 20,
+            max_concurrent_operations: 4,
+            default_deadline: Duration::from_secs(10),
+            max_params_bytes: 16 << 10,
+            shutdown_grace: Duration::from_secs(2),
+        })
+        .register(Catalog).unwrap()
+        .build();
+
+    tauri::Builder::default()
+        .plugin(tauri_runtime_adapter::init(runtime, adapter_commands![CatalogPage]))
+        .run(tauri::generate_context!())
+        .unwrap();
+}
+```
+
+Calling it from a window (TypeScript, through the SDK; the window never
+holds the whole catalog):
+
+```ts
+const page = await runtime.views.get("catalog.page", { catalogId: "main", offset: 0, limit: 100, sort: "name" });
+render(page.rows, page.total);
+```
+
+Two windows asking for page 1 at the same time trigger one `catalog.load`
+(if not cached) and two cheap `project` calls; each window receives only its
+100 rows.
+
 ## 2. Building blocks that already exist
 
 `runtime-core` (#3, #8, #12, #14) already provides `PolicyCache`,
@@ -220,12 +308,27 @@ output or working memory is large and windows need projections of it. If
 every window needs the whole output, sharing saves working memory and
 computation only, and the break-even model in the roadmap decides.
 
-## 9. Compatibility with the current code
+## 9. Compatibility with the current code and IPC
 
-- `CachedService`, `PolicyCache`, `TaskCoalescer` keep their current public
-  API; the runtime is a new layer on top.
-- The current IPC commands and SDK types in #2/#7 stay unchanged until a
-  migration is agreed. The demo can move to the adapter in one later PR.
+Rust library: `CachedService`, `PolicyCache` and `TaskCoalescer` keep their
+current public API and semantics; the runtime is a new layer on top.
+
+Current IPC contract (`docs/frontend-backend-contract.md`, #2/#7/#28) and
+what happens to each part:
+
+| Current item | Shape today | Under this proposal |
+|---|---|---|
+| `runtime_get_project_metadata` | `{ projectId }` → `ProjectMetadata` | unchanged name and payload; implemented as operation `projects.metadata` (`Shared`, TTL 30 s) through the adapter |
+| `runtime_get_debug_stats` | → `RuntimeDebugStats` (5 counters, `cachedEntries`, `cachePolicy`) | unchanged until the counter decision (C-1). If agreed, new fields are **added** (`cancelledRequests`, `deadlineExceeded`, `overloaded`, `cacheWeightBytes`); no field is removed or renamed |
+| `runtime_invalidate_project` | `{ projectId }` → `{ invalidated }`, main window only | unchanged; the main-only check stays in Rust |
+| `runtime_clear_cache` | → `()`, main window only | unchanged |
+| `runtime://cache-invalidated` | `{ projectId: string \| null }`, emitted from Rust | unchanged; still a hint without data |
+| Errors | `{ code, message }`; codes `INVALID_ARGUMENT`, `PROJECT_NOT_FOUND`, `ACCESS_DENIED`, `OPERATION_FAILED`, `INTERNAL` | same shape. New codes (`DEADLINE_EXCEEDED`, `OVERLOADED`, `SHUTTING_DOWN`) can appear only once limits are enabled for a command. The SDK already keeps unknown codes as strings (`contract.ts`), so older frontends do not break, but they show them as generic errors |
+| Capabilities | `default` (main, secondary) and `runtime-main` (main) | unchanged; new view commands get their own permission entries, added per window by the application |
+
+Migration is one later PR that moves the demo onto the adapter without
+changing any row above; anything that would change a row needs its own
+review.
 
 ## 10. Decisions needed
 
