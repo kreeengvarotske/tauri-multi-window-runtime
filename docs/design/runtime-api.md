@@ -207,9 +207,11 @@ pub enum CallError<E> {
 
 Differences in the implementation (#35), kept deliberately:
 
-- The cache budget is per operation (`OperationConfig::cache_budget_bytes`,
-  passed to `register`), so one large operation cannot evict another's
-  outputs. `RuntimeConfig` adds `max_queued_operations`.
+- The cache budget has two levels: `RuntimeConfig::cache_budget_bytes`
+  bounds the whole runtime, and each operation reserves a share of it
+  (`OperationConfig::cache_budget_bytes`, passed to `register`), so one large
+  operation cannot evict another's outputs and the total stays checkable.
+  `RuntimeConfig` adds `max_queued_operations`.
 - `max_params_bytes` and `InvalidArgument` belong to the adapter (R3): params
   are validated before a request reaches the runtime, so `CallError` has no
   `InvalidArgument`.
@@ -313,8 +315,13 @@ WebView-facing:
   (decided: no macro in v1), so Tauri capabilities can allow or deny each one
   per window. A single generic `call(op, params)` command is rejected because
   it would bypass per-command permissions;
-- validates request size (`max_params_bytes`) and view limits before work
-  starts;
+- bounds bytes on the IPC boundary, where only it sees them: the raw
+  request payload is checked against a per-command `max_request_bytes`
+  before it is deserialized, and the serialized response against
+  `max_response_bytes` before it is sent to the WebView (the runtime's view
+  limits are checked first, on the view's own measure);
+- calls `Runtime::forget_window` when Tauri reports a window destroyed, so
+  that a closed window's `PerWindow` outputs are dropped;
 - maps `CallError` to the existing `{ code, message }` error shape with
   stable codes (`INVALID_ARGUMENT`, `DEADLINE_EXCEEDED`, `OVERLOADED`,
   `SHUTTING_DOWN`, `OPERATION_FAILED`, `INTERNAL`, `ACCESS_DENIED`);
@@ -407,12 +414,15 @@ so and is reviewed for exactly that.
 
 | Limit | Config field | Library default | Sample app value | How to validate it |
 |---|---|---|---|---|
-| Cache size per operation | `OperationConfig::cache_budget_bytes` | none | temporary, set from the benchmark data size (e.g. 2× one D64 catalog) | Private Bytes of the app process at idle after N windows load (#33, scenario M); evictions in stats must stay 0 for the intended working set |
+| Cache size, whole runtime | `RuntimeConfig::cache_budget_bytes` | none | temporary, the sum of the operation budgets below plus headroom | Private Bytes of the host process at idle after the #33 load; Σ cache weight in stats stays within it |
+| Cache size per operation | `OperationConfig::cache_budget_bytes` (reserved from the runtime total; registration fails if the sum exceeds it) | none | temporary, set from the benchmark data size (e.g. 2× one D64 catalog) | Private Bytes of the app process at idle after N windows load (#33, scenario M); evictions in stats must stay 0 for the intended working set |
 | Concurrent executions | `RuntimeConfig::max_concurrent_operations` | none | temporary, e.g. number of logical CPUs | CPU and latency guardrails under the #33 load; peak RAM during cold load |
 | Queue length | `RuntimeConfig::max_queued_operations` | none | temporary, e.g. 4× concurrency | `overloaded` must stay 0 at the intended load and rise only under deliberate overload |
 | Caller deadline | `RuntimeConfig::default_deadline` / `CallOptions::deadline` | none | temporary, above the p99 cold-load latency measured in #33 | `deadline_exceeded` stays 0 at intended load |
 | Shutdown grace | `RuntimeConfig::shutdown_grace` | none | temporary, e.g. 2 s | time from close to process exit on Windows |
-| View response size | `View::max_items` | none (per view) | temporary, e.g. 200 rows per page | serialized response bytes per call (§12b), renderer memory per window |
+| View response size | `View::max_items` and `View::max_response_bytes` | none (per view) | temporary, e.g. 200 rows and 256 KiB per page | serialized response bytes per call (§12b), renderer memory per window; a test with one huge item checks that the byte limit applies when the item count does not |
+| IPC request / response bytes | adapter, per command: `max_request_bytes`, `max_response_bytes` (R3) | none | temporary, e.g. 16 KiB request, 512 KiB response | largest legitimate request and page in the sample, times a margin |
+| Closed windows | `Runtime::forget_window`, called by the adapter on window destroy | always on | n/a | PerWindow cache entries and weight return to the pre-open value after a window closes (R3 test) |
 
 "Temporary" means the value is a starting point for the sample application
 only; it is replaced by the measured value and is not a recommendation for
@@ -423,7 +433,7 @@ other applications.
 | Step | Where data lives | What is serialized to a window |
 |---|---|---|
 | R1 | Cached outputs in the Rust process, at most `cache_budget_bytes` (estimated) per service; eviction drops the cache's `Arc`. | nothing (no IPC change) |
-| R2 | One `Arc<Output>` per scope key in Rust (`Shared`: one per app; `PerWindow`: one per window). Coalesced callers share it. Per-window bookkeeping: labels only. | nothing (no IPC) |
+| R2 | One `Arc<Output>` per scope key in Rust (`Shared`: one per app; `PerWindow`: one per window until it closes). Coalesced callers share it. Total cached weight ≤ `RuntimeConfig::cache_budget_bytes`. No per-window bookkeeping besides cached outputs. | nothing (no IPC) |
 | R3 | As R2. Existing commands return the same DTOs as today. | same bytes per call as today (`ProjectMetadata`, stats) |
 | R4 | As R2. | stats DTO grows by about seven numbers |
 | R5 | Catalog output once in Rust, bounded by its budget. | one page per call, at most `max_items` rows; size recorded per run in the benchmark |
