@@ -481,6 +481,38 @@ mod tests {
         assert_eq!(cache.evictions(), 0);
     }
 
+    /// Weights near `usize::MAX` without allocating: the value is its weight.
+    fn weighted_by_value(max: usize) -> PolicyCache<u8, usize> {
+        PolicyCache::with_budget(super::CacheBudget::new(max, |weight: &usize| *weight))
+    }
+
+    #[test]
+    fn total_weight_never_overflows_or_exceeds_the_budget() {
+        let cache = weighted_by_value(usize::MAX);
+        assert!(cache.insert(1, usize::MAX - 1, CachePolicy::Forever));
+        assert_eq!(cache.weight(), usize::MAX - 1);
+        // usize::MAX - 1 + 2 would wrap to 0 with unchecked addition.
+        assert!(cache.insert(2, 2, CachePolicy::Forever));
+        assert_eq!(cache.weight(), 2, "the older heavy entry must be evicted");
+        assert_eq!((cache.len(), cache.evictions()), (1, 1));
+        assert!(cache.get(&1).is_none());
+
+        assert!(cache.insert(3, usize::MAX, CachePolicy::Forever));
+        assert_eq!(cache.weight(), usize::MAX);
+        assert_eq!((cache.len(), cache.evictions()), (1, 2));
+
+        // Replacing a key with the same weight frees its old weight first.
+        assert!(cache.insert(3, usize::MAX, CachePolicy::Forever));
+        assert_eq!((cache.weight(), cache.evictions()), (usize::MAX, 2));
+
+        let small = weighted_by_value(10);
+        for (key, weight) in [(1, 4), (2, 4), (3, 4), (4, 10), (5, 1)] {
+            assert!(small.insert(key, weight, CachePolicy::Forever));
+            assert!(small.weight() <= 10);
+        }
+        assert_eq!(small.weight(), 1);
+    }
+
     #[test]
     fn cache_without_budget_reports_zero_weight_and_never_evicts() {
         let cache = PolicyCache::<String, Vec<u8>>::new();
