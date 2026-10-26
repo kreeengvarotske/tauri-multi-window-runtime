@@ -43,15 +43,15 @@ Data flows: (1) Hello carries only a *claim*. (2) The broker gathers OS evidence
 | # | Threat (STRIDE) | Attack | Mitigation | Status |
 |---|---|---|---|---|
 | T-1 | Spoofing | A client claims another app's `appId` | The claim is checked against the executable the kernel reports for the peer pid, which must equal the manifest's registered executable (Linux `/proc/<pid>/exe`, Windows `QueryFullProcessImageNameW`). Test: the beta binary claiming alpha ⇒ `identityMismatch` | **[spike]** |
-| T-2 | Spoofing | A bare PID is reused, or a socket is passed to another process after `connect` | Uid check (Unix). An exe check alone does **not** stop a same-user process from forking and passing the fd. Hardening: verify on every request? pidfd? Process-start-time binding? Signed binaries? | **[open] Q1** |
-| T-3 | Spoofing | Endpoint squatting: a fake broker answers first | Windows: `FIRST_PIPE_INSTANCE` (squatter ⇒ real broker fails loudly), and the client should check the server's image path (`GetNamedPipeServerProcessId`). Unix: 0700 dir owned by the user, lock file, and the client checks the server uid | uid/dir/lock **[spike]**; Windows client-side server-exe check **[design]** |
+| T-2 | Spoofing | A bare PID is reused, or a socket is passed to another process after `connect` | Same-user check on both sides: uid (Unix), token SID of the peer process (Windows). An exe check alone does **not** stop a same-user process from forking and passing the fd. Hardening: verify on every request? pidfd? Process-start-time binding? Signed binaries? | **[open] Q1** |
+| T-3 | Spoofing | Endpoint squatting: a fake broker answers first | The Windows pipe namespace is shared by all users, so the name protects nothing. Windows: `FIRST_PIPE_INSTANCE` (squatter ⇒ real broker refuses to start), the client refuses a broker whose process does not run as the current user (`GetNamedPipeServerProcessId` → token SID), and the pipe DACL admits only the current user. Unix: 0700 dir owned by the user, lock file, and the client checks the server uid. A squatter can still deny service | same-user checks, DACL, dir/lock **[spike]**; server-exe check **[design]**; squatting DoS **[residual]** |
 | T-4 | Information disclosure | Cross-scope result via cache (`CacheHit`) | Scope is part of the key type and derived only by the broker | **[spike]** test `app_scope_is_never_shared…` |
 | T-5 | Information disclosure | Cross-scope result via coalescing (`Coalesced`) | Same key rule; concurrent alpha/beta with equal params ⇒ two executions, 0 coalesced | **[spike]** |
 | T-6 | Tampering / elevation | A client sends `scope`, `isPublic`, `appId` or extra fields inside a call | `deny_unknown_fields` on every message and every params type; the scope is never read from input | **[spike]** (unit + cross-process test) |
 | T-7 | Information disclosure | Event leak: a notice reveals another app's activity or data | Notices carry no params/values, go only to the same scope and only with the op grant; no broadcast | **[spike]** test `notices_reach_only…` |
 | T-8 | Tampering | Stale result after invalidation, cancellation or restart | Core V1–V4 (generations, no repopulation); a cancelled call's reply is dropped client-side; results never cross `instanceId` | **[spike]** (cancel, restart tests) + Core tests #12/#14 |
 | T-9 | Denial of service | Cache-busting: one app invalidates Public keys repeatedly | `invalidate:` is a separate grant; Public invalidation should be admin-only | grant **[spike]**; who holds it **[open] Q4** |
-| T-10 | Denial of service | Floods: huge frames, many calls, slow-loris Hello | 1 MiB frame cap checked before allocation; `maxInFlight`; Hello timeout; deadline cap; strict param bounds | **[spike]**; per-app quotas and memory caps **[design]** |
+| T-10 | Denial of service | Floods: huge frames, many calls, slow-loris Hello, connections that fail during accept | 1 MiB frame cap checked before allocation; `maxInFlight`; Hello timeout; deadline cap; strict param bounds; a failed accept is logged and skipped, never fatal (test `a_failed_accept_does_not_stop_the_broker`) | **[spike]**; connection count limit, per-app quotas and memory caps **[design]** |
 | T-11 | Tampering | Poisoning: a client supplies a "result" for others | Clients never write results; only broker-side registered code computes them | **[spike]** by construction |
 | T-12 | Elevation | The broker runs as admin/SYSTEM, or is started from `PATH` | Unprivileged, same user; launched from a fixed install path | **[design]** |
 | T-13 | Information disclosure | Stats/metadata side channel (A5) | `stats` is a grant; per-op counters are global, so they are admin-only | **[spike]**; final policy **[open] Q4** |
@@ -67,7 +67,7 @@ The broker cannot defend against **malicious code running as the same OS user**.
 
 1. Data allowed into the shared broker must be **acceptable to disclose to any process of the same user** (Public), or at most to "the same application" against honest-but-buggy peers (App). App scope is a correctness boundary between cooperating apps, not a defence against hostile same-user code.
 2. User-private, account, session and credential data stays in each application's own process (O1). It never goes through the broker.
-3. Cross-*user* isolation is the real security boundary, and it is OS-enforced (pipe/socket ACL, uid check, no remote clients).
+3. Cross-*user* isolation is the real security boundary, and it is OS-enforced (pipe/socket ACL, uid/SID check on both sides, no remote clients). Until 2026-10-26 the Windows spike relied on the default pipe DACL (which also grants Everyone read access) and checked neither side's user; see [07](07-verification-report.md) §6.
 
 These statements are the core of Q3; Group 1 should accept or reject them explicitly.
 
@@ -81,7 +81,8 @@ Every item must be an automated test with real separate processes unless noted. 
 - ✓ Errors not cached across processes; cancellation delivers nothing and caches nothing; the initiator's cancel does not strand another app.
 - ✓ Notices: no data, scope-filtered.
 - ✓ Broker crash ⇒ new instance, no stale state; single instance per endpoint.
-- ☐ Cross-user connection refused (needs a second OS account; manual on Windows).
-- ☐ Fake-broker squatting detected by the client (Windows server-exe check).
+- ✓ A connection that fails during accept does not stop the broker.
+- ◐ Cross-user connection refused: DACL plus server-side SID/uid check are in place; the end-to-end refusal needs a second OS account (manual on Windows).
+- ◐ Fake-broker squatting: the client refuses a broker of another user (Windows SID, Unix uid). Not testable without a second account; the SID helper is unit-tested against PID 4. Server-exe check still open.
 - ☐ Fork/fd-passing impersonation documented as residual, or blocked once Q1 is decided.
 - ☐ Fuzzing of the frame decoder and params (cargo-fuzz, outside CI).

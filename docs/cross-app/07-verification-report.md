@@ -48,3 +48,17 @@ Error caching is guarded by Core's own tests (#12/#14), plus `errors_are_never_c
 - Cross-user refusal (needs a second OS account), fake-broker squatting on Windows, fork/fd-passing impersonation.
 - Any timing, CPU or memory property. `--op-delay-ms` only orders events in tests.
 - macOS (identity is not implemented there).
+
+## 6. Independent review, 2026-10-26 (stacked follow-up on `491486b`)
+
+Reviewed from the code, not from §1–§5. Findings and what changed:
+
+| # | Finding at `491486b` | Severity | Change |
+|---|---|---|---|
+| R1 | `Broker::serve` returned on any `accept` error, so one connection that failed while being accepted (EMFILE on Linux; a client gone before `ConnectNamedPipe` on Windows) stopped the broker for every client | high (availability) | The error is logged and skipped after a 50 ms back-off. On Windows a fresh pipe instance is created even when `connect` fails. Red-then-green test `a_failed_accept_does_not_stop_the_broker` (Linux: broker under `prlimit --nofile=48`; Windows: 300 connect-and-drop) |
+| R2 | Windows client did not check who runs the broker (`let _ = server`). The pipe namespace is shared by all users, so another user could create the name first and receive calls / return fake results | high (spoofing, T-3) | Client refuses a broker whose process token SID differs from its own |
+| R3 | Windows broker did not check the client's user. Cross-user refusal relied on the implicit default pipe DACL (LocalSystem/Administrators/owner full, **Everyone and Anonymous read**) | medium | Explicit DACL `D:P(A;;GA;;;<current SID>)` on every instance; `identity::verify` requires same SID on Windows, mirroring the Unix uid check |
+| R4 | Default endpoint name used `%USERNAME%` (caller-controlled, not unique across domains) | low | Uses the user SID |
+| R5 | No limit on the number of connections; a silent client holds a connection until the Hello timeout and a partially sent frame (≤1 MiB) has no read timeout after Hello | low (same-user DoS) | Not changed; recorded under T-10 for P2 |
+
+Still provisional and **not** a production identity: `pid → executable → manifest` (Q1). A same-user process can still pass a connected handle to another process (T-2), and the manifest is only as strong as its file ACL (T-14).
