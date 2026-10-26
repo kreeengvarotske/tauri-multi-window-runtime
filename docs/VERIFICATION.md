@@ -16,10 +16,10 @@ Linux entries: container with rustc 1.97.0 and Node 22.
 | Category | Meaning | PRs |
 |---|---|---|
 | **A. Integrated and verified** | merged into `main`, tests pass at the `main` commit | #3, #4, #5 (`main` @ `4bf7da3`) |
-| **B. Complete, verified natively and in CI, waiting for review or merge** | exact head has green CI and a native run | #8, #12, #14, #16, #24, #28, #31, #29 (research only) |
-| **C. Verified in CI only** | exact head has green CI, no native run at that head | #7, #10, #11, #17, #20, #23, #25 |
+| **B. Complete, verified natively and in CI, waiting for review or merge** | exact head has green CI and a native run | #8, #12, #14, #16, #24, #28, #31, #29 (research only); #34 (R1, native evidence reported in its PR) |
+| **C. Verified in CI only** | exact head has green CI, no native run at that head | #7, #10, #11, #17, #20, #23, #25, #36 (A/B scenario, smoke pending) |
 | **C′. CI green, native run fails** | exact head has green CI, the native run found a defect fixed in a follow-up | #27 (fixed in #29) |
-| **D. No verification at the exact head** | no CI run and no native run at the head | #2, #9, #18; documentation-only PRs #1, #26, #30, #32, #33 (no checks apply) |
+| **D. No verification at the exact head** | no CI run and no native run at the head | #2, #9, #18, #37 (`9e8c4eb`, no workflow result recorded); documentation-only PRs #1, #26, #30, #32, #33 (no build checks apply; #33 protocol is being revised) |
 
 #29 and #27 are research under `experiments/` and are not part of the product
 whatever their category (see `docs/ROADMAP.md`, Phase 5).
@@ -45,9 +45,17 @@ whatever their category (see `docs/ROADMAP.md`, Phase 5).
 | #16 | `ea8014b` | CI 40203656477 green | native report published at this head (2026-10-25) | superseded as evidence |
 | #20 | `9c40dd5` | CI 40218090430 and Windows Release 40218090495 green | none | |
 | #23 | `3f70b7d` | CI 40219219157 and Windows Release 40219219142 green | none | |
-| #25 | `ed756a8` | CI 40224027381 and Windows Release 40224027347 green | none | its pilot must not run with the old parameters (RAM is now primary) |
+| #25 | `ed756a8` | CI 40224027381 and Windows Release 40224027347 green | none | its pilot must not run with old parameters; #33 revision 2 is also being revised for co-primary RAM and CPU |
 | #27 | `491486b` | CI 40231896110 and spike workflow 40231896114 green (Linux) | 2026-10-26: fmt and clippy pass; tests fail 3/3 (see §3) | |
 | #29 | `4e6d19b` | CI 40367216064 and spike workflow 40367215939 green, including hosted `windows-latest` | 2026-10-26: fmt and clippy pass; 9/9 unit and 12/12 cross-process tests in 9/9 runs (see §3) | |
+| #32 | `bfe8399` | documentation-only; no checks apply | — | API shape and decisions recorded; open for review |
+| #33 | `e79aca1` | documentation-only; no checks apply | — | Revision 2 is not current: it assumes RAM-primary and CPU guardrails; Group 1 has corrected to co-primary RAM + CPU. Recalculate statistics and parameters before any run |
+| #34 | `d8106fa` | CI 40390472644 green | Native Windows evidence reported by the group in the PR | R1: cache budget and overflow-safe eviction; open, stacked on #14 |
+| #35 | `b65177d` | CI 40414428677 in progress | Native Windows run was reported at earlier head `4d2b5ce`; no native result at `b65177d` recorded | R2 adds `ResponseBudget` and full view-call shutdown tracking; this head supersedes review follow-up #38 (closed, not merged) |
+| #36 | `d0b2893` | CI 40395314459, catalog benchmark 40395314302 and symmetric benchmark 40395314370 green | Native Win10 smoke pending; no measurement run | Scenario M A/B only; pilot is blocked on arm C, revised #33 protocol and native smoke |
+| #37 | `9e8c4eb` | no exact-head workflow result recorded | no native run recorded at this head | R3 adapter; based on #35 at `b65177d`; includes ResponseBudget integration, but operation-error sanitization is in #39 |
+| #38 | `353bba5` | not applicable | Windows tests passed at its base-era change; PR closed without merge | Superseded by the group's #35 `b65177d` implementation of full view lifecycle tracking plus ResponseBudget |
+| #39 | `272c408` | CI 40415000619 and Runtime adapter workflow 40415000620 in progress | Local Windows: adapter tests 13/13 and clippy pass; demo IPC test process failed to start (`STATUS_ENTRYPOINT_NOT_FOUND`) | Sanitizes operation error details; exact base #37 `9e8c4eb` |
 
 ## 3. Native results for #28 and #29
 
@@ -120,5 +128,6 @@ Not verified, needs a special environment:
 - #2, #9 and #18 at their exact heads.
 - Native runs of #20, #23 and #25 at their exact heads.
 - Closing the secondary window while a series is running.
-- Any memory measurement under the RAM-primary plan (`docs/ROADMAP.md`).
+- Any pilot/confirmatory memory or CPU measurement under the co-primary plan; #33 revision 2 is superseded and must be recalculated before any run.
+- Native Windows smoke for #36 and exact-head native verification for #35/#37/#39.
 - Windows 11.

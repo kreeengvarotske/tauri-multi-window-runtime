@@ -37,11 +37,12 @@ windows.
 
 ## 2. Metrics
 
-**RAM is the primary outcome.** CPU time, latency, throughput and error counts
-are diagnostics and guardrails: a change may not make them materially worse,
-but they are not equal savings targets. (This supersedes the 2026-10-26
-morning record "RAM and CPU are equal confirmatory metrics" in
-`docs/cross-app/01`, `05` and `06` on #29.)
+**RAM and CPU are co-primary outcomes.** The framework must demonstrate its
+memory effect and its CPU cost/benefit as equally important results. A positive
+result on one cannot hide a materially negative result on the other. Latency,
+throughput and errors remain guardrails and diagnostics. The current #33
+revision 2 was written for a RAM-primary design and is being revised before
+any pilot; no measurement may use its old statistical parameters.
 
 The headline number is the **total memory of the whole application**: the
 Tauri host process plus every WebView2 process it owns (browser, GPU, utility,
@@ -49,10 +50,11 @@ one renderer per window), and in the broker experiment the broker process.
 
 | Measure | What it shows | How it is used |
 |---|---|---|
-| **Private Bytes** (Windows `PrivatePageCount` / commit charge) | Memory committed for one process alone. Summing it over processes does not double-count shared pages | Primary measure of what the application costs |
+| **Private Bytes** (Windows `PrivatePageCount` / commit charge) | Memory committed for one process alone. Summing it over processes does not double-count shared pages | Co-primary measure of what the application costs |
 | **Working Set** | Physical pages currently resident for a process, **including shared pages** (DLLs, shared sections). Summing it over processes counts shared pages once per process | Reported per process for diagnosis. A sum is labelled as an upper bound and never used for a saving claim |
 | Rust heap (allocator counters, optional) | Bytes the Rust process holds for the cache or working set | Explains where a difference comes from; not a substitute for OS counters |
-| CPU time, p50/p95 latency, requests/s, errors | Cost of the work | Guardrails and diagnostics |
+| CPU time | Cost of the work | Co-primary outcome, measured for the same workload and compared under the revised protocol |
+| p50/p95 latency, requests/s, errors | Runtime responsiveness and reliability | Guardrails and diagnostics |
 
 Runtime counters (`executions`, `coalesced`, `cacheHits`) prove that work was
 deduplicated. They are not evidence of a memory saving.
@@ -100,9 +102,9 @@ process was about 8–9 MB Private of 280–315 MB total, and the rest was WebVi
 
 | ID | Workstream | Contents | Existing PRs |
 |---|---|---|---|
-| A | In-process runtime (Core) | `runtime-core`: cache policies (TTL, NoStore), invalidation, clear, coalescing, cancellation, counters; then the stable Rust API | merged #3, #4, #5; open #8, #12, #14 |
-| B | Tauri integration and multiple windows | `runtime-ipc`, `src-tauri` commands and capabilities, TS SDK, Runtime Lab, window events | #2, #7, #28 |
-| C | Memory measurement | process monitor, symmetric harness, statistical protocol, realistic workload | #9, #10, #11, #16, #17, #18, #20, #23, #24, #25 |
+| A | In-process runtime (Core) | `runtime-core`: cache policies (TTL, NoStore), invalidation, clear, coalescing, cancellation, counters; shared Rust runtime, explicit cache/response budgets and typed views | merged #3, #4, #5; open #8, #12, #14, #34, #35 |
+| B | Tauri integration and multiple windows | `runtime-ipc`, `src-tauri` commands and capabilities, TS SDK, Runtime Lab, window events, separate Tauri adapter and sample | #2, #7, #28, #31, #37, #39 |
+| C | Memory and CPU measurement | process monitor, symmetric harness, revised co-primary statistical protocol, realistic workload | #9, #10, #11, #16, #17, #18, #20, #23, #24, #25, #33, #36 |
 | D | Cross-application architecture (conditional) | ADR, threat model, broker spike | #27, #29 (Issue #15 for the in-app access model) |
 | E | Packaging and release | sample app, crate publishing, versioning, CI matrix for supported platforms | none yet |
 | T | Testing (cross-cutting) | regression test for every defect, shown red on the original code; fmt, clippy `-D warnings`, workspace tests at exact SHAs; native Windows runs recorded separately from hosted CI | `docs/VERIFICATION.md` |
@@ -116,13 +118,13 @@ started**, **conditional**.
 
 | Phase | Workstream | Status | Evidence | Next step | Acceptance criteria |
 |---|---|---|---|---|---|
-| 0. Plan and product boundary | all | review | this file; `docs/VERIFICATION.md`; mapping of earlier decisions (§9) | Review and agree this roadmap | Roadmap agreed; items in §8 and §9 accepted |
-| 1. Core correctness | A | review (complete, waiting for merge) | #8 `1434e31`, #12 `c728538` (approved), #14 `772155d`: CI green and native Windows 10 on 2026-10-26 (`docs/VERIFICATION.md`); no new correctness defect found | Merge in order #8 → #12 → #14 (owner) | Every defect has a regression test shown red on the original code; fmt, clippy `-D warnings`, workspace tests green at exact SHAs; native Windows run recorded with OS build |
-| 2. Lab and window contract | B | review | #2 `37d82d5`, #7 `1bbbc4a`, #28 `85f2937` (CI green; native incl. manual two-window run); #31 `29adfed` fixes repeated and malformed window events (CI green, native two-window and forged-event run) | Closed-secondary scenario; C-2 decision; #2 has no CI at its head | Window events treated as untrusted and validated; admin commands main-only, enforced in Rust; stats meaning with in-flight requests documented; closed-secondary behaviour tested; manual two-window scenario recorded |
-| 3. Stable Rust API | A, B | in progress | #32 shape approved in principle, decisions recorded (§10 there); R1 #34 (cache budget, overflow-safe), R2 #35 (shared-runtime: scopes, runtime-wide cache budget, slots and queue, deadlines, shutdown, views with item, byte and concurrency limits, window lifecycle): CI and native Windows 10 recorded per head in the PRs | Review #34/#35; then R3 Tauri adapter, R4 optional stats DTO, R5 demo migration | Contract agreed before code; tests per PR; WebView never sees runtime internals; current IPC unchanged until a migration is agreed; the R3/R5 criteria below met |
-| 4. Memory benchmark | C | protocol revision 2 in review | #33 (three arms A per-window / B hand-written shared / C framework; Q1–Q6 decided, thresholds fixed in advance); harness #20 → #23, monitor #18 → #24 (native: 0.2 s median 0.214 s) | Scenario Draft PR on #23 with arms A and B; arm C merged in from #35 only after its review and green exact-head CI; pilot only after the protocol review and a checked scenario build; **do not run the #25 pilot with its old parameters** | Pilot protocol reviewed before any run; confirmatory only after the pilot report and a frozen protocol; RAM primary, CPU/latency/errors guardrails; all processes summed with Private Bytes; configs, hashes, raw data and failed runs kept |
-| 5. Cross-app broker | D | conditional research | #27 `491486b`, #29 `4e6d19b` (CI green incl. hosted Windows; native Windows 10: 12/12 cross-process tests in 6/6 runs; two-user check not run) | None until Phase 4 reports. Then a written decision whether a cross-app stage is needed, with the measurement and the open identity, manifest, rights, timeout and same-user questions | Stays in `experiments/`; production work only after that decision |
-| 6. Release path | E | not started | none | Starts after Phases 1–4 pass | Sample app and guide; versioning and error/disabled-runtime behaviour defined; crate publishable; CI for supported platforms; framework used from a fresh Tauri app without Runtime Lab |
+| 0. Plan and product boundary | all | review | this file; `docs/VERIFICATION.md`; mapping of earlier decisions (§9) | Review this refreshed snapshot and settle the co-primary benchmark protocol in #33 | In-process, one-application framework remains the product; memory and CPU are co-primary; decision trail and acceptance criteria are current |
+| 1. Core correctness | A | review (complete, waiting for merge) | #8 `1434e31`, #12 `c728538` (approved), #14 `772155d`: CI green and native Windows 10 on 2026-10-26 (`docs/VERIFICATION.md`); no new correctness defect found | Merge in order #8 → #12 → #14 (repository owner) | Every defect has a regression test shown red on the original code; fmt, clippy `-D warnings`, workspace tests green at exact SHAs; native Windows run recorded with OS build |
+| 2. Lab and window contract | B | review | #2 `37d82d5`, #7 `1bbbc4a`, #28 `85f2937`; #31 `29adfed` validates repeated and malformed events. Hosted CI and reported native Windows checks are recorded in `docs/VERIFICATION.md` | Review/merge in dependency order; decide whether closed-secondary scenario is still required; #2 has no CI at its head | Window events treated as untrusted and validated; admin commands main-only, enforced in Rust; stats meaning with in-flight requests documented; required close/reopen behaviour tested; two-window scenario recorded |
+| 3. Stable Rust API and Tauri integration | A, B | in progress | #32 records the API shape; #34 R1 adds overflow-safe cache budgets; #35 R2 at `b65177d` adds shared runtime, scopes, runtime-wide cache budgets, operation/projection limits, `ResponseBudget`, view lifecycle shutdown tracking; #37 R3 at `9e8c4eb` adds the adapter and demo. #39 sanitizes operation errors, pending review/CI | Review/merge #34 → #35 → #37 and its security follow-up #39; then implement R4 stats DTO only if needed and R5 gradual Runtime Lab migration | One runtime per app; shared Rust-owned state; each view charges response budget before building; projection slots cover serialization and abort waiting calls; WebView gets only bounded responses and sanitized errors; existing IPC remains unchanged unless a separate contract is approved |
+| 4. Memory and CPU benchmark | C | in progress; protocol revision required | #33 revision 2 has A/B/C and pilot/confirmatory separation but assumes RAM-primary; Group 1 corrected this to RAM and CPU co-primary. #36 A/B scenario is Draft on #23 with hosted CI green; native smoke report pending. Monitor #24 and harness #23 are available | Update #33 family, success rules, N, thresholds, and duration for co-primary outcomes; complete native smoke #36; add C only after R2 review and exact-head checks; no pilot before protocol and scenario reviews | Matched A/B/C runs with same UI/workload; C−A product comparison and C−B framework cost kept separate; co-primary RAM and CPU criteria fixed before confirmatory runs; latency/throughput/errors guardrails; raw/failed runs and hashes retained |
+| 5. Cross-app broker | D | conditional research | #27 `491486b`, #29 `4e6d19b` are experiments; CI and Windows 10 results are recorded; two-user check not run | No product work until Phase 4 gives evidence and Group 1 makes a written decision; then close identity, manifest, rights, timeout and same-user questions | Code stays in `experiments/`; production work only if measured cross-app sharing clears break-even and security/identity review |
+| 6. Release path | E | not started | none | Start after Phases 1–4 are accepted | Sample app and guide; versioning and error/disabled-runtime behaviour defined; crates publishable; supported-platform CI; framework usable from a fresh Tauri app without Runtime Lab |
 
 ### Phase 1 checklist (Core)
 
@@ -144,19 +146,22 @@ started**, **conditional**.
 
 ### Phase 3: mandatory criteria for the adapter (R3) and demo migration (R5)
 
-Known limits of R2 that the adapter and migration must close or keep
-visible; none of them may be described as solved by `max_items` alone,
-which bounds a count, not bytes.
+R2 and R3 limits that the adapter and migration must close or keep visible;
+none of them may be described as solved by `max_items` alone, which bounds a
+count, not bytes.
 
-- **IPC bytes.** Each command bounds the raw request payload
-  (`max_request_bytes`) before deserializing and the serialized response
-  (`max_response_bytes`) before sending it to the WebView. Test: an
-  oversized request and an oversized serialized response are refused.
-- **Projection concurrency.** View responses are built and serialized
-  inside `ViewHandle::get_with`, so `max_concurrent_projections` bounds
-  transient response memory. Test: several windows request large
-  responses at once; peak concurrent projections and host Private Bytes
-  stay within the configured bound.
+- **IPC bytes.** The adapter checks raw body length before deserialization
+  where Tauri supplies raw bytes; a JSON body may already have been parsed by
+  Tauri before the command. The adapter does not cap transport memory before
+  the command runs. Serialized responses are bounded before sending. Test:
+  oversized raw and JSON requests are rejected before typed deserialization;
+  oversized serialized responses are refused.
+- **Response construction and projection concurrency.** A view must charge
+  each allocation to `ResponseBudget` before building/copying it. The
+  post-construction byte check is a backstop, not a hard peak-memory cap for
+  noncompliant views. The projection slot covers project + finish/serialization;
+  waiters return `SHUTTING_DOWN` after abort. Test both budget-respecting and
+  budget-ignoring views, slot concurrency, and shutdown lifecycle.
 - **Cheap views.** Every exposed view does work proportional to its
   response; whole-output work lives in the cached operation. Reviewed per
   view.
@@ -168,48 +173,49 @@ which bounds a count, not bytes.
   Weights are estimates; the #33 benchmark checks them against measured
   Private Bytes.
 - **Scope.** A frontend argument cannot change scope or caller (test).
-- **Contract.** Existing command names, payloads, capabilities and error
-  envelope unchanged (contract tests); any DTO change is additive and
+- **Security and contract.** Caller and scope come only from trusted Rust/Tauri
+  context; capabilities authorize commands. Operation error details are
+  sanitized to a generic `OPERATION_FAILED` message before IPC. Existing
+  demo IPC/SDK contracts remain unchanged; any DTO change is additive and
   reviewed separately (R4).
 
 ### Phase 4 scenario requirements
 
-- One reproducible scenario replacing the separate paths in #9–#25. Same windows, data, load length, warm-up, build settings and a control run in both arms.
+- One reproducible scenario replacing the separate paths in #9–#25. Same windows, data, load length, warm-up, build settings and a control run in all three arms.
 - Arms (decided on #33): A, a per-window baseline where each window loads and keeps its own data in JS; B, a hand-written shared Rust service with the same bounded views; C, the framework runtime. Same UI, workload and runner (the #20 approach). C vs A answers the product question; C vs B estimates the framework's own cost; neither is used for the other's conclusion.
 - A realistic operation with an explicitly measured size of the reused Rust-owned cache or working set, at several sizes including a zero-size control, so the break-even model in §3 can be fitted. A small synthetic operation alone is not enough.
-- Statistical plan (recomputed from #25 with RAM primary): hypothesis, unit of analysis, number of pairs, handling of missing runs, quality filters, comparisons, duration. Pilot and confirmatory runs are separate.
+- Statistical plan: revise #33 because revision 2 assumes RAM-primary/CPU-guardrail, while the current Group 1 decision is RAM and CPU co-primary. Recompute hypotheses, multiplicity, success rules, N, thresholds and duration. Keep latency, throughput and errors as guardrails. Pilot and confirmatory runs stay separate; old #25 parameters must not run.
 
 ## 6. Dependencies
 
 ```
-main ─ #2 ─ #7 ─ #8 ─ #12 ─ #14 ─┬─ #28                       (A, B)
-                                 ├─ #20 ─ #23 ─ #25           (C)
-                                 └─ #27 ─ #29                 (D)
-       #2 ─ #9 ─┬─ #18 ─ #24                                  (C, monitor)
-                └─ #10 ─ #17                                  (C, baseline)
-       #8 ─ #11 ─ #16                                         (C, old paired Lab)
-main ─ #26 (agent handoff docs)
+main ─ #8 ─ #12 ─ #14 ─ #34 ─ #35 ─ #37 ─ #39       (runtime → adapter/security)
+main ─ #2 ─ #7 ─ #28 ─ #31                           (Tauri Lab/window contract)
+main ─ #20 ─ #23 ─ #36                              (symmetric scenario A/B → C)
+main ─ #33 (co-primary protocol; gates every measurement run)
+main ─ #27 ─ #29                                     (conditional cross-app research)
 ```
 
-Proposed merge order (the repository owner merges; nothing here merges or
-retargets a PR): #2 → #7 → #8 → #12 → #14 → #28; then #9 → #18 → #24 and
-#9 → #10 → #17; #20 → #23 → #25 after the Phase 4 protocol decision. #27 → #29
-stay Draft as research. #11 → #16 are superseded by the #20 path for
-measurement (see §8) and are kept for history.
+Proposed dependency order (the repository owner reviews and merges; this
+roadmap does not merge or retarget PRs): core chain #8 → #12 → #14 → #34 →
+#35 → #37 (R3 error-sanitization follow-up #39); Tauri Lab chain #28 → #31;
+benchmark chain #20 → #23 → #36, with the revised #33 protocol approved before
+any pilot. The C arm depends on the reviewed runtime API from #35 and the
+adapter contract from #37. #27 → #29 remain conditional research. #11 → #16
+are superseded by the symmetric harness path and remain history.
 
 ## 7. Current blockers
 
 | Blocker | Blocks | Owner |
 |---|---|---|
-| No review yet on #8 and #14; #12 approved but must follow #8 | Phase 1 merge | Repository owner |
-| #2 has no CI run at its head (CI is added in #7) | Phase 2 merge | Repository owner |
-| Statistical protocol (#25) not approved; must be recomputed with RAM primary | Phase 4 pilot and confirmatory runs | Group 1 |
-| No realistic workload with a measurable Rust-owned data set | Phase 4 | Group 2 proposal, Group 1 agreement |
-| Choice of the plain-arm baseline (what a plain window keeps) | Phase 4 | Group 1 |
-| Group 1 decisions D1–D10, S-1…S-7, C-1…C-4 (#13 comment 6414461497) still open | Phases 3–5 | Group 1 |
-| Client identity for the broker (D2/D3, Q1) | Phase 5 | Group 1 |
-| Two-user Windows check for #29 needs a second local account | Phase 5 | Maxim |
-| No Windows 11 machine; native evidence so far is Windows 10 Home 22H2 (19045) only | release gate for Windows 11 | Group 1 |
+| #8 → #12 → #14 dependency chain is still open; #12 is approved | Phase 1 integration | Repository owner review/merge |
+| #2 has no CI at its own head; #31's native Windows run and closed-secondary case need exact scope confirmation | Phase 2 integration | Repository owner |
+| #34/#35/#37 are open; #35's latest `b65177d` CI is still running; #37's latest `9e8c4eb` has no exact-head workflow result recorded | Phase 3 acceptance | Review and exact-head checks |
+| #39 security follow-up CI is running; local demo IPC test process failed to start with `STATUS_ENTRYPOINT_NOT_FOUND` | R3 acceptance | Review and hosted/native verification |
+| #33 revision 2 uses RAM-primary/CPU-guardrail, contrary to current co-primary decision; statistical family, N, thresholds and duration must be recalculated | Phase 4 pilot and confirmatory runs | Protocol authors; Group 1 review |
+| #36 A/B is hosted-CI green; native Win10 smoke data and exact retained-size/process-count checks are pending | Add arm C and pilot readiness | Scenario authors; native machine owner |
+| Cross-app client identity and two-user Windows checks for #29 remain open | Conditional Phase 5 only | Group 1; requires second local account for two-user check |
+| Windows 11 native evidence is unavailable; Windows 10 Home 22H2 (19045) is the only current native environment | Release gate for Windows 11 | Machine availability |
 
 ## 8. Removed from the current plan
 
@@ -219,8 +225,8 @@ measurement results stay as history.
 
 | Item | Where it came from | Reason |
 |---|---|---|
-| RAM and CPU as equal confirmatory metrics | 2026-10-26 assignment, `docs/cross-app/05` on #29 | Replaced by RAM primary, CPU guardrail |
-| CPU-profile primary hypotheses in the fixed-N protocol | #25 | CPU is a guardrail; the family is recomputed for RAM |
+| RAM-only primary with CPU as guardrail (and the preceding equal-metric draft) | #33 revision 2, pending Group 1 correction | Replaced by the current co-primary decision: RAM and CPU are equally important; #33 must recalculate its family and sample size before any run |
+| Old CPU-profile-specific hypotheses and fixed-N parameters | #25 | Recompute the statistical family for both co-primary outcomes; retain the old pilot only as history |
 | Paired Runtime Lab vs vanilla baseline comparison as evidence of Core cost | #10, #11, #16, #17, Issue #13 stage 4 | The two apps differ in UI and harness; the symmetric path (#20) replaces it |
 | Cross-app broker as the north star | #13 comment 6402306556 | The in-process runtime is the product; the broker is conditional |
 | Measuring savings from sharing WebView2/Chromium processes | early drafts | Not possible and not the product claim |
@@ -245,13 +251,13 @@ longer required for the product path; revisit only if Phase 5 is opened.
 | D7 | Broker absent → in-process fallback | Optional | Phase 5 |
 | D8 | Panic policy | **Replaced**: decide for the in-process runtime (abort vs unwind with isolation) | Phase 3 API, decision |
 | D9 | Broker protocol and versioning | Optional; in-process protocol version (C-4) is kept separately | Phase 5 |
-| D10 | Criteria to keep the broker | **Replaced**: RAM-primary break-even, CPU and latency as guardrails | §2, Phase 5 |
-| S-1 | Fixed N = 20, Holm over 8 (4 CPU + 4 RAM) | **Replaced**: RAM-primary family on the realistic scenario | Phase 4 protocol |
+| D10 | Criteria to keep the broker | **Replaced**: measured RAM and CPU co-primary evidence plus latency/error guardrails; broker remains conditional | §2, Phase 5 |
+| S-1 | Fixed N = 20, Holm over 8 (4 CPU + 4 RAM) | **Replaced**: recalculated co-primary family for RAM and CPU on the realistic scenario | Phase 4 protocol |
 | S-2 | 0.2 s RAM sampling | **Replaced**: 1 s sampling of a retained data set (plateau) | Phase 4 protocol |
 | S-3 | Minimum valid pairs | **Kept** as a rule, recomputed for the new family | Phase 4 protocol |
-| S-4 | Memory columns in the CPU profile | Optional (no CPU profile as a primary) | — |
+| S-4 | CPU columns/profile from the old CPU-primary protocol | **Replaced**: CPU remains co-primary; use a workload-matched CPU measure defined in the revised #33 protocol | Phase 4 protocol |
 | S-5 | Equivalence rule for S1/S3 | **Kept** as the fixed-overhead check (D0 cell) | Phase 4 protocol |
-| S-6 | Time budget (2.6 h + 10.2 h) | **Replaced** by the new pilot and confirmatory estimate | Phase 4 protocol |
+| S-6 | Time budget (2.6 h + 10.2 h) | **Replaced** by the new pilot and confirmatory estimate after co-primary recalculation | Phase 4 protocol |
 | S-7 | Run the #25 pilot before freezing | **Dropped**: the #25 pilot must not run with its old parameters | — |
 | C-1 | Counters counted on entry vs completion | **Kept**, extended: add `cancelled` and other outcomes so every request ends in one counter | Phase 3 API, decision |
 | C-2 | Window events unauthenticated; remove `allow-emit*` from secondary | **Kept** | Phase 2; #31 validates payloads meanwhile |
