@@ -1,0 +1,70 @@
+name: Runtime adapter
+
+on:
+  pull_request:
+    paths:
+      - "crates/**"
+      - "examples/runtime-adapter-demo/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/runtime-adapter.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  # Tests and the demo's --self-test on a real window system. Hosted
+  # runners are not a native Windows 10/11 machine; native runs are
+  # reported separately.
+  adapter:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Tauri system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libayatana-appindicator3-dev xvfb
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy -p shared-runtime -p shared-runtime-tauri -p runtime-adapter-demo --locked --all-targets -- -D warnings
+      - run: cargo test -p shared-runtime -p shared-runtime-tauri -p runtime-adapter-demo --locked
+      - name: Core crates have no Tauri dependency
+        shell: bash
+        run: |
+          for crate in runtime-core shared-runtime; do
+            if cargo tree -p "$crate" -e normal --locked | grep -i tauri; then
+              echo "$crate depends on Tauri"; exit 1
+            fi
+          done
+      - run: cargo build -p runtime-adapter-demo --locked
+      - name: Self-test on Linux (Xvfb)
+        if: runner.os == 'Linux'
+        run: |
+          timeout 120 xvfb-run -a target/debug/runtime-adapter-demo --self-test self-test.json
+          cat self-test.json
+          jq -e '.passed == true' self-test.json
+      - name: Self-test on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $report = Join-Path (Get-Location) 'self-test.json'
+          $app = Start-Process -FilePath 'target\debug\runtime-adapter-demo.exe' -ArgumentList @('--self-test', "`"$report`"") -PassThru
+          $null = $app.Handle
+          if (-not $app.WaitForExit(120000)) { Stop-Process -Id $app.Id -Force; throw 'self-test did not finish within 120 s' }
+          if (-not (Test-Path $report)) { throw "no report (exit code $($app.ExitCode))" }
+          Get-Content $report -Raw | Write-Host
+          if (-not (Get-Content $report -Raw | ConvertFrom-Json).passed) { throw 'self-test did not pass' }
+      - name: Upload the self-test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-adapter-self-test-${{ matrix.os }}-${{ github.sha }}
+          path: self-test.json
+          if-no-files-found: warn

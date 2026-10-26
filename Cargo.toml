@@ -4,6 +4,8 @@ members = [
     "crates/runtime-core",
     "crates/runtime-ipc",
     "crates/shared-runtime",
+    "crates/shared-runtime-tauri",
+    "examples/runtime-adapter-demo",
     "src-tauri",
 ]
 

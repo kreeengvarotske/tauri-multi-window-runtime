@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-demo-catalog-page"
+description = "Enables the demo_catalog_page command without any pre-configured scope."
+commands.allow = ["demo_catalog_page"]
+
+[[permission]]
+identifier = "deny-demo-catalog-page"
+description = "Denies the demo_catalog_page command without any pre-configured scope."
+commands.deny = ["demo_catalog_page"]

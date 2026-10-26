@@ -2466,6 +2466,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtime-adapter-demo"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "shared-runtime",
+ "shared-runtime-tauri",
+ "tauri",
+ "tauri-build",
+ "tokio",
+]
+
+[[package]]
 name = "runtime-core"
 version = "0.1.0"
 dependencies = [
@@ -2773,6 +2786,17 @@ name = "shared-runtime"
 version = "0.1.0"
 dependencies = [
  "runtime-core",
+ "tokio",
+]
+
+[[package]]
+name = "shared-runtime-tauri"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "shared-runtime",
+ "tauri",
  "tokio",
 ]
 
