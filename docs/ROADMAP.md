@@ -119,8 +119,8 @@ started**, **conditional**.
 | 0. Plan and product boundary | all | review | this file; `docs/VERIFICATION.md`; mapping of earlier decisions (§9) | Review and agree this roadmap | Roadmap agreed; items in §8 and §9 accepted |
 | 1. Core correctness | A | review (complete, waiting for merge) | #8 `1434e31`, #12 `c728538` (approved), #14 `772155d`: CI green and native Windows 10 on 2026-10-26 (`docs/VERIFICATION.md`); no new correctness defect found | Merge in order #8 → #12 → #14 (owner) | Every defect has a regression test shown red on the original code; fmt, clippy `-D warnings`, workspace tests green at exact SHAs; native Windows run recorded with OS build |
 | 2. Lab and window contract | B | review | #2 `37d82d5`, #7 `1bbbc4a`, #28 `85f2937` (CI green; native incl. manual two-window run); #31 `29adfed` fixes repeated and malformed window events (CI green, native two-window and forged-event run) | Closed-secondary scenario; C-2 decision; #2 has no CI at its head | Window events treated as untrusted and validated; admin commands main-only, enforced in Rust; stats meaning with in-flight requests documented; closed-secondary behaviour tested; manual two-window scenario recorded |
-| 3. Stable Rust API | A, B | proposal | #32 (contract, examples, IPC compatibility); Issue #15 A1–A5 | Review of #32; then small PRs: runtime + registry, limits and deadlines, diagnostics, shutdown, Tauri adapter, demo migration | Contract agreed before code; tests per PR; WebView never sees runtime internals; current IPC unchanged until a migration is agreed |
-| 4. Memory benchmark | C | protocol draft | #33 (pilot protocol, realistic catalog scenario); harness #20 → #23, monitor #18 → #24 (native: 0.2 s median 0.214 s) | Review #33 and decide its Q1–Q4; implement scenario M; **do not run the #25 pilot with its old parameters** | Pilot protocol reviewed before any run; confirmatory only after the pilot report and a frozen protocol; RAM primary, CPU/latency/errors guardrails; all processes summed with Private Bytes; configs, hashes, raw data and failed runs kept |
+| 3. Stable Rust API | A, B | in progress | #32 shape approved in principle, decisions recorded (§10 there); R1 #34 (cache budget, overflow-safe), R2 #35 (shared-runtime: scopes, runtime-wide cache budget, slots and queue, deadlines, shutdown, views with item, byte and concurrency limits, window lifecycle): CI and native Windows 10 recorded per head in the PRs | Review #34/#35; then R3 Tauri adapter, R4 optional stats DTO, R5 demo migration | Contract agreed before code; tests per PR; WebView never sees runtime internals; current IPC unchanged until a migration is agreed; the R3/R5 criteria below met |
+| 4. Memory benchmark | C | protocol revision 2 in review | #33 (three arms A per-window / B hand-written shared / C framework; Q1–Q6 decided, thresholds fixed in advance); harness #20 → #23, monitor #18 → #24 (native: 0.2 s median 0.214 s) | Scenario Draft PR on #23 with arms A and B; arm C merged in from #35 only after its review and green exact-head CI; pilot only after the protocol review and a checked scenario build; **do not run the #25 pilot with its old parameters** | Pilot protocol reviewed before any run; confirmatory only after the pilot report and a frozen protocol; RAM primary, CPU/latency/errors guardrails; all processes summed with Private Bytes; configs, hashes, raw data and failed runs kept |
 | 5. Cross-app broker | D | conditional research | #27 `491486b`, #29 `4e6d19b` (CI green incl. hosted Windows; native Windows 10: 12/12 cross-process tests in 6/6 runs; two-user check not run) | None until Phase 4 reports. Then a written decision whether a cross-app stage is needed, with the measurement and the open identity, manifest, rights, timeout and same-user questions | Stays in `experiments/`; production work only after that decision |
 | 6. Release path | E | not started | none | Starts after Phases 1–4 pass | Sample app and guide; versioning and error/disabled-runtime behaviour defined; crate publishable; CI for supported platforms; framework used from a fresh Tauri app without Runtime Lab |
 
@@ -142,10 +142,40 @@ started**, **conditional**.
 - behaviour when the secondary window is closed;
 - a manual scenario with two real Tauri windows.
 
+### Phase 3: mandatory criteria for the adapter (R3) and demo migration (R5)
+
+Known limits of R2 that the adapter and migration must close or keep
+visible; none of them may be described as solved by `max_items` alone,
+which bounds a count, not bytes.
+
+- **IPC bytes.** Each command bounds the raw request payload
+  (`max_request_bytes`) before deserializing and the serialized response
+  (`max_response_bytes`) before sending it to the WebView. Test: an
+  oversized request and an oversized serialized response are refused.
+- **Projection concurrency.** View responses are built and serialized
+  inside `ViewHandle::get_with`, so `max_concurrent_projections` bounds
+  transient response memory. Test: several windows request large
+  responses at once; peak concurrent projections and host Private Bytes
+  stay within the configured bound.
+- **Cheap views.** Every exposed view does work proportional to its
+  response; whole-output work lives in the cached operation. Reviewed per
+  view.
+- **Window lifecycle.** `Runtime::forget_window` is called on window
+  destroy. Test: open, use and close a window; PerWindow entries and
+  weight return to the previous value; a reopened label starts empty.
+- **Total memory bound.** The application sets
+  `RuntimeConfig::cache_budget_bytes`; stats show Σ cache weight within it.
+  Weights are estimates; the #33 benchmark checks them against measured
+  Private Bytes.
+- **Scope.** A frontend argument cannot change scope or caller (test).
+- **Contract.** Existing command names, payloads, capabilities and error
+  envelope unchanged (contract tests); any DTO change is additive and
+  reviewed separately (R4).
+
 ### Phase 4 scenario requirements
 
 - One reproducible scenario replacing the separate paths in #9–#25. Same windows, data, load length, warm-up, build settings and a control run in both arms.
-- Arms: a plain Tauri application where each window loads and keeps its own data, and the same application with the framework holding the data once in Rust and windows requesting pages. Both arms share one frontend and one runner (the #20 approach).
+- Arms (decided on #33): A, a per-window baseline where each window loads and keeps its own data in JS; B, a hand-written shared Rust service with the same bounded views; C, the framework runtime. Same UI, workload and runner (the #20 approach). C vs A answers the product question; C vs B estimates the framework's own cost; neither is used for the other's conclusion.
 - A realistic operation with an explicitly measured size of the reused Rust-owned cache or working set, at several sizes including a zero-size control, so the break-even model in §3 can be fitted. A small synthetic operation alone is not enough.
 - Statistical plan (recomputed from #25 with RAM primary): hypothesis, unit of analysis, number of pairs, handling of missing runs, quality filters, comparisons, duration. Pilot and confirmatory runs are separate.
 
