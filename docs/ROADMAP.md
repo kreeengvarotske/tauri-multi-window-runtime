@@ -1,6 +1,7 @@
 # Roadmap
 
-Status as of 2026-10-26. This file is the single current plan. It replaces the
+Snapshot: 2026-10-26, about 23:00 UTC (live refs read at that time; see the
+change log in §11). This file is the single current plan. It replaces the
 stage lists scattered across Issue #13, Issue #15 and the PR descriptions for
 planning purposes; those remain as history and are not edited or deleted.
 
@@ -119,10 +120,22 @@ started**, **conditional**.
 | 0. Plan and product boundary | all | review | this file; `docs/VERIFICATION.md`; mapping of earlier decisions (§9) | Review and agree this roadmap | Roadmap agreed; items in §8 and §9 accepted |
 | 1. Core correctness | A | review (complete, waiting for merge) | #8 `1434e31`, #12 `c728538` (approved), #14 `772155d`: CI green and native Windows 10 on 2026-10-26 (`docs/VERIFICATION.md`); no new correctness defect found | Merge in order #8 → #12 → #14 (owner) | Every defect has a regression test shown red on the original code; fmt, clippy `-D warnings`, workspace tests green at exact SHAs; native Windows run recorded with OS build |
 | 2. Lab and window contract | B | review | #2 `37d82d5`, #7 `1bbbc4a`, #28 `85f2937` (CI green; native incl. manual two-window run); #31 `29adfed` fixes repeated and malformed window events (CI green, native two-window and forged-event run) | Closed-secondary scenario; C-2 decision; #2 has no CI at its head | Window events treated as untrusted and validated; admin commands main-only, enforced in Rust; stats meaning with in-flight requests documented; closed-secondary behaviour tested; manual two-window scenario recorded |
-| 3. Stable Rust API | A, B | in progress | #32 shape approved in principle, decisions recorded (§10 there); R1 #34 (cache budget, overflow-safe), R2 #35 (shared-runtime: scopes, runtime-wide cache budget, slots and queue, deadlines, shutdown, views with item, byte and concurrency limits, window lifecycle): CI and native Windows 10 recorded per head in the PRs | Review #34/#35; then R3 Tauri adapter, R4 optional stats DTO, R5 demo migration | Contract agreed before code; tests per PR; WebView never sees runtime internals; current IPC unchanged until a migration is agreed; the R3/R5 criteria below met |
-| 4. Memory benchmark | C | protocol revision 2 in review | #33 (three arms A per-window / B hand-written shared / C framework; Q1–Q6 decided, thresholds fixed in advance); harness #20 → #23, monitor #18 → #24 (native: 0.2 s median 0.214 s) | Scenario Draft PR on #23 with arms A and B; arm C merged in from #35 only after its review and green exact-head CI; pilot only after the protocol review and a checked scenario build; **do not run the #25 pilot with its old parameters** | Pilot protocol reviewed before any run; confirmatory only after the pilot report and a frozen protocol; RAM primary, CPU/latency/errors guardrails; all processes summed with Private Bytes; configs, hashes, raw data and failed runs kept |
+| 3. Stable Rust API | A, B | in progress | #32 `bfe8399` (shape and decisions recorded at `357e253`; `bfe8399` adds the exact view-limit and shutdown wording). R1 #34 `d8106fa`: cache budget, overflow-safe LRU; CI 40390472644 green; native Windows 10 pass (stress 0/200). R2 #35: at `4d2b5ce` (runtime-wide cache budget, view item/byte/projection limits, window lifecycle) CI 40391728968 green and native Windows 10 pass (stress 0/200); new head `b65177d` (view budget, shutdown during views) CI running, no native run; overlaps #38 `353bba5` (owner's fix of the same review), decision pending. R3 #37 `9e8c4eb` (adapter + demo): tests pass on Linux; the adapter workflow failed at `fd124c1` (see §7) | Owner decides #35 vs #38; then review #34/#35/#37; R4 only if an additive stats DTO is needed; R5 demo migration | Contract agreed before code; tests per PR; WebView never sees runtime internals; current IPC unchanged until a migration is agreed; the R3/R5 criteria below met |
+| 4. Memory benchmark | C | in progress (protocol Draft, scenario Draft; no measurements) | #33 `e79aca1`: three arms A per-window / B hand-written shared / C framework; Q1–Q6 decided (δ, ε, guardrails fixed in advance); protocol still Draft/review. Scenario M #36 `d0b2893` (arms A and B, runner, schedule, descriptive summarizer): CI 40395314459, 40395314302, 40395314370 green; native Windows 10 smoke requested, no result yet | Native smoke of #36 and its review; arm C only after the R2 review and green exact-head checks; pilot only after the protocol review and the native smoke; confirmatory only after the pilot report and a frozen protocol; **do not run the #25 pilot with its old parameters** | Pilot protocol reviewed before any run; confirmatory only after the pilot report and a frozen protocol; RAM primary, CPU/latency/errors guardrails; all processes summed with Private Bytes; configs, hashes, raw data and failed runs kept |
 | 5. Cross-app broker | D | conditional research | #27 `491486b`, #29 `4e6d19b` (CI green incl. hosted Windows; native Windows 10: 12/12 cross-process tests in 6/6 runs; two-user check not run) | None until Phase 4 reports. Then a written decision whether a cross-app stage is needed, with the measurement and the open identity, manifest, rights, timeout and same-user questions | Stays in `experiments/`; production work only after that decision |
 | 6. Release path | E | not started | none | Starts after Phases 1–4 pass | Sample app and guide; versioning and error/disabled-runtime behaviour defined; crate publishable; CI for supported platforms; framework used from a fresh Tauri app without Runtime Lab |
+
+### Status by category (snapshot 2026-10-26)
+
+No open PR is merged. Only `main` @ `4bf7da3` (#3, #4, #5) is integrated.
+
+| Category | Items |
+|---|---|
+| **Integrated** | #3, #4, #5 on `main` |
+| **Implementation complete, awaiting review or merge** (CI green and native Windows 10 at the exact head) | Core: #8 `1434e31`, #12 `c728538` (approved), #14 `772155d`. Lab: #28 `85f2937`, #31 `29adfed`. API: R1 #34 `d8106fa`. Monitor: #24 `6952886` |
+| **In progress** | API proposal #32 `bfe8399` (doc, Draft). R2 #35 `b65177d` (CI running, native not run; overlap with #38 to resolve). R3 #37 `9e8c4eb` (adapter workflow red at `fd124c1`; a fix is prepared and not pushed until #35 is decided). Protocol #33 `e79aca1` (Draft). Scenario M #36 `d0b2893` (arms A and B, native smoke pending) |
+| **Not started** | R4 stats DTO (only if needed), R5 demo migration, arm C of scenario M, pilot, confirmatory runs, Phase 6 |
+| **Conditional research** | #27 `491486b`, #29 `4e6d19b` |
 
 ### Phase 1 checklist (Core)
 
@@ -191,6 +204,17 @@ main ─ #2 ─ #7 ─ #8 ─ #12 ─ #14 ─┬─ #28                       (A
 main ─ #26 (agent handoff docs)
 ```
 
+Phase 3 and 4 chains (open Draft PRs; the base is the branch of the PR on
+the left):
+
+```
+#14 ─ #34 (R1) ─ #35 (R2) ─┬─ #37 (R3) ─ R4 (only if an additive stats DTO is needed) ─ R5 (demo migration)
+                           └─ #38 (owner's alternative fix of the same review)
+#23 ─ #36 (scenario M, arms A and B) ─ arm C (after the R2 review and checks)
+#33 (protocol) ─ review ─┐
+#36 native smoke ────────┴─ pilot ─ pilot report ─ frozen protocol ─ confirmatory
+```
+
 Proposed merge order (the repository owner merges; nothing here merges or
 retargets a PR): #2 → #7 → #8 → #12 → #14 → #28; then #9 → #18 → #24 and
 #9 → #10 → #17; #20 → #23 → #25 after the Phase 4 protocol decision. #27 → #29
@@ -199,17 +223,25 @@ measurement (see §8) and are kept for history.
 
 ## 7. Current blockers
 
+Only conditions that are still open. Decided and removed since the previous
+snapshot: the statistical protocol and the plain-arm baseline (decided in
+#33, Q1–Q6), the realistic workload (scenario M in #36), and the API
+questions D4, D5, D8, C-1, C-3 (decided in #32 §10).
+
 | Blocker | Blocks | Owner |
 |---|---|---|
 | No review yet on #8 and #14; #12 approved but must follow #8 | Phase 1 merge | Repository owner |
 | #2 has no CI run at its head (CI is added in #7) | Phase 2 merge | Repository owner |
-| Statistical protocol (#25) not approved; must be recomputed with RAM primary | Phase 4 pilot and confirmatory runs | Group 1 |
-| No realistic workload with a measurable Rust-owned data set | Phase 4 | Group 2 proposal, Group 1 agreement |
-| Choice of the plain-arm baseline (what a plain window keeps) | Phase 4 | Group 1 |
-| Group 1 decisions D1–D10, S-1…S-7, C-1…C-4 (#13 comment 6414461497) still open | Phases 3–5 | Group 1 |
-| Client identity for the broker (D2/D3, Q1) | Phase 5 | Group 1 |
-| Two-user Windows check for #29 needs a second local account | Phase 5 | Maxim |
-| No Windows 11 machine; native evidence so far is Windows 10 Home 22H2 (19045) only | release gate for Windows 11 | Group 1 |
+| #35 and #38 fix the same review comments (6428297151) in two ways; one must be chosen | R2 review, #37, arm C | Repository owner |
+| #37's adapter workflow failed at `fd124c1`: Windows test binary did not start (`STATUS_ENTRYPOINT_NOT_FOUND`, missing Common Controls manifest), and the "no Tauri dependency" check matched the checkout path on every runner. Fix `cfe6b65` exists locally, not pushed | R3 review | Group 2 (after the #35 decision) |
+| No native Windows run at `b65177d` (#35) or at any #37 head | R2/R3 review | Group 2 |
+| Native smoke of #36 not reported | Pilot | Group 2 |
+| #33 protocol still Draft | Pilot | Group 1 review |
+| C-2: window events carry no sender identity; `allow-emit*` on secondary | Phase 2 | Group 1 decision |
+| C-4: protocol info command | Phase 3, after the stack merges | Group 1 agreement |
+| Client identity for the broker (D2/D3) | Phase 5 only | Group 1 |
+| Two-user Windows check for #29 needs a second local account | Phase 5 only | Maxim |
+| No Windows 11 machine; native evidence so far is Windows 10 Home 22H2 (19045.6466) only | release gate for Windows 11 | Group 1 |
 
 ## 8. Removed from the current plan
 
@@ -272,3 +304,11 @@ separately; CI is not native verification); defects and limits found; memory
 impact, including where data is stored and copied; the next phase and the
 questions that need a decision. A phase is complete only with verifiable
 results against its acceptance criteria.
+
+## 11. Change log
+
+| Snapshot | Changes |
+|---|---|
+| 2026-10-26 ~18:00 UTC (`2dbe7bb`…`15e3ef2`) | First roadmap: product goal, RAM primary, phases, §9 mapping |
+| 2026-10-26 ~20:40 UTC (`44d0b06`) | Phase 3 progress; mandatory R3/R5 criteria; Phase 4 three arms |
+| 2026-10-26 ~23:00 UTC (this commit) | Live heads for #32–#38; status by category; Phase 3/4 dependency chains; blockers reduced to open conditions (protocol, baseline, workload, API decisions removed as decided); #35/#38 overlap and #37 CI failure recorded. No pilot run, no IPC/API contract change |

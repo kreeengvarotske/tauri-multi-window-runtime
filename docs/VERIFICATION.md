@@ -1,6 +1,6 @@
 # Verification status
 
-Status as of 2026-10-26. This file records what has been checked, at which
+Status as of 2026-10-26 (rows for #34–#38 added about 23:00 UTC). This file records what has been checked, at which
 exact commit, on which platform, and what has not been checked. An open pull
 request is **not** an integrated feature: only commits on `main` are
 integrated. Hosted CI is not native verification.
@@ -48,6 +48,13 @@ whatever their category (see `docs/ROADMAP.md`, Phase 5).
 | #25 | `ed756a8` | CI 40224027381 and Windows Release 40224027347 green | none | its pilot must not run with the old parameters (RAM is now primary) |
 | #27 | `491486b` | CI 40231896110 and spike workflow 40231896114 green (Linux) | 2026-10-26: fmt and clippy pass; tests fail 3/3 (see §3) | |
 | #29 | `4e6d19b` | CI 40367216064 and spike workflow 40367215939 green, including hosted `windows-latest` | 2026-10-26: fmt and clippy pass; 9/9 unit and 12/12 cross-process tests in 9/9 runs (see §3) | |
+| #34 | `d8106fa` | CI 40390472644 green | 2026-10-26: fmt, clippy, workspace tests (runtime-core 58); overflow test in release; stress 0/200 (logs `r1r2-review\pr34\`) | |
+| #35 | `4d2b5ce` | CI 40391728968 green | 2026-10-26: fmt, clippy, workspace tests (shared-runtime 23); stress 0/200 (logs `r1r2-review\pr35-4d2b5ce\`) | previous head |
+| #35 | `b65177d` | CI 40414428677 running at snapshot time | not run | current head; Linux: 27 tests, stress 0/300 under CPU load |
+| #36 | `d0b2893` | CI 40395314459, catalog 40395314302, symmetric 40395314370 green | smoke requested, not reported | |
+| #37 | `fd124c1` | CI 40410490212 green; adapter workflow 40410490586 **failed** (Windows: IPC test binary did not start; Ubuntu: dependency check matched the path) | not run | fix `cfe6b65` local, not pushed |
+| #37 | `9e8c4eb` | CI 40414574329 green; adapter workflow 40414574511 running at snapshot time | not run | current head; Linux: tests and Xvfb self-test pass |
+| #38 | `353bba5` | CI 40414174848 green | PR body reports Windows native `cargo test -p shared-runtime` 24 passed (owner's run) | owner's PR on `claude/shared-runtime` |
 
 ## 3. Native results for #28 and #29
 
