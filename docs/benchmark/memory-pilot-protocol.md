@@ -5,6 +5,11 @@ run of this protocol has happened. The pilot starts only after this document
 is reviewed; the confirmatory run starts only after the pilot report and the
 frozen confirmatory protocol are reviewed.
 
+**The #25 pilot must not be run with its current parameters** (S1–S4 with a
+4 MB transient buffer, CPU and RAM as equal primaries, 0.2 s RAM sampling).
+Those scenarios retain no data, so they cannot show the memory the product is
+meant to save; they remain correctness and fixed-overhead controls only.
+
 ## 1. Question
 
 Does keeping a shared data set once in the Rust process, with windows reading
@@ -104,6 +109,21 @@ The cells give the terms directly:
 The pilot report states each fitted term with its spread, and the smallest
 `N` and `D` where the saving is above the run-to-run spread, or that there is
 none.
+
+## 5a. Which memory the runtime avoids duplicating, and what it adds
+
+| Memory | Plain arm | Runtime arm | Counted where |
+|---|---|---|---|
+| The data set itself (decoded records, index) | once per window, as JS objects in each renderer (`Dw`, usually larger than the Rust form) | once per application in the Rust process (`Dr`) | WebView renderer Private vs host Private |
+| Working memory of building it (parse, sort, index) | once per window, possibly at the same time | once, shared by coalescing (`Wr`) | renderer vs host, visible in the max sample |
+| What a window keeps | the whole data set | one page or aggregate (`Tw`) | renderer Private |
+| **Added: runtime layer** (registry, coalescer tables, tokio pool, diagnostics) | none | fixed `Δrt`, measured in the D0 cell | host Private |
+| **Added: IPC and serialization** | one full JSON copy of the data set per window at load time, held briefly in both the host and the renderer | one small JSON response per request, held briefly in both processes (`I`) | host and renderer Private, transient; visible in the max sample and in latency |
+| **Added: copying for a view** | none | building a page copies up to `max_response_items` rows | host, transient |
+| **Added: broker** (only if Phase 5 is ever opened) | none | a separate process with its own baseline, per-connection buffers (up to 1 MiB per frame) and a second serialization hop | broker Private; not part of this protocol |
+
+WebView2 processes exist in both arms with the same count; the runtime does
+not remove them. What changes is how much each renderer holds.
 
 ## 6. Run procedure
 
