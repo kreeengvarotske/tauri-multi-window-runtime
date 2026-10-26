@@ -73,10 +73,12 @@ struct CatalogPage;                   // what a window actually renders
 impl View<Catalog> for CatalogPage {
     const NAME: &'static str = "catalog.page";
     type Request = PageRequest;       // { catalogId, offset, limit, sort }
-    type Response = Page<Row>;        // ≤ max_response_items rows + total
-    fn max_response_items(&self) -> usize { 200 }
-    fn project(&self, idx: &CatalogIndex, req: PageRequest) -> Result<Page<Row>, ViewError> {
-        idx.page(req.offset, req.limit, req.sort)
+    type Response = Page<Row>;        // ≤ max_items rows, ≤ max_response_bytes + total
+    fn max_items(&self) -> usize { 200 }
+    fn max_response_bytes(&self) -> usize { 256 << 10 }
+    fn project(&self, idx: &CatalogIndex, req: PageRequest, budget: &mut ResponseBudget)
+        -> Result<Page<Row>, ViewError> {
+        idx.page(req.offset, req.limit, req.sort, budget) // charges each row before copying it
     }
 }
 
@@ -234,11 +236,26 @@ pub trait View<O: Operation>: Send + Sync + 'static {
     const NAME: &'static str;                      // "projects.list.page"
     type Request: DeserializeOwned;                // e.g. { offset, limit, sort }
     type Response: Serialize;                      // e.g. one page + total
-    fn max_response_items(&self) -> usize;         // enforced by the adapter
-    fn project(&self, output: &O::Output, req: Self::Request)
-        -> Result<Self::Response, ViewError>;
+    fn max_items(&self) -> usize;                  // items per response
+    fn max_response_bytes(&self) -> usize;         // bytes per response, view's own measure
+    fn project(&self, output: &O::Output, req: Self::Request, budget: &mut ResponseBudget)
+        -> Result<Self::Response, ViewError>;      // charges each item before building it
+    fn items(response: &Self::Response) -> usize;
+    fn response_bytes(response: &Self::Response) -> usize;
 }
 ```
+
+**What the response limits guarantee (#35, b65177d).** The view calls
+`ResponseBudget::take(bytes)` before it builds each item; `take` fails,
+charging nothing, once the item would pass `max_items` or
+`max_response_bytes`, and the view stops. For views that do this, as
+`View::project` requires, transient response memory is about
+`max_concurrent_projections × max_response_bytes` plus each response's fixed
+fields. The runtime cannot stop a view from allocating: it checks `items` and
+`response_bytes` again after `project`, but that check runs after the
+allocation, so a view that builds first and charges later (or not at all) is
+refused without its memory being bounded. This is a per-view contract,
+checked by tests, not a strict bound enforced by the runtime.
 
 Typical views: a page (`offset`, `limit` ≤ max), an aggregate (count, sum,
 histogram), a lookup by id, a summary. The adapter serializes only the view
@@ -265,7 +282,12 @@ cached. Eviction never affects in-flight operations or their waiters.
   steps during shutdown.
 - **Shutdown**: `shutdown()` stops new calls (`ShuttingDown`), waits up to
   `shutdown_grace` for in-flight operations, then drops them and clears the
-  caches. The adapter calls it on `RunEvent::Exit`.
+  caches. A view call is in flight from start to return, its `finish`
+  (serialization) included; one still waiting for a projection slot after
+  the grace returns `ShuttingDown`. A projection or serialization already
+  running is synchronous and is waited for, not interrupted, so `shutdown`
+  returns only after it ends. The adapter calls it on `RunEvent::Exit` and
+  bounds the wait with its own `abort_wait`.
 - **Panics (decided: no change in v1)**: the global panic profile stays as it
   is (`panic = "abort"` in release) and v1 promises no panic isolation. An
   operation panic in a release build ends the application. No `catch_unwind`
@@ -422,8 +444,8 @@ so and is reviewed for exactly that.
 | Queue length | `RuntimeConfig::max_queued_operations` | none | temporary, e.g. 4× concurrency | `overloaded` must stay 0 at the intended load and rise only under deliberate overload |
 | Caller deadline | `RuntimeConfig::default_deadline` / `CallOptions::deadline` | none | temporary, above the p99 cold-load latency measured in #33 | `deadline_exceeded` stays 0 at intended load |
 | Shutdown grace | `RuntimeConfig::shutdown_grace` | none | temporary, e.g. 2 s | time from close to process exit on Windows |
-| View response size | `View::max_items` and `View::max_response_bytes` | none (per view) | temporary, e.g. 200 rows and 256 KiB per page | serialized response bytes per call (§12b), renderer memory per window; a test with one huge item checks that the byte limit applies when the item count does not |
-| Concurrent view projections | `RuntimeConfig::max_concurrent_projections` | none | temporary, e.g. 2 | transient host Private Bytes when N windows request the largest page at once ≈ limit × `max_response_bytes`; p95 latency guardrail |
+| View response size | `View::max_items` and `View::max_response_bytes` | none (per view) | temporary, e.g. 200 rows and 256 KiB per page | serialized response bytes per call (§12b), renderer memory per window; a test with one huge item checks that the byte limit applies when the item count does not; a generated oversized response stops after the items that fit (build counter) |
+| Concurrent view projections | `RuntimeConfig::max_concurrent_projections` | none | temporary, e.g. 2 | transient host Private Bytes when N windows request the largest page at once ≈ limit × `max_response_bytes` for views that charge their budget before building; p95 latency guardrail |
 | IPC request / response bytes | adapter, per command: `max_request_bytes`, `max_response_bytes` (R3) | none | temporary, e.g. 16 KiB request, 512 KiB response | largest legitimate request and page in the sample, times a margin |
 | Closed windows | `Runtime::forget_window`, called by the adapter on window destroy | always on | n/a | PerWindow cache entries and weight return to the pre-open value after a window closes (R3 test) |
 
