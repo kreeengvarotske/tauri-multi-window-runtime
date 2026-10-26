@@ -4,8 +4,8 @@
 
 use shared_runtime::{
     CachePolicy, CallError, CallOptions, Caller, OpContext, Operation, OperationConfig,
-    OperationStats, RegistryError, Runtime, RuntimeConfig, ScopeRule, View, ViewCallError,
-    ViewError,
+    OperationStats, RegistryError, ResponseBudget, Runtime, RuntimeConfig, ScopeRule, View,
+    ViewCallError, ViewError,
 };
 use std::{
     sync::{
@@ -489,18 +489,18 @@ impl View<Catalog> for Page {
         &self,
         output: &Vec<u32>,
         request: PageRequest,
-        max_items: usize,
+        budget: &mut ResponseBudget,
     ) -> Result<Vec<u32>, ViewError> {
         if request.offset > output.len() {
             return Err(ViewError::InvalidRequest("offset past the end".into()));
         }
-        let limit = request.limit.min(max_items);
-        Ok(output
-            .iter()
-            .skip(request.offset)
-            .take(limit)
-            .copied()
-            .collect())
+        let limit = request.limit.min(budget.max_items());
+        let mut page = Vec::new();
+        for value in output.iter().skip(request.offset).take(limit) {
+            budget.take(size_of::<u32>())?;
+            page.push(*value);
+        }
+        Ok(page)
     }
     fn items(response: &Vec<u32>) -> usize {
         response.len()
@@ -527,7 +527,12 @@ impl View<Catalog> for Unbounded {
     fn max_items(&self) -> usize {
         10
     }
-    fn project(&self, output: &Vec<u32>, _: (), _: usize) -> Result<Vec<u32>, ViewError> {
+    fn project(
+        &self,
+        output: &Vec<u32>,
+        _: (),
+        _: &mut ResponseBudget,
+    ) -> Result<Vec<u32>, ViewError> {
         Ok(output.clone())
     }
     fn items(response: &Vec<u32>) -> usize {
@@ -819,9 +824,13 @@ impl View<Notes> for Note {
         &self,
         output: &Vec<String>,
         (_, index): (usize, usize),
-        _max_items: usize,
+        budget: &mut ResponseBudget,
     ) -> Result<Vec<String>, ViewError> {
-        Ok(output.get(index).cloned().into_iter().collect())
+        let Some(note) = output.get(index) else {
+            return Ok(Vec::new());
+        };
+        budget.take(note.len())?;
+        Ok(vec![note.clone()])
     }
     fn items(response: &Vec<String>) -> usize {
         response.len()
@@ -858,6 +867,188 @@ async fn one_huge_item_is_refused_by_the_byte_limit() {
         ),
         "one item under max_items slipped past the byte limit: {:?}",
         refused.as_ref().map(|r| r.len())
+    );
+}
+
+/// The output is only a seed; responses are generated from it, so a request
+/// can ask for far more than any limit allows.
+struct Seed;
+
+impl Operation for Seed {
+    const NAME: &'static str = "test.seed";
+    type Params = ();
+    type Output = u8;
+    type Error = String;
+
+    fn policy(&self) -> CachePolicy {
+        CachePolicy::Forever
+    }
+    fn weight(&self, _output: &u8) -> usize {
+        1
+    }
+    async fn run(&self, _ctx: OpContext, _params: ()) -> Result<u8, String> {
+        Ok(b'x')
+    }
+}
+
+const GENERATED_ITEM: usize = 1024;
+const GENERATED_MAX_BYTES: usize = 8 * GENERATED_ITEM;
+
+/// Generates `request` items of `GENERATED_ITEM` bytes each, counting every
+/// item it builds. `charge_first` decides whether it charges the budget
+/// before building an item (as `View::project` requires) or not at all.
+struct Generated {
+    charge_first: bool,
+    built: Arc<AtomicUsize>,
+}
+
+impl Generated {
+    fn new(charge_first: bool) -> (Self, Arc<AtomicUsize>) {
+        let built = Arc::new(AtomicUsize::new(0));
+        let view = Self {
+            charge_first,
+            built: built.clone(),
+        };
+        (view, built)
+    }
+}
+
+impl View<Seed> for Generated {
+    const NAME: &'static str = "test.seed.generated";
+    type Request = usize;
+    type Response = Vec<String>;
+
+    fn source(&self, _request: &usize) {}
+    fn max_items(&self) -> usize {
+        10_000
+    }
+    fn max_response_bytes(&self) -> usize {
+        GENERATED_MAX_BYTES
+    }
+    fn project(
+        &self,
+        seed: &u8,
+        count: usize,
+        budget: &mut ResponseBudget,
+    ) -> Result<Vec<String>, ViewError> {
+        let mut items = Vec::new();
+        for _ in 0..count {
+            if self.charge_first {
+                budget.take(GENERATED_ITEM)?;
+            }
+            items.push(char::from(*seed).to_string().repeat(GENERATED_ITEM));
+            self.built.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(items)
+    }
+    fn items(response: &Vec<String>) -> usize {
+        response.len()
+    }
+    fn response_bytes(response: &Vec<String>) -> usize {
+        response.iter().map(String::len).sum()
+    }
+}
+
+fn generated_runtime(view: Generated) -> Runtime {
+    Runtime::builder(config())
+        .unwrap()
+        .register(Seed, budget(1024))
+        .unwrap()
+        .view::<Seed, _>(view)
+        .unwrap()
+        .build()
+}
+
+#[tokio::test]
+async fn a_view_that_charges_first_stops_building_at_the_byte_limit() {
+    let (view, built) = Generated::new(true);
+    let runtime = generated_runtime(view);
+    let generated = runtime.view::<Seed, Generated>().unwrap();
+    let main = window("main");
+
+    let fits = generated.get(&main, 8, NO_OPTIONS).await.unwrap();
+    assert_eq!(fits.len(), 8);
+    assert_eq!(built.swap(0, Ordering::SeqCst), 8);
+
+    // Asks for 1000 items, about 1 MiB; only the 8 that fit are built.
+    let refused = generated.get(&main, 1000, NO_OPTIONS).await;
+    assert!(
+        matches!(
+            refused,
+            Err(ViewCallError::View(ViewError::TooManyBytes {
+                bytes,
+                max_bytes: GENERATED_MAX_BYTES,
+            })) if bytes == 9 * GENERATED_ITEM
+        ),
+        "{:?}",
+        refused.as_ref().map(|r| r.len())
+    );
+    assert_eq!(
+        built.load(Ordering::SeqCst),
+        8,
+        "items were built after the budget refused one"
+    );
+}
+
+#[tokio::test]
+async fn a_view_that_ignores_the_budget_is_refused_after_building() {
+    // Documents the backstop: the response is refused, but only after the
+    // view built all of it. Its peak memory is not bounded by the runtime.
+    let (view, built) = Generated::new(false);
+    let runtime = generated_runtime(view);
+    let generated = runtime.view::<Seed, Generated>().unwrap();
+
+    let refused = generated.get(&window("main"), 1000, NO_OPTIONS).await;
+    assert!(
+        matches!(
+            refused,
+            Err(ViewCallError::View(ViewError::TooManyBytes {
+                bytes,
+                max_bytes: GENERATED_MAX_BYTES,
+            })) if bytes == 1000 * GENERATED_ITEM
+        ),
+        "{:?}",
+        refused.as_ref().map(|r| r.len())
+    );
+    assert_eq!(built.load(Ordering::SeqCst), 1000);
+}
+
+#[test]
+fn response_budget_charges_nothing_on_a_refused_item() {
+    let mut budget = ResponseBudget::new(3, 10);
+    budget.take(4).unwrap();
+    assert_eq!(
+        budget.take(7),
+        Err(ViewError::TooManyBytes {
+            bytes: 11,
+            max_bytes: 10
+        })
+    );
+    assert_eq!((budget.items(), budget.bytes()), (1, 4));
+    budget.take(6).unwrap();
+    assert_eq!(budget.remaining_bytes(), 0);
+    budget.take(0).unwrap();
+    assert_eq!(
+        budget.take(0),
+        Err(ViewError::TooManyItems {
+            items: 4,
+            max_items: 3
+        })
+    );
+    assert_eq!((budget.items(), budget.bytes()), (3, 10));
+    assert_eq!(budget.remaining_items(), 0);
+
+    // Saturates instead of overflowing on a huge charge.
+    let mut budget = ResponseBudget::new(1, usize::MAX);
+    budget.take(usize::MAX).unwrap();
+    let mut budget = ResponseBudget::new(2, 1);
+    budget.take(1).unwrap();
+    assert_eq!(
+        budget.take(usize::MAX),
+        Err(ViewError::TooManyBytes {
+            bytes: usize::MAX,
+            max_bytes: 1
+        })
     );
 }
 
@@ -969,7 +1160,12 @@ impl View<Blob> for Chunk {
     fn max_response_bytes(&self) -> usize {
         1 << 20
     }
-    fn project(&self, output: &Vec<u8>, len: usize, _: usize) -> Result<Vec<u8>, ViewError> {
+    fn project(
+        &self,
+        output: &Vec<u8>,
+        len: usize,
+        _: &mut ResponseBudget,
+    ) -> Result<Vec<u8>, ViewError> {
         let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
         self.peak.fetch_max(now, Ordering::SeqCst);
         let until = std::time::Instant::now() + Duration::from_secs(2);
@@ -1022,6 +1218,13 @@ async fn concurrent_windows_build_at_most_the_limit_of_large_responses() {
     let (runtime, peak, _hold) = chunk_runtime(2);
     let runtime = Arc::new(runtime);
     let chunk = runtime.view::<Blob, Chunk>().unwrap();
+    // Load the source first. Eight windows racing for a cold source may
+    // execute it twice: a call that misses the cache just before the insert
+    // and reaches the coalescer just after the operation ended starts a new
+    // execution (runtime-core `CachedService`, G6). This test is about the
+    // projection limit, so it takes that race out.
+    let blob = runtime.operation::<Blob>().unwrap();
+    blob.get(&window("main"), (), NO_OPTIONS).await.unwrap();
     let mut calls = Vec::new();
     for i in 0..8 {
         let chunk = chunk.clone();
@@ -1088,4 +1291,100 @@ fn zero_projection_slots_is_rejected() {
         Runtime::builder(bad),
         Err(RegistryError::Config(_))
     ));
+}
+
+// ------------------------------------------------ shutdown during a view
+
+/// A view call is in flight from its start until `get_with` returns,
+/// `finish` (the adapter's serialization) included. Shutdown waits for it;
+/// a call waiting for a projection slot gives up when the grace ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shutdown_waits_for_a_view_in_progress_and_ends_one_waiting_for_a_slot() {
+    let hold = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let runtime = Arc::new(
+        Runtime::builder(RuntimeConfig {
+            max_concurrent_projections: 1,
+            shutdown_grace: Duration::from_millis(100),
+            ..config()
+        })
+        .unwrap()
+        .register(Blob, budget(4 << 20))
+        .unwrap()
+        .view::<Blob, _>(Chunk {
+            active: Arc::default(),
+            peak: Arc::default(),
+            hold,
+        })
+        .unwrap()
+        .build(),
+    );
+    let chunk = runtime.view::<Blob, Chunk>().unwrap();
+    // The source output is cached: the operation itself is no longer running.
+    runtime
+        .operation::<Blob>()
+        .unwrap()
+        .get(&window("a"), (), NO_OPTIONS)
+        .await
+        .unwrap();
+
+    // A holds the only projection slot inside `finish`.
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let first = {
+        let chunk = chunk.clone();
+        tokio::spawn(async move {
+            chunk
+                .get_with(&window("a"), 16, NO_OPTIONS, move |response| {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    response.len()
+                })
+                .await
+        })
+    };
+    tokio::task::spawn_blocking(move || entered_rx.recv().unwrap())
+        .await
+        .unwrap();
+    // B waits for the slot.
+    let second = {
+        let chunk = chunk.clone();
+        tokio::spawn(async move { chunk.get(&window("b"), 16, NO_OPTIONS).await })
+    };
+    tokio::time::sleep(Duration::from_millis(20)).await;
+
+    let shutdown = {
+        let runtime = Arc::clone(&runtime);
+        tokio::spawn(async move { runtime.shutdown().await })
+    };
+    // Past the grace: B is ended, but shutdown still waits for A.
+    let late = tokio::time::timeout(LIMIT, second).await.unwrap().unwrap();
+    assert!(
+        matches!(late, Err(ViewCallError::Source(CallError::ShuttingDown))),
+        "a call waiting for a slot ends with the grace: {late:?}"
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !shutdown.is_finished(),
+        "shutdown returned while a view was still serializing"
+    );
+    // New view calls are refused at once.
+    assert!(matches!(
+        chunk.get(&window("c"), 16, NO_OPTIONS).await,
+        Err(ViewCallError::Source(CallError::ShuttingDown))
+    ));
+
+    release_tx.send(()).unwrap();
+    assert_eq!(
+        tokio::time::timeout(LIMIT, first)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        16,
+        "work already in finish completes"
+    );
+    tokio::time::timeout(LIMIT, shutdown)
+        .await
+        .expect("shutdown ends once the view returns")
+        .unwrap();
 }

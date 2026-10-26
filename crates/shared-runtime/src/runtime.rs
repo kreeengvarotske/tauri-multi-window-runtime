@@ -13,7 +13,8 @@ use tokio::sync::{Notify, Semaphore, watch};
 
 use crate::{
     CallError, CallOptions, Caller, ConfigError, OpContext, Operation, OperationConfig,
-    OperationStats, RuntimeConfig, RuntimeStats, ScopeRule, View, ViewCallError, ViewError,
+    OperationStats, ResponseBudget, RuntimeConfig, RuntimeStats, ScopeRule, View, ViewCallError,
+    ViewError,
 };
 
 /// Lifecycle of a runtime.
@@ -374,8 +375,12 @@ impl Runtime {
     ///
     /// New calls return `ShuttingDown` at once. Calls in flight get
     /// `shutdown_grace` to finish; after it they return `ShuttingDown` and
-    /// their executions are dropped. Returns once no call is in flight, with
-    /// every cache cleared. The runtime does not restart.
+    /// their executions are dropped; view calls waiting for a projection slot
+    /// end too. Returns once no call is in flight, with every cache cleared.
+    /// A projection or `finish` already running is synchronous code and is
+    /// waited for, not interrupted; a caller that must not wait longer than
+    /// a limit wraps this in a timeout (the Tauri adapter does). The runtime
+    /// does not restart.
     pub async fn shutdown(&self) {
         let shared = &self.shared;
         shared.phase.send_if_modified(|phase| {
@@ -398,23 +403,28 @@ impl Runtime {
     }
 }
 
-/// Decrements the in-flight counters when a call ends in any way.
+/// Decrements the in-flight counters when a call ends in any way. `op` is
+/// the operation's own counter; a view call counts only runtime-wide.
 struct InFlight<'a> {
     shared: &'a Shared,
-    op: &'a AtomicU64,
+    op: Option<&'a AtomicU64>,
 }
 
 impl<'a> InFlight<'a> {
-    fn enter(shared: &'a Shared, op: &'a AtomicU64) -> Self {
+    fn enter(shared: &'a Shared, op: Option<&'a AtomicU64>) -> Self {
         shared.in_flight.fetch_add(1, Ordering::SeqCst);
-        op.fetch_add(1, Ordering::Relaxed);
+        if let Some(op) = op {
+            op.fetch_add(1, Ordering::Relaxed);
+        }
         Self { shared, op }
     }
 }
 
 impl Drop for InFlight<'_> {
     fn drop(&mut self) {
-        self.op.fetch_sub(1, Ordering::Relaxed);
+        if let Some(op) = self.op {
+            op.fetch_sub(1, Ordering::Relaxed);
+        }
         if self.shared.in_flight.fetch_sub(1, Ordering::SeqCst) == 1 {
             self.shared.idle.notify_waiters();
         }
@@ -489,7 +499,7 @@ impl<O: Operation> OperationHandle<O> {
         bump(&counters.requests);
         // Enter before reading the phase so that `shutdown` never sees an
         // idle runtime while this call is about to start.
-        let _in_flight = InFlight::enter(shared, &counters.in_flight);
+        let _in_flight = InFlight::enter(shared, Some(&counters.in_flight));
         let mut outcome = Outcome {
             counters,
             recorded: false,
@@ -627,6 +637,11 @@ impl<O: Operation, V: View<O>> ViewHandle<O, V> {
     /// Like `get`, but runs `finish` on the response while still holding the
     /// projection slot, so that an adapter can serialize the response
     /// within the same concurrency bound.
+    ///
+    /// The call is in flight from start to return, `finish` included:
+    /// `shutdown` waits for it. Waiting for a projection slot ends with
+    /// `Source(CallError::ShuttingDown)` once the shutdown grace has passed;
+    /// a projection or `finish` already running is not interrupted.
     pub async fn get_with<T>(
         &self,
         caller: &Caller,
@@ -635,6 +650,15 @@ impl<O: Operation, V: View<O>> ViewHandle<O, V> {
         finish: impl FnOnce(V::Response) -> T,
     ) -> Result<T, ViewCallError<O::Error>> {
         let shared = &*self.source.shared;
+        // The whole call is in flight, `finish` included, so that `shutdown`
+        // does not return or clear the caches while a response is still
+        // being built or serialized. Entered before reading the phase, as in
+        // `OperationHandle::get`.
+        let _in_flight = InFlight::enter(shared, None);
+        let mut phase = shared.phase.subscribe();
+        if *phase.borrow_and_update() != Phase::Running {
+            return Err(ViewCallError::Source(CallError::ShuttingDown));
+        }
         let deadline = options.deadline.unwrap_or(shared.config.default_deadline);
         let started = tokio::time::Instant::now();
         let params = self.view.source(&request);
@@ -644,16 +668,28 @@ impl<O: Operation, V: View<O>> ViewHandle<O, V> {
             .await
             .map_err(ViewCallError::Source)?;
         let remaining = deadline.saturating_sub(started.elapsed());
-        let _slot = tokio::time::timeout(remaining, shared.projections.acquire())
-            .await
-            .map_err(|_| ViewCallError::DeadlineExceeded)?
-            .expect("the projection semaphore is never closed");
+        // Waiting for a slot ends at the caller's deadline or when the
+        // shutdown grace ends, whichever comes first.
+        let _slot = tokio::select! {
+            slot = tokio::time::timeout(remaining, shared.projections.acquire()) => slot
+                .map_err(|_| ViewCallError::DeadlineExceeded)?
+                .expect("the projection semaphore is never closed"),
+            _ = phase.wait_for(|phase| *phase == Phase::Aborted) => {
+                return Err(ViewCallError::Source(CallError::ShuttingDown));
+            }
+        };
+        if *phase.borrow() == Phase::Aborted {
+            return Err(ViewCallError::Source(CallError::ShuttingDown));
+        }
 
-        let max_items = self.view.max_items();
+        let mut budget = ResponseBudget::new(self.view.max_items(), self.view.max_response_bytes());
         let response = self
             .view
-            .project(&output, request, max_items)
+            .project(&output, request, &mut budget)
             .map_err(ViewCallError::View)?;
+        // Backstop for a view that builds before charging the budget: the
+        // response is refused, but its memory was already allocated.
+        let (max_items, max_bytes) = (budget.max_items(), budget.max_bytes());
         let items = V::items(&response);
         if items > max_items {
             return Err(ViewCallError::View(ViewError::TooManyItems {
@@ -661,7 +697,6 @@ impl<O: Operation, V: View<O>> ViewHandle<O, V> {
                 max_items,
             }));
         }
-        let max_bytes = self.view.max_response_bytes();
         let bytes = V::response_bytes(&response);
         if bytes > max_bytes {
             return Err(ViewCallError::View(ViewError::TooManyBytes {

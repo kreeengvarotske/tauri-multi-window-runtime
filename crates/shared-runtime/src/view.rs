@@ -16,24 +16,30 @@ pub trait View<O: Operation>: Send + Sync + 'static {
     /// response instead of truncating it silently.
     fn max_items(&self) -> usize;
 
-    /// Most bytes one response may carry, as measured by `response_bytes`.
-    /// Bounds the size of the items, which `max_items` does not: one item
-    /// can hold an arbitrarily long string.
+    /// Most bytes one response may carry, as charged to the budget and as
+    /// measured by `response_bytes`. Bounds the size of the items, which
+    /// `max_items` does not: one item can hold an arbitrarily long string.
     fn max_response_bytes(&self) -> usize;
 
-    /// Builds the response. `max_items` is passed so that the view can
-    /// clamp its own page size.
+    /// Builds the response within `budget`.
     ///
-    /// Must be cheap and bounded: work proportional to the response (at most
-    /// `max_items` items), not to the whole output. It runs once per call,
-    /// synchronously, under the runtime's projection limit. Sorting,
-    /// indexing or scanning the whole output belong in the operation, whose
-    /// result is cached and shared.
+    /// Before building each item, the view charges it with
+    /// [`ResponseBudget::take`] and, if that fails, stops and returns the
+    /// error. So a response over the limits is refused after at most the
+    /// items that fit were built, never built whole first. The runtime
+    /// checks `items` and `response_bytes` again afterwards, but that check
+    /// runs after the allocation: a view that builds first and charges
+    /// later, or not at all, is refused without its memory being bounded.
+    ///
+    /// Must be cheap: work proportional to the response, not to the whole
+    /// output. It runs once per call, synchronously, under the runtime's
+    /// projection limit. Sorting, indexing or scanning the whole output
+    /// belong in the operation, whose result is cached and shared.
     fn project(
         &self,
         output: &O::Output,
         request: Self::Request,
-        max_items: usize,
+        budget: &mut ResponseBudget,
     ) -> Result<Self::Response, ViewError>;
 
     /// Items in a response, checked against `max_items`.
@@ -44,6 +50,73 @@ pub trait View<O: Operation>: Send + Sync + 'static {
     /// measure; the adapter also bounds the serialized size it sends to the
     /// WebView.
     fn response_bytes(response: &Self::Response) -> usize;
+}
+
+/// What one response may still hold: items and bytes, from the view's
+/// `max_items` and `max_response_bytes`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResponseBudget {
+    max_items: usize,
+    max_bytes: usize,
+    items: usize,
+    bytes: usize,
+}
+
+impl ResponseBudget {
+    pub fn new(max_items: usize, max_bytes: usize) -> Self {
+        Self {
+            max_items,
+            max_bytes,
+            items: 0,
+            bytes: 0,
+        }
+    }
+
+    /// Charges one item of `bytes` before it is built. Fails, charging
+    /// nothing, if the item would pass either limit; the view then stops.
+    pub fn take(&mut self, bytes: usize) -> Result<(), ViewError> {
+        if self.items >= self.max_items {
+            return Err(ViewError::TooManyItems {
+                items: self.items.saturating_add(1),
+                max_items: self.max_items,
+            });
+        }
+        if bytes > self.max_bytes - self.bytes {
+            return Err(ViewError::TooManyBytes {
+                bytes: self.bytes.saturating_add(bytes),
+                max_bytes: self.max_bytes,
+            });
+        }
+        self.items += 1;
+        self.bytes += bytes;
+        Ok(())
+    }
+
+    pub fn max_items(&self) -> usize {
+        self.max_items
+    }
+
+    pub fn max_bytes(&self) -> usize {
+        self.max_bytes
+    }
+
+    /// Items charged so far.
+    pub fn items(&self) -> usize {
+        self.items
+    }
+
+    /// Bytes charged so far.
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    pub fn remaining_items(&self) -> usize {
+        self.max_items - self.items
+    }
+
+    pub fn remaining_bytes(&self) -> usize {
+        self.max_bytes - self.bytes
+    }
 }
 
 /// Why a view returned nothing.
@@ -74,7 +147,8 @@ impl fmt::Display for ViewError {
 impl std::error::Error for ViewError {}
 
 /// A view call fails while getting the source output, while waiting for a
-/// projection slot, or in the view.
+/// projection slot, or in the view. A call refused or ended by shutdown is
+/// `Source(CallError::ShuttingDown)`, as for the operation itself.
 pub enum ViewCallError<E> {
     Source(CallError<E>),
     /// The caller's deadline passed while waiting for a projection slot.
