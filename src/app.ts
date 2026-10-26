@@ -62,8 +62,11 @@ export function mountApp(root: HTMLElement, { setup, identity, openSecondary, br
   });
 
   // Every window hears about cache changes, including the ones made elsewhere.
-  void runtime.events.onCacheInvalidated(({ projectId }) => {
-    stats.cacheInvalidated(projectId);
+  // The event is only a hint: any window may emit it, so the payload is
+  // checked and the stats are re-read from Core either way.
+  void runtime.events.onCacheInvalidated((event: unknown) => {
+    const projectId = invalidatedProjectId(event);
+    if (projectId !== undefined) stats.cacheInvalidated(projectId);
     void stats.refresh();
   });
   if (!isMain) {
@@ -92,4 +95,11 @@ function isOfferedSeries(request: unknown): request is SeriesRequest {
   if (typeof request !== "object" || request === null) return false;
   const { projectId, size } = request as Record<string, unknown>;
   return typeof projectId === "string" && SERIES_SIZES.some((n) => n === size);
+}
+
+/** `projectId` of a well-formed cache-invalidated payload, otherwise `undefined`. */
+function invalidatedProjectId(event: unknown): string | null | undefined {
+  if (typeof event !== "object" || event === null) return undefined;
+  const { projectId } = event as Record<string, unknown>;
+  return typeof projectId === "string" || projectId === null ? projectId : undefined;
 }
