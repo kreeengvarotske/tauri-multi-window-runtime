@@ -1,5 +1,5 @@
 //! `spike-broker --endpoint <path|pipe> --manifest <file> [--op-delay-ms N]
-//! [--idle-exit-ms N] [--checksum-ttl-ms N]`
+//! [--idle-exit-ms N] [--checksum-ttl-ms N] [--hello-timeout-ms N]`
 //!
 //! Prints one JSON line `{"event":"listening",...}` once it accepts clients.
 //! Exits with code 3 if another broker already owns the endpoint.
@@ -18,6 +18,7 @@ async fn main() -> ExitCode {
     let mut config_delay = Duration::ZERO;
     let mut idle_exit = None;
     let mut checksum_ttl = None;
+    let mut hello_timeout = None;
     let mut args = std::env::args_os().skip(1);
     while let Some(flag) = args.next() {
         let value = args.next().unwrap_or_default();
@@ -33,6 +34,9 @@ async fn main() -> ExitCode {
             Some("--op-delay-ms") => config_delay = number().expect("--op-delay-ms"),
             Some("--idle-exit-ms") => idle_exit = Some(number().expect("--idle-exit-ms")),
             Some("--checksum-ttl-ms") => checksum_ttl = Some(number().expect("--checksum-ttl-ms")),
+            Some("--hello-timeout-ms") => {
+                hello_timeout = Some(number().expect("--hello-timeout-ms"))
+            }
             _ => {
                 eprintln!("unknown flag {flag:?}");
                 return ExitCode::from(2);
@@ -55,6 +59,9 @@ async fn main() -> ExitCode {
     config.op_delay = config_delay;
     if let Some(ttl) = checksum_ttl {
         config.checksum_ttl = ttl;
+    }
+    if let Some(timeout) = hello_timeout {
+        config.hello_timeout = timeout;
     }
 
     let listener = match Listener::bind(&endpoint) {
