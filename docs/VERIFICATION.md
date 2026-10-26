@@ -17,7 +17,8 @@ Linux entries: container with rustc 1.97.0 and Node 22.
 |---|---|---|
 | **A. Integrated and verified** | merged into `main`, tests pass at the `main` commit | #3, #4, #5 (`main` @ `4bf7da3`) |
 | **B. Complete, verified natively and in CI, waiting for review or merge** | exact head has green CI and a native run | #8, #12, #14, #16, #24, #28, #29 (research only) |
-| **C. Verified in CI only** | exact head has green CI, no native run at that head | #7, #10, #11, #17, #20, #23, #25, #27, #31 |
+| **C. Verified in CI only** | exact head has green CI, no native run at that head | #7, #10, #11, #17, #20, #23, #25, #31 |
+| **C′. CI green, native run fails** | exact head has green CI, the native run found a defect fixed in a follow-up | #27 (fixed in #29) |
 | **D. No verification at the exact head** | no CI run and no native run at the head | #2, #9, #18; documentation-only PRs #1, #26, #30, #32, #33 (no checks apply) |
 
 #29 and #27 are research under `experiments/` and are not part of the product
@@ -45,8 +46,8 @@ whatever their category (see `docs/ROADMAP.md`, Phase 5).
 | #20 | `9c40dd5` | CI 40218090430 and Windows Release 40218090495 green | none | |
 | #23 | `3f70b7d` | CI 40219219157 and Windows Release 40219219142 green | none | |
 | #25 | `ed756a8` | CI 40224027381 and Windows Release 40224027347 green | none | its pilot must not run with the old parameters (RAM is now primary) |
-| #27 | `491486b` | CI 40231896110 and spike workflow 40231896114 green (Linux) | see §3 | |
-| #29 | `4e6d19b` | CI 40367216064 and spike workflow 40367215939 green, including hosted `windows-latest` | 2026-10-26: 12/12 cross-process tests in 6/6 runs (see §3) | |
+| #27 | `491486b` | CI 40231896110 and spike workflow 40231896114 green (Linux) | 2026-10-26: fmt and clippy pass; tests fail 3/3 (see §3) | |
+| #29 | `4e6d19b` | CI 40367216064 and spike workflow 40367215939 green, including hosted `windows-latest` | 2026-10-26: fmt and clippy pass; 9/9 unit and 12/12 cross-process tests in 9/9 runs (see §3) | |
 
 ## 3. Native results for #28 and #29
 
@@ -63,7 +64,7 @@ Windows 10 Home 22H2 (19045.6466), 2026-10-26. Logs:
 | Manual: two real Tauri windows, series of 20 in both windows | 40 requests, 1 execution, 39 coalesced; invariant adds up once both series finish |
 | Manual: forged `lab://run-series` with `size: 100000` from a window | ignored |
 
-Limits: the repeated-event and malformed-invalidation cases fixed in #31 were
+Not checked natively: #31 (repeated and malformed window events). Limits: the repeated-event and malformed-invalidation cases fixed in #31 were
 not part of this run. `tauri build` rewrites `src-tauri/Cargo.toml`
 (`features = []`) and converts four generated permission files to CRLF; the
 content is unchanged and the files were restored.
@@ -76,7 +77,8 @@ Windows 10 Home 22H2 (19045.6466), 2026-10-26. Logs:
 | Check | Result |
 |---|---|
 | At `ece3341`: cross-process tests | 11/12; `only_one_broker_owns_an_endpoint_and_it_exits_when_idle` failed 6/6: the 300 ms idle window was shorter than a cold process start (race inherited from #27) |
-| At `4e6d19b` (test fix): cross-process tests | 12/12 in 6/6 runs, no hang |
+| At `4e6d19b` (test fix): cross-process tests | 12/12 in 6/6 runs, no hang; repeated in a separate worktree: 3/3 runs, 9/9 unit tests, ~7 s each (logs `stage6-broker\`) |
+| At `491486b` (#27, before the fix) | fmt, clippy pass; `only_one_broker_owns_an_endpoint_and_it_exits_when_idle` fails in 3/3 runs (`brokerUnavailable`, os error 2: the first broker had already exited on idle). In one run the test's own 60 s timeout did not fire and the run hung until an external 600 s timeout killed it; the other 10 cross-process tests pass |
 | Pipe DACL | owner-only confirmed |
 | Broker keeps serving after a failed accept | covered by `a_failed_accept_does_not_stop_the_broker` (300 connect-and-drop on Windows) |
 
