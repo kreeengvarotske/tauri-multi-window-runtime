@@ -78,7 +78,13 @@ impl Fixture {
     }
 
     async fn broker(&self, extra: &[&str]) -> Broker {
-        let mut child = Command::new(BROKER)
+        self.broker_via(Command::new(BROKER), extra).await
+    }
+
+    /// Starts the broker through `command`, which must run `BROKER` with the
+    /// arguments appended here (for example under `prlimit`).
+    async fn broker_via(&self, mut command: Command, extra: &[&str]) -> Broker {
+        let mut child = command
             .arg("--endpoint")
             .arg(&self.endpoint.0)
             .arg("--manifest")
@@ -526,21 +532,34 @@ async fn a_broker_crash_is_survived_by_reconnecting_to_a_new_instance() {
 async fn only_one_broker_owns_an_endpoint_and_it_exits_when_idle() {
     with_timeout(async {
         let fx = Fixture::new("single");
-        let mut first = fx.broker(&["--idle-exit-ms", "300"]).await;
+        // On a cold Windows 10 machine a process start took longer than a
+        // 300 ms idle window, so the first broker exited before the second one
+        // ran. A generous idle window plus a connected client keeps the first
+        // broker alive for the single-instance check.
+        let mut first = fx.broker(&["--idle-exit-ms", "3000"]).await;
+        let mut holder = fx.client(&fx.beta, "demo.beta", &["listen", "4000"]);
+        let mut holder_lines = BufReader::new(holder.stdout.take().unwrap()).lines();
+        let welcome = holder_lines.next_line().await.unwrap().unwrap();
+        assert!(welcome.contains("welcome"), "{welcome}");
 
         let second = Command::new(BROKER)
             .arg("--endpoint")
             .arg(&fx.endpoint.0)
             .arg("--manifest")
             .arg(&fx.manifest)
-            .output()
+            .kill_on_drop(true)
+            .output();
+        let second = tokio::time::timeout(Duration::from_secs(15), second)
             .await
+            .expect("a second broker must refuse the endpoint, not serve it")
             .unwrap();
         assert_eq!(second.status.code(), Some(3), "{second:?}");
 
         let (_, lines) = finish(fx.client(&fx.alpha, "demo.alpha", &["checksum", "1", "1"])).await;
         last_event(&lines, "result");
-        let status = tokio::time::timeout(Duration::from_secs(10), first.child.wait())
+        while holder_lines.next_line().await.unwrap().is_some() {}
+        assert!(holder.wait().await.unwrap().success());
+        let status = tokio::time::timeout(Duration::from_secs(15), first.child.wait())
             .await
             .expect("broker should exit when idle")
             .unwrap();
@@ -588,6 +607,70 @@ async fn notices_reach_only_clients_that_can_read_the_scope() {
         }
         let own = observer.next_notice(Duration::from_secs(1)).await;
         assert!(own.is_some(), "the observer sees its own app-scope notice");
+    })
+    .await;
+}
+
+/// Opens a connection and drops it without saying anything.
+async fn connect_and_drop(endpoint: &Endpoint) {
+    #[cfg(unix)]
+    {
+        let _ = tokio::net::UnixStream::connect(&endpoint.0).await;
+    }
+    #[cfg(windows)]
+    {
+        let _ = tokio::net::windows::named_pipe::ClientOptions::new().open(&endpoint.0);
+    }
+}
+
+/// A connection that fails while it is being accepted (here: the broker runs
+/// out of file descriptors on Linux, or the client is gone before the pipe
+/// instance is connected on Windows) concerns that client only. The broker
+/// must keep serving everyone else instead of exiting.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_accept_does_not_stop_the_broker() {
+    with_timeout(async {
+        let fx = Fixture::new("accept");
+        #[cfg(unix)]
+        let mut broker = {
+            let mut command = Command::new("prlimit");
+            command.arg("--nofile=48:48").arg(BROKER);
+            fx.broker_via(command, &["--hello-timeout-ms", "500"]).await
+        };
+        #[cfg(windows)]
+        let mut broker = fx.broker(&[]).await;
+
+        #[cfg(unix)]
+        {
+            // More silent connections than the broker has descriptors left.
+            let mut held = Vec::new();
+            for _ in 0..96 {
+                if let Ok(stream) = tokio::net::UnixStream::connect(&fx.endpoint.0).await {
+                    held.push(stream);
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            drop(held);
+        }
+        for _ in 0..300 {
+            connect_and_drop(&fx.endpoint).await;
+        }
+
+        assert!(
+            broker.child.try_wait().unwrap().is_none(),
+            "the broker exited after a failed accept"
+        );
+        // Silent connections are dropped after the hello timeout; then the
+        // broker accepts and serves a real client again.
+        let observer = fx.observer().await;
+        observer
+            .call::<Checksum>(&ChecksumParams {
+                seed: 3,
+                size_kib: 1,
+            })
+            .await
+            .unwrap();
+        assert!(broker.child.try_wait().unwrap().is_none());
     })
     .await;
 }

@@ -6,7 +6,7 @@ This is the interface `experiments/cross-app-spike` implements (`src/protocol.rs
 
 | Item | Rule |
 |---|---|
-| Endpoint | Windows: named pipe `\\.\pipe\<name>`, created with `FIRST_PIPE_INSTANCE` and rejecting remote clients. Linux: Unix socket in a `0700` directory owned by the user, socket `0600`, plus an exclusive lock file. **No TCP.** |
+| Endpoint | Windows: named pipe `\\.\pipe\<name>` (default name contains the user SID), created with `FIRST_PIPE_INSTANCE`, rejecting remote clients, and with a DACL that admits only the current user; each side checks that the other runs as the same user (token SID). Linux: Unix socket in a `0700` directory owned by the user, socket `0600`, plus an exclusive lock file. **No TCP.** |
 | Frame | `u32` little-endian byte length, then one UTF-8 JSON document. Max 1 MiB in either direction, checked **before** allocating |
 | Encoding | JSON with `camelCase` fields and a `type` tag. Every message and params type is `deny_unknown_fields` |
 | Order | The first client frame must be `hello`, within 5 s. A second `hello`, a malformed frame or an oversized frame ⇒ `reject` and close |

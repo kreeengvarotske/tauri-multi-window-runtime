@@ -1,8 +1,8 @@
 //! Client identity for the spike. **Provisional, not a Group 1 decision.**
 //!
 //! A client is accepted only if all of these hold:
-//! 1. it connected over the per-user local endpoint (and, on Linux, the
-//!    kernel-reported uid equals the broker's uid);
+//! 1. it connected over the per-user local endpoint, and the OS reports
+//!    that it runs as the broker's user (uid on Linux, token SID on Windows);
 //! 2. its claimed `appId` is in the broker's manifest;
 //! 3. the executable of the connecting process, looked up by the broker from
 //!    the kernel-reported pid, is the executable the manifest registers for
@@ -90,6 +90,14 @@ pub fn verify(
                 peer.uid
             )));
         }
+    }
+
+    #[cfg(windows)]
+    if peer.same_user != Some(true) {
+        return Err(IdentityError::Mismatch(format!(
+            "pid {:?} does not run as the broker's user",
+            peer.pid
+        )));
     }
 
     let pid = peer
@@ -182,6 +190,7 @@ mod tests {
         let peer = PeerInfo {
             pid: Some(std::process::id()),
             uid: None,
+            same_user: Some(true),
         };
         assert_eq!(
             verify(&manifest, "demo.beta", peer),
@@ -199,6 +208,7 @@ mod tests {
             uid: Some(crate::transport::current_uid().unwrap()),
             #[cfg(not(unix))]
             uid: None,
+            same_user: Some(true),
         };
         let ok = verify(&manifest_for(me.clone()), "demo.alpha", peer).unwrap();
         assert!(ok.may_call("fixture.checksum", 1));
@@ -213,6 +223,34 @@ mod tests {
         let _ = std::fs::remove_file(other);
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn unknown_or_foreign_user_is_rejected_on_windows() {
+        let manifest = manifest_for(std::env::current_exe().unwrap());
+        for same_user in [None, Some(false)] {
+            let peer = PeerInfo {
+                pid: Some(std::process::id()),
+                uid: None,
+                same_user,
+            };
+            assert!(matches!(
+                verify(&manifest, "demo.alpha", peer),
+                Err(IdentityError::Mismatch(_))
+            ));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_os_reports_the_user_of_a_process() {
+        let own = crate::transport::current_sid().unwrap();
+        assert!(own.starts_with("S-1-"), "{own}");
+        assert_eq!(crate::transport::sid_of(std::process::id()).unwrap(), own);
+        // PID 4 is the System process: either the OS refuses to say, or it
+        // runs as another user. Neither may count as "same user".
+        assert_ne!(crate::transport::sid_of(4).ok(), Some(own));
+    }
+
     #[cfg(unix)]
     #[test]
     fn missing_or_foreign_uid_is_rejected() {
@@ -222,6 +260,7 @@ mod tests {
             let peer = PeerInfo {
                 pid: Some(std::process::id()),
                 uid,
+                same_user: None,
             };
             assert!(matches!(
                 verify(&manifest, "demo.alpha", peer),

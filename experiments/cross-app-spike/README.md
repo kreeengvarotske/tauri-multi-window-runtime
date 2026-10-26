@@ -7,13 +7,13 @@ A vertical prototype for [the cross-app design](../../docs/cross-app/README.md):
 ```text
 src/protocol.rs   messages, error codes, version negotiation (strict JSON)
 src/frame.rs      u32-LE length-prefixed frames, 1 MiB cap
-src/transport.rs  per-user endpoint, single instance, peer pid/uid
-src/identity.rs   manifest + OS evidence (pid → executable, uid)
+src/transport.rs  per-user endpoint (Windows: owner-only DACL), single instance, peer pid and user (uid / SID)
+src/identity.rs   manifest + OS evidence (pid → executable, same user)
 src/ops.rs        typed synthetic operations (Public checksum, App note, failing op)
 src/broker.rs     handshake, grants, scope derivation, CachedService per op, notices
 src/client.rs     typed client, cancellation, late-reply drop, reconnecting Session
 src/bin/          spike-broker, spike-client (a headless "test application")
-tests/cross_process.rs  11 tests with real separate processes
+tests/cross_process.rs  12 tests with real separate processes
 ```
 
 ## Run

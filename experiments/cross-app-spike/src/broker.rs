@@ -310,7 +310,17 @@ impl Broker {
         loop {
             tokio::select! {
                 accepted = listener.accept() => {
-                    let (stream, peer) = accepted?;
+                    let (stream, peer) = match accepted {
+                        Ok(accepted) => accepted,
+                        // One failed connection (a client gone before it was
+                        // accepted, no descriptors left) concerns that client
+                        // only. Back off briefly and keep serving the others.
+                        Err(err) => {
+                            eprintln!("accept failed: {err}");
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                            continue;
+                        }
+                    };
                     self.active.fetch_add(1, Ordering::SeqCst);
                     *lock(&self.last_activity) = Instant::now();
                     let broker = Arc::clone(&self);

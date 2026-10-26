@@ -128,8 +128,16 @@ impl Client {
                 )));
             }
         }
-        #[cfg(not(unix))]
-        let _ = server;
+        #[cfg(windows)]
+        if server.same_user != Some(true) {
+            // The pipe namespace is shared by all users: another user may have
+            // created this name first. Do not talk to a broker we cannot
+            // prove runs as us.
+            return Err(ClientError::Protocol(format!(
+                "broker pid {:?} does not run as the current user",
+                server.pid
+            )));
+        }
 
         let (mut reader, mut writer) = tokio::io::split(stream);
         let hello = ClientMessage::Hello {

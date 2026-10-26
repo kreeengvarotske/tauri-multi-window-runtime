@@ -73,7 +73,8 @@ The control cell `D = 0` estimates `B0`, `c` and `ΔH` directly. The cells with 
 | Shared pages | counted **once** (not summed across processes) | PSS sum |
 | Statistics | idle median, load average, **maximum sample** (not a true peak) | same |
 | Copy cost | per-call frame bytes in and out, deserialised bytes, from counters in a measurement build of the spike | same |
-| CPU-seconds, latency p50/p95 | recorded; their role is set by Q8 | same |
+| CPU-seconds | **co-primary with memory**: RAM and CPU are equal confirmatory metrics (decision recorded 2026-10-26, Q8). Both are analysed with the same rules, in one multiplicity family | same |
+| Latency p50/p95, throughput, errors, sample quality | reported for every run, descriptive | same |
 
 **Process selection.** The broker is *not* a child of the apps, so a process-tree monitor rooted at one app misses it. The measurement needs an explicit PID set: all client roots, their descendants, and the broker. That is a monitor extension, i.e. a separate future PR on top of #24, not part of this package.
 
