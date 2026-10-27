@@ -1,6 +1,6 @@
 # Memory and CPU benchmark: pilot protocol (draft for review)
 
-Status: **revision 3, Q1–Q8 decided, not yet frozen** (roadmap Phase 4, `docs/ROADMAP.md`
+Status: **revision 3, Q1–Q8 decided, not yet frozen; two freezes (pilot, then confirmatory) per §10a** (roadmap Phase 4, `docs/ROADMAP.md`
 in #30). Revision 3 (2026-10-26, after #33 comment 6429162749) makes **RAM
 and CPU co-primary outcomes**: hypotheses, multiplicity family, success
 criteria, the reading of discordant results, triplet counts, thresholds,
@@ -592,13 +592,57 @@ No decision is open in this revision.
 
 **Pilot gate.** Q7 and Q8 do not open the pilot by themselves. The pilot
 runs only after:
-- a current native smoke of scenario M, including arm C once it is
-  integrated;
+- written approval to launch the scripts with PowerShell on the measurement
+  machine;
+- a valid native smoke of scenario M with all three arms at the exact #36
+  SHA that will run the pilot;
 - the duration from that smoke replaces the estimate in §8a;
-- a final check of the frozen protocol and its artifacts (`schedule.csv`,
-  `configuration.json`, hashes).
+- the pilot freeze below, and a final pre-pilot review by Group 1.
 
 The pilot stays descriptive and is never used for confirmatory conclusions.
+
+### 10a. Two freezes (#33 comment 6452488540)
+
+The protocol is frozen twice. Each freeze is a commit whose SHA is written
+in the PR and in the run's `configuration.json`.
+
+1. **Pilot freeze**, before the first pilot run. It fixes:
+   - this document, at a CI-tested SHA;
+   - the #36 scenario SHA and the monitor SHA;
+   - the pilot `configuration.json` (build hashes, cells, phase lengths,
+     sampling interval);
+   - the pilot `schedule.csv` (seed, per-cell permutations).
+
+   Nothing in it changes during the pilot. A change means a new freeze and
+   a pilot started again; the runs before it are kept and reported, never
+   pooled.
+2. **Confirmatory freeze**, after the descriptive pilot report and before
+   any confirmatory run. It fixes:
+   - `Ref_A`, `Ref_B` and `thresholds.csv` (§8b), computed once from the
+     valid pilot runs;
+   - which hypotheses stay in each family after the ≥ 4 valid-run rule, and
+     the family sizes;
+   - the triplet count `n` per cell and the sign-test cut-offs;
+   - the confirmatory `schedule.csv` and `configuration.json`.
+
+   The confirmatory run also needs separate written approval after this
+   freeze.
+
+Checks tied to the freezes:
+- `thresholds.csv` is built only from pilot runs marked valid by §7.
+  `New-CatalogThresholds` refuses any phase but Pilot, and
+  `Get-CatalogReference` skips runs that are not valid (#36 `5be3846`).
+- After the confirmatory freeze, `thresholds.csv` is not changed. The
+  confirmatory analysis reads it only from the freeze commit and records
+  its SHA-256 next to the results. A hash mismatch stops the analysis.
+  This hash check is not in the #36 scripts yet; it is added there before
+  the confirmatory freeze.
+- Pilot and confirmatory data are never pooled. They are kept in separate
+  results directories with their own `phase` in `configuration.json`, and
+  each analysis reads one phase only.
+
+After each freeze, §10 status, the PR description and the ROADMAP evidence
+are updated with the exact SHAs and the CI and native results they rest on.
 
 ## 11. Acceptance criteria for this phase
 
@@ -608,5 +652,7 @@ The pilot stays descriptive and is never used for confirmatory conclusions.
   paging, aggregates and the size report; CI green; a native smoke run.
 - Pilot run only from this revision, reported per §8a, with raw data and the
   pre-run `schedule.csv` kept.
-- Confirmatory protocol frozen at a CI-tested SHA before the first
-  confirmatory triplet.
+- Pilot protocol frozen (§10a) at a CI-tested SHA before the first pilot
+  run.
+- Confirmatory protocol frozen (§10a) at a CI-tested SHA before the first
+  confirmatory triplet, with separate written approval.
