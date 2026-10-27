@@ -53,10 +53,10 @@ fn too_large_request(max_bytes: usize) -> AdapterError {
     )
 }
 
-fn invalid_request(error: serde_json::Error) -> AdapterError {
-    // serde's message names the field or position, never the value's bytes
-    // beyond what the frontend itself sent.
-    AdapterError::invalid_argument(format!("invalid request: {error}"))
+fn invalid_request(_error: serde_json::Error) -> AdapterError {
+    // serde's message quotes unknown field names, variant names and parts of
+    // the input, so it never reaches the envelope.
+    AdapterError::invalid_request()
 }
 
 /// Serializes `value` as JSON for a command response, stopping as soon as the output would pass
@@ -69,10 +69,8 @@ pub fn encode_json<T: Serialize>(value: &T, max_bytes: usize) -> Result<JsonByte
             AdapterErrorCode::ResponseTooLarge,
             format!("serialized response is larger than {max_bytes} bytes"),
         )),
-        Err(error) => Err(AdapterError::new(
-            AdapterErrorCode::Internal,
-            format!("response cannot be serialized: {error}"),
-        )),
+        // A `Serialize` impl's error text can carry the data it failed on.
+        Err(_) => Err(AdapterError::internal()),
     }
 }
 
@@ -237,6 +235,48 @@ mod tests {
             let error = decode_body::<Page>(&raw(text), 1024).unwrap_err();
             assert_eq!(error.code, AdapterErrorCode::InvalidArgument, "{text}");
         }
+    }
+
+    const SENTINEL: &str = "sentinel-7f3a9c";
+
+    #[test]
+    fn invalid_requests_never_echo_the_request() {
+        let bodies = [
+            raw(&format!(r#"{{"offset":0,"limit":1,"{SENTINEL}":true}}"#)),
+            raw(&format!(r#"{{"offset":"{SENTINEL}","limit":1}}"#)),
+            raw(&format!(r#"{{"offset":0,"limit":1,"note":"{SENTINEL}"#)),
+            raw(SENTINEL),
+            InvokeBody::Json(serde_json::json!({ "offset": 0, "limit": 1, SENTINEL: 1 })),
+            InvokeBody::Json(serde_json::json!({ "offset": SENTINEL, "limit": 1 })),
+        ];
+        for body in bodies {
+            let error = decode_body::<Page>(&body, 1024).unwrap_err();
+            let envelope = serde_json::to_string(&error).unwrap();
+            assert_eq!(error.code, AdapterErrorCode::InvalidArgument, "{envelope}");
+            assert_eq!(error.message, crate::error::messages::INVALID_REQUEST);
+            assert!(!envelope.contains(SENTINEL), "{envelope}");
+            assert!(!envelope.contains("offset"), "{envelope}");
+        }
+    }
+
+    /// Fails to serialize with its secret in the error.
+    struct Leaky;
+
+    impl Serialize for Leaky {
+        fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom(format!(
+                "cannot serialize {SENTINEL}"
+            )))
+        }
+    }
+
+    #[test]
+    fn serialization_errors_never_reach_the_envelope() {
+        let error = encode_json(&Leaky, 1024).unwrap_err();
+        let envelope = serde_json::to_string(&error).unwrap();
+        assert_eq!(error.code, AdapterErrorCode::Internal);
+        assert_eq!(error.message, crate::error::messages::INTERNAL);
+        assert!(!envelope.contains(SENTINEL), "{envelope}");
     }
 
     #[test]

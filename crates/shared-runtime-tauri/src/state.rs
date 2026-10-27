@@ -1,9 +1,9 @@
 use serde::Serialize;
-use shared_runtime::{CallOptions, Caller, Operation, Runtime, View};
-use std::{fmt, sync::Arc, time::Duration};
+use shared_runtime::{CallOptions, Caller, Operation, RegistryError, Runtime, View};
+use std::{sync::Arc, time::Duration};
 use tauri::WebviewWindow;
 
-use crate::{AdapterError, AdapterErrorCode, JsonBytes, codec::encode_json};
+use crate::{AdapterError, JsonBytes, codec::encode_json};
 
 /// The caller of a command: the window Tauri injected into it.
 ///
@@ -111,13 +111,15 @@ impl SharedRuntime {
     }
 }
 
-fn internal(error: impl fmt::Display) -> AdapterError {
-    AdapterError::new(AdapterErrorCode::Internal, error.to_string())
+/// A registry error names Rust types; the WebView gets only the class.
+fn internal(_error: RegistryError) -> AdapterError {
+    AdapterError::internal()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::AdapterErrorCode;
     use serde::Serializer;
     use shared_runtime::{
         CachePolicy, OpContext, OperationConfig, ResponseBudget, RuntimeConfig, ScopeRule,
@@ -412,10 +414,14 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.code, AdapterErrorCode::Internal);
+        assert_eq!(error.message, crate::error::messages::INTERNAL);
         let error = state
             .view::<Strings, All>(&caller, 1, 64, CallOptions::default())
             .await
             .unwrap_err();
         assert_eq!(error.code, AdapterErrorCode::Internal);
+        assert_eq!(error.message, crate::error::messages::INTERNAL);
+        let envelope = serde_json::to_string(&error).unwrap();
+        assert!(!envelope.contains("Strings"), "{envelope}");
     }
 }
