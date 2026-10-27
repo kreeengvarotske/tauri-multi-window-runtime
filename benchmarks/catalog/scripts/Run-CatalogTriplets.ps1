@@ -11,7 +11,7 @@ refuses to start, and -Phase Smoke runs A and B only.
 
 The whole order is written to schedule.csv before the first run
 (CatalogSchedule.ps1: cells interleaved block by block, arm permutations
-cycled). Each run is a fresh process with its own WebView2 user data folder
+cycled per cell) and read back and checked for completeness before it. Each run is a fresh process with its own WebView2 user data folder
 (WEBVIEW2_USER_DATA_FOLDER under profiles\), after a pause. The monitor
 samples the whole process tree every second until the app exits. Nothing is
 discarded: every report, monitor CSV, diagnostics file and log stays in
@@ -201,7 +201,7 @@ $configuration = [ordered]@{
     idleAfterSeconds      = $IdleAfterSeconds
     pauseSeconds          = $PauseSeconds
     stepIntervalMs        = $StepIntervalMs
-    order                 = 'CatalogSchedule.ps1: blocks of one triplet per cell, cell order rotated per block, arm permutations cycled over triplets in run order (schedule.csv)'
+    order                 = 'CatalogSchedule.ps1: blocks of one triplet per cell, cell order rotated per block, arm permutations cycled per cell from a different start in each cell (schedule.csv)'
     runScriptSha256       = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash
     scheduleScriptSha256  = (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'CatalogSchedule.ps1') -Algorithm SHA256).Hash
     summarizeScriptSha256 = (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'Summarize-CatalogRuns.ps1') -Algorithm SHA256).Hash
@@ -215,6 +215,12 @@ if (Test-Path -LiteralPath $protocolFile) { Copy-Item -LiteralPath $protocolFile
 # The full order, written before the first run.
 $schedule = New-CatalogSchedule -Cells $Cells -Arms $Arms -Triplets $Triplets -Seed $ScheduleSeed -DataSeed $DataSeed
 $schedule | Export-Csv -LiteralPath (Join-Path $OutputDirectory 'schedule.csv') -NoTypeInformation -Encoding UTF8
+# The file as written is read back and checked, and must match the order
+# the runs follow, before the first run.
+$written = @(Import-Csv -LiteralPath (Join-Path $OutputDirectory 'schedule.csv'))
+$scheduleProblems = @(Test-CatalogSchedule -Schedule $written -Cells $Cells -Arms $Arms -Triplets $Triplets)
+if ((@($written | ForEach-Object { $_.Name }) -join ',') -ne (@($schedule | ForEach-Object { $_.Name }) -join ',')) { $scheduleProblems += 'schedule.csv differs from the run order' }
+if ($scheduleProblems.Count -gt 0) { throw "schedule.csv is not a complete schedule: $($scheduleProblems -join '; ')" }
 
 $runLog = Join-Path $OutputDirectory 'runs.log'
 $maxDataMib = ($cellRows | Measure-Object -Property DataMib -Maximum).Maximum
