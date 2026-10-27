@@ -212,13 +212,10 @@ impl Catalog {
     }
 
     pub fn page(&self, query: &PageQuery) -> Page {
-        let order: &[u32] = match (query.category, query.sort) {
-            (Some(category), Sort::Price) => &self.by_category_price[usize::from(category)],
-            (None, Sort::Price) => &self.by_price,
-            (None, Sort::Name) => &self.by_name,
+        let Some(order) = self.order(query) else {
             // Not used by the workload; correct but proportional to the
             // catalog, so the service refuses it (see `validate_page`).
-            (Some(_), Sort::Name) => return reference_page(&self.records, query),
+            return reference_page(&self.records, query);
         };
         let rows = order
             .iter()
@@ -230,6 +227,30 @@ impl Catalog {
             total: order.len() as u32,
             rows,
         }
+    }
+
+    /// The prebuilt order a page query reads, or `None` for a category
+    /// filter sorted by name, which has no index.
+    pub fn order(&self, query: &PageQuery) -> Option<&[u32]> {
+        match (query.category, query.sort) {
+            (Some(category), Sort::Price) => self
+                .by_category_price
+                .get(usize::from(category))
+                .map(Vec::as_slice),
+            (None, Sort::Price) => Some(&self.by_price),
+            (None, Sort::Name) => Some(&self.by_name),
+            (Some(_), Sort::Name) => None,
+        }
+    }
+
+    /// The record at a position of an order, or with an id (ids are
+    /// positions).
+    pub fn record(&self, position: u32) -> Option<&Record> {
+        self.records.get(position as usize)
+    }
+
+    pub fn totals(&self) -> &[CategoryTotal] {
+        &self.totals
     }
 
     pub fn aggregate(&self) -> Vec<CategoryTotal> {

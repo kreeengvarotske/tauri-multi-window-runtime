@@ -5,9 +5,10 @@ the process monitor (protocol: docs/benchmark/memory-pilot-protocol.md).
 
 .DESCRIPTION
 Arms: A = per-window JS copy (no feature), B = hand-written shared Rust
-service (--features shared). Arm C (framework runtime) is added in a later
-change, after the shared-runtime crate is reviewed; until then -Phase Pilot
-refuses to start, and -Phase Smoke runs A and B only.
+service (--features shared), C = the same catalog through shared-runtime
+(--features framework; #35 at b65177d, merged in for arm C). -Phase Pilot
+still refuses to start: the pilot runs only after a native smoke of all
+three arms and the final check of the frozen protocol (#33 §10).
 
 The whole order is written to schedule.csv before the first run
 (CatalogSchedule.ps1: cells interleaved block by block, arm permutations
@@ -79,11 +80,8 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $benchRoot)
 $protocolFile = Join-Path $repoRoot 'docs\benchmark\memory-pilot-protocol.md'
 $sampleIntervalSeconds = 1
 
-if ($Arms -contains 'C') {
-    throw 'Arm C (framework runtime) is not in this build yet; it is added after the shared-runtime review. Use -Phase Smoke -Arms A,B.'
-}
 if ($Phase -eq 'Pilot') {
-    throw 'The pilot needs arms A, B and C and runs only after the protocol review (docs/benchmark/memory-pilot-protocol.md §8a).'
+    throw 'The pilot runs only after a native smoke of arms A, B and C and the final check of the frozen protocol (docs/benchmark/memory-pilot-protocol.md §10, pilot gate).'
 }
 
 $MonitorScript = (Resolve-Path -LiteralPath $MonitorScript).Path
@@ -136,7 +134,7 @@ function Get-PowerPlan {
 
 $exe = [ordered]@{}
 foreach ($arm in $Arms) { $exe[$arm] = Join-Path $binDirectory "arm-$arm.exe" }
-$features = @{ A = @(); B = @('--features', 'shared') }
+$features = @{ A = @(); B = @('--features', 'shared'); C = @('--features', 'framework') }
 
 if ($ExecutablesFrom) {
     foreach ($arm in $Arms) { Copy-Item -LiteralPath (Join-Path $ExecutablesFrom "bin\arm-$arm.exe") -Destination $exe[$arm] -Force }

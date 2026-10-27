@@ -25,7 +25,7 @@ function clock(start = 1_000_000) {
   };
 }
 
-function config(arm: "A" | "B" = "B"): CatalogConfig {
+function config(arm: "A" | "B" | "C" = "B"): CatalogConfig {
   return {
     scenario: "M", arm, armName: arm, dataMib: 0, seed: 1, windows: 2, stepIntervalMs: 500,
     idleBeforeSeconds: 1, warmupSeconds: 1, loadSeconds: 2, idleAfterSeconds: 1, records: 0, rustDataBytes: 0, automated: true,
@@ -119,7 +119,7 @@ describe("sampleHeap", () => {
 });
 
 describe("setupSource", () => {
-  it("arm A loads and indexes its own copy; arm B reads its first page over IPC", async () => {
+  it("arm A loads and indexes its own copy; arms B and C read their first page over IPC", async () => {
     const c = clock();
     const records = [{ id: 0, name: "ka", category: 0, priceCents: 1, createdAt: 1, updatedAt: 1, note: "n" }];
     const commands: string[] = [];
@@ -133,7 +133,9 @@ describe("setupSource", () => {
     expect(await a.source.get([0])).toEqual(records);
     const b = await setupSource(config("B"), c.deps({ invoke }), c.t);
     expect(b.setup).toMatchObject({ loadMs: null, records: null, timeToFirstPageMs: 5 });
-    expect(commands).toEqual(["catalog_load", "catalog_page"]);
+    const framework = await setupSource(config("C"), c.deps({ invoke }), c.t);
+    expect(framework.setup).toMatchObject({ loadMs: null, records: null, timeToFirstPageMs: 5 });
+    expect(commands).toEqual(["catalog_load", "catalog_page", "catalog_page"]);
   });
 });
 

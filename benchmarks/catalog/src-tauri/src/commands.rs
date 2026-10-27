@@ -1,6 +1,8 @@
 //! Commands of the catalog app. Coordination commands exist in every arm;
 //! data commands only in the arm they belong to (registered in `lib.rs`).
 
+#[cfg(feature = "framework")]
+use crate::framework;
 use crate::{
     catalog,
     config::CatalogConfig,
@@ -72,7 +74,7 @@ pub fn catalog_workload(
 
 /// Arm A: the whole catalog, generated for this call and not kept, as a
 /// plain backend would read it from a file or database.
-#[cfg(not(feature = "shared"))]
+#[cfg(not(any(feature = "shared", feature = "framework")))]
 #[tauri::command]
 pub async fn catalog_load(
     config: State<'_, CatalogConfig>,
@@ -114,8 +116,63 @@ pub async fn catalog_get(
     Ok(shared.get(&ids))
 }
 
+/// Arm C: one page, through the runtime's page view. The same request
+/// checks as arm B run first; the caller is the window Tauri identified.
+#[cfg(feature = "framework")]
+#[tauri::command]
+pub async fn catalog_page(
+    query: catalog::PageQuery,
+    runtime: State<'_, shared_runtime::Runtime>,
+    webview_window: WebviewWindow,
+) -> Result<catalog::Page, String> {
+    validate_page(&query)?;
+    let view = runtime
+        .view::<framework::LoadCatalog, framework::PageView>()
+        .map_err(|error| error.to_string())?;
+    view.get(&caller(&webview_window), query, Default::default())
+        .await
+        .map_err(framework::view_error)
+}
+
+#[cfg(feature = "framework")]
+#[tauri::command]
+pub async fn catalog_aggregate(
+    runtime: State<'_, shared_runtime::Runtime>,
+    webview_window: WebviewWindow,
+) -> Result<Vec<catalog::CategoryTotal>, String> {
+    let view = runtime
+        .view::<framework::LoadCatalog, framework::AggregateView>()
+        .map_err(|error| error.to_string())?;
+    view.get(&caller(&webview_window), (), Default::default())
+        .await
+        .map_err(framework::view_error)
+}
+
+#[cfg(feature = "framework")]
+#[tauri::command]
+pub async fn catalog_get(
+    ids: Vec<u32>,
+    runtime: State<'_, shared_runtime::Runtime>,
+    webview_window: WebviewWindow,
+) -> Result<Vec<catalog::Record>, String> {
+    if ids.len() > workload::GET_IDS {
+        return Err(format!("at most {} ids per call", workload::GET_IDS));
+    }
+    let view = runtime
+        .view::<framework::LoadCatalog, framework::GetView>()
+        .map_err(|error| error.to_string())?;
+    view.get(&caller(&webview_window), ids, Default::default())
+        .await
+        .map_err(framework::view_error)
+}
+
+#[cfg(feature = "framework")]
+fn caller(webview_window: &WebviewWindow) -> shared_runtime::Caller {
+    shared_runtime::Caller::window(webview_window.label())
+}
+
 /// The service's limits: bounded pages over the prebuilt orders only.
-#[cfg_attr(not(feature = "shared"), allow(dead_code))]
+#[cfg_attr(not(any(feature = "shared", feature = "framework")), allow(dead_code))]
 pub fn validate_page(query: &catalog::PageQuery) -> Result<(), String> {
     if query.limit == 0 || query.limit > workload::PAGE_ROWS {
         return Err(format!("limit must be 1 to {}", workload::PAGE_ROWS));

@@ -8,15 +8,21 @@ One source, one executable per arm. Only the data source differs:
 |---|---|---|---|
 | **A** per-window | none | each window calls `catalog_load` once, keeps the whole catalog in its JS heap and builds its own indexes | nothing |
 | **B** shared, hand-written | `shared` | one `Catalog` with its indexes, managed Tauri state; `catalog_page`, `catalog_aggregate`, `catalog_get` | one page (≤ 100 rows), the 32 totals or ≤ 20 records |
-| **C** framework | (later) | the catalog as an `Operation` in `shared-runtime`, pages and totals as `View`s, the same three commands | as B |
+| **C** framework | `framework` | the same `Catalog` and indexes as the cached output of one `Shared` operation (`catalog.load`, `CachePolicy::Forever`) in `shared-runtime`; pages, totals and records are `View`s that charge a `ResponseBudget` per item; the same three commands with the same request checks | as B |
 
-Arm C is added in a separate change after the `shared-runtime` review (PR #35) and a green CI at its exact head. Until then the runner refuses `-Phase Pilot` and accepts only arms A and B.
+Arm C uses `shared-runtime` from #35 at `b65177d76fbea799e3afe6504ff255cec7c0da88`. That is the head Group 1 reviewed and accepted for arm C (#35 comment 6446126629). It is merged into this branch by merge commit `29aece3`, on top of `5be3846`. Nothing else in #35 is changed here. The runtime limits are set in `framework::runtime_config`:
+- one execution slot and a queue of 4;
+- `N` concurrent projections;
+- a 10 s deadline and a 2 s shutdown grace;
+- a cache budget of 2 × `D` + 16 MiB.
+
+At startup, arm C loads the catalog into the runtime's cache before the windows open, as arms A and B generate it at startup. The runner still refuses `-Phase Pilot` until there is a native smoke of all three arms and the frozen protocol has had its final check (#33 §10).
 
 Everything else is the same in all arms: the frontend (`src/window.ts` runs one window; only `setupSource` picks the source), the table, the windows (`main`, `w1`…), the workload, the timing, the release profile, `Cargo.lock` (the crate is a member of the root workspace) and `--locked`. Runtime Lab and its public IPC contract are not touched; the `catalog_*` commands exist only in this app.
 
 ## Data set
 
-`catalog::generate(seed, D)` builds records (id, name, category 0–31, price, two timestamps, a short note) from a xorshift generator until the Rust representation reaches `D` bytes: struct sizes, string capacities and the three `u32` indexes (`catalog::data_bytes`). The app reports that exact size (`config.rustDataBytes`) and the record count in every report. D16 is on the order of 100 k records; the exact count is in every report. Both arms generate the catalog once at startup so that they do the same work before the measured phases; arm B keeps it, arm A drops it and serves `catalog_load` from a fresh copy per call, as a plain backend reading a file would.
+`catalog::generate(seed, D)` builds records (id, name, category 0–31, price, two timestamps, a short note) from a xorshift generator until the Rust representation reaches `D` bytes: struct sizes, string capacities and the three `u32` indexes (`catalog::data_bytes`). The app reports that exact size (`config.rustDataBytes`) and the record count in every report. D16 is on the order of 100 k records; the exact count is in every report. Every arm generates the catalog once at startup so that they do the same work before the measured phases. Arm B keeps it with its indexes. Arm C builds the same catalog and indexes inside the runtime's operation and keeps it in the runtime's cache. Arm A drops it and serves `catalog_load` from a fresh copy per call, as a plain backend reading a file would.
 
 Arm A builds in JS the same indexes the Rust service has (by name, by price, by category and price, and the per-category totals), so in both arms each step costs work proportional to its response, not to the data set.
 
@@ -41,8 +47,8 @@ A run: every window sets up its source and shows the first page → main fixes t
 cd benchmarks\catalog
 npm ci
 npm test
-# Smoke run (arms A and B, short phases), builds both arms first:
-.\scripts\Run-CatalogTriplets.ps1 -Phase Smoke -Arms A,B -Cells N2D0,N2D16 -Triplets 1 -IdleBeforeSeconds 5 -WarmupSeconds 5 -LoadSeconds 20 -IdleAfterSeconds 5 -PauseSeconds 10 -MonitorScript C:\path\to\Measure-ProcessTree.ps1 -OutputDirectory C:\results\catalog-smoke
+# Smoke run (all three arms, short phases), builds every arm first:
+.\scripts\Run-CatalogTriplets.ps1 -Phase Smoke -Arms A,B,C -Cells N2D0,N2D16 -Triplets 1 -IdleBeforeSeconds 5 -WarmupSeconds 5 -LoadSeconds 20 -IdleAfterSeconds 5 -PauseSeconds 10 -MonitorScript C:\path\to\Measure-ProcessTree.ps1 -OutputDirectory C:\results\catalog-smoke
 .\scripts\Summarize-CatalogRuns.ps1 -ResultsDirectory C:\results\catalog-smoke
 ```
 

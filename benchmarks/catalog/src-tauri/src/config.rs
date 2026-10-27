@@ -3,11 +3,22 @@
 use serde::Serialize;
 use std::path::PathBuf;
 
+#[cfg(all(feature = "shared", feature = "framework"))]
+compile_error!("features `shared` (arm B) and `framework` (arm C) are exclusive");
+
 /// Which arm this executable is; fixed at compile time.
-pub const ARM: &str = if cfg!(feature = "shared") { "B" } else { "A" };
+pub const ARM: &str = if cfg!(feature = "framework") {
+    "C"
+} else if cfg!(feature = "shared") {
+    "B"
+} else {
+    "A"
+};
 
 /// Human-readable arm name.
-pub const ARM_NAME: &str = if cfg!(feature = "shared") {
+pub const ARM_NAME: &str = if cfg!(feature = "framework") {
+    "shared-framework"
+} else if cfg!(feature = "shared") {
     "shared-manual"
 } else {
     "per-window"
