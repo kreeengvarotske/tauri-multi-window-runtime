@@ -207,7 +207,10 @@ analysed as a factor (§8).
 
 Per run: start → wait for all windows → compute expected checksums →
 idle 20 s → warm-up 30 s (the workload runs, not measured) → load 120 s →
-idle after 30 s → report → exit. About 4.1 minutes per run with the pause.
+idle after 30 s → report → exit. About 4.1 minutes per run with the pause
+(200 s of phases, start-up, 30 s pause). The native smoke measures the real
+time per run. If it is longer, the durations in §8a and §8b are recomputed
+from it before the freeze.
 
 Recorded per run: OS edition, version and build; CPU; RAM; power plan;
 WebView2 version; rustc; app and monitor hashes; arm; position in triplet;
@@ -225,7 +228,34 @@ A run is valid only if: the report exists and passed (every checksum right,
 no error, no abort); exit codes are 0; the monitor covers ≥ 80 % of expected
 load samples; the median load interval is within ±20 % of 1 s and none is
 longer than 5 s; the WebView2 process count during load equals the expected
-count for `N`; both co-primary measures are finite, and no load-phase CPU sample is unreadable. A triplet is valid for a comparison only if
+count for `N`; both co-primary measures are finite.
+
+Whole-run CPU (`RunCpuSeconds`) covers more than the load phase, so it has
+its own checks over the **whole measured interval**, from the first monitor
+sample to the end of the idle-after phase (post-load idle included). A
+load-phase-only check would leave most of the interval unchecked:
+- the first sample is no later than the start of the idle-before phase, so
+  the processes that exist at start-up are observed;
+- no monitor row in the interval has an unreadable CPU value
+  (`CpuUnreadableCount = 0`), and every in-tree diagnostics row has a
+  cumulative CPU value;
+- the samples cover ≥ 80 % of the interval at 1 s and no interval is longer
+  than 5 s.
+
+How processes are counted:
+- Each process contributes its last observed cumulative CPU time.
+- A process that leaves the tree before the end loses at most one interval
+  of CPU. It is counted in `CpuExitedProcesses`, reported per run, and does
+  not invalidate the run.
+- A process that starts and exits between two samples is never observed.
+  This limit is stated with every CPU result. The WebView2 process count
+  during load is checked separately (above).
+
+These checks are implemented in the #36 summarizer at `ff09868`, with tests
+on synthetic data (an unreadable value after the load phase, a gap, an
+early-exiting process).
+
+A triplet is valid for a comparison only if
 both runs in that comparison are valid (a triplet with an invalid B run still
 gives a valid C vs A difference). Invalid runs and triplets stay in the
 tables with the reason and are never replaced or re-run in place. The thresholds are checked against the pilot before they are
@@ -255,9 +285,15 @@ Why 6, not 5:
   position exactly twice in every cell, so the CPU outcome, which is more
   exposed to warm-up and order effects than a memory plateau, is not
   confounded with position inside a cell. This needs a per-cell order in the
-  scheduler: the #36 scheduler at `d0b2893` balances orders over the whole
-  run, which gives only 4 of the 6 permutations per cell. That change goes
-  into #36 after this revision is reviewed.
+  scheduler. The #36 scheduler at `d0b2893` balanced orders over the whole
+  run only, which gave 4 of the 6 permutations per cell. #36 `9d78ad6` now
+  orders per cell: for every seed, 6 triplets per cell give each
+  permutation once per cell and each arm in each position twice per cell
+  (8 times overall). For the confirmatory sizes 11, 14, 20 and 28, a
+  cell's permutations differ by at most one use. Tests in
+  `Test-CatalogScripts.ps1` check all of this. `schedule.csv` is read back
+  and checked for completeness before the first run. If Q8 is decided
+  differently, the scheduler and tests follow that decision.
 - **Spread estimate for two outcomes.** The confirmatory `n` (§8b) uses an
   upper confidence bound on each outcome's spread. With `k` triplets, the
   80 % upper bound of a standard deviation is `s·√((k−1)/χ²₀.₂,ₖ₋₁)`. That
