@@ -511,7 +511,8 @@ Open in revision 3 (proposals, for review before the pilot):
   - one Holm family of six over both outcomes;
   - the reading table in §8b.
 - **Q8 Pilot matrix:** 6 triplets per cell (72 runs, ≈ 4.9 h), with each
-  permutation once per cell. This needs the per-cell scheduler change in #36.
+  permutation once per cell. The per-cell scheduler this needs is in #36
+  (`9d78ad6`, fixed in `fe31123`); the decision itself is still open.
 
 The pilot stays descriptive, is never used for confirmatory conclusions,
 and runs only after this revision's review is complete and the scenario
