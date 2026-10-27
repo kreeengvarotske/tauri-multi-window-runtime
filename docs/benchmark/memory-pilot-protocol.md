@@ -251,7 +251,8 @@ How processes are counted:
   This limit is stated with every CPU result. The WebView2 process count
   during load is checked separately (above).
 
-These checks are implemented in the #36 summarizer at `ff09868`, with tests
+These checks are implemented in the #36 summarizer (`ff09868`; #36 head
+`fe31123`, hosted CI green on Linux and Windows), with tests
 on synthetic data (an unreadable value after the load phase, a gap, an
 early-exiting process).
 
@@ -291,7 +292,8 @@ Why 6, not 5:
   permutation once per cell and each arm in each position twice per cell
   (8 times overall). For the confirmatory sizes 11, 14, 20 and 28, a
   cell's permutations differ by at most one use. Tests in
-  `Test-CatalogScripts.ps1` check all of this. `schedule.csv` is read back
+  `Test-CatalogScripts.ps1` check all of this (passing on the hosted Windows
+runner at #36 `fe31123`, which fixed a return-value bug in the check). `schedule.csv` is read back
   and checked for completeness before the first run. If Q8 is decided
   differently, the scheduler and tests follow that decision.
 - **Spread estimate for two outcomes.** The confirmatory `n` (§8b) uses an
