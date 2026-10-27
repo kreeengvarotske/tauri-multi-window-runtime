@@ -135,5 +135,7 @@ function Test-CatalogSchedule {
         if ($Cells -cnotcontains $row.Cell) { $problems.Add("unknown cell '$($row.Cell)'") }
         if ($Arms -cnotcontains $row.Arm) { $problems.Add("unknown arm '$($row.Arm)'") }
     }
-    return , $problems.ToArray()
+    # Not wrapped: callers collect the strings with @(...), so an empty
+    # result counts 0 and one problem counts 1.
+    return $problems.ToArray()
 }
