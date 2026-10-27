@@ -1,13 +1,13 @@
 # Memory and CPU benchmark: pilot protocol (draft for review)
 
-Status: **revision 3, draft for review** (roadmap Phase 4, `docs/ROADMAP.md`
+Status: **revision 3, Q1–Q8 decided, not yet frozen** (roadmap Phase 4, `docs/ROADMAP.md`
 in #30). Revision 3 (2026-10-26, after #33 comment 6429162749) makes **RAM
 and CPU co-primary outcomes**: hypotheses, multiplicity family, success
 criteria, the reading of discordant results, triplet counts, thresholds,
 duration and the pilot matrix are recomputed (§1, §3, §8, §10 Q7–Q8). Revision 3 also
 removes every "RAM primary" statement. Revision 2 (three arms, guardrails
 in advance, native Windows 10 only) is otherwise kept. The values new in
-revision 3 (§10 Q7) are proposals until reviewed. No run of this protocol
+revision 3 were decided by Group 1 on 2026-10-27 (§10 Q7, Q8). No run of this protocol
 has happened. The
 pilot runs only from this revision after its review, is descriptive only
 and is never pooled with confirmatory data; the confirmatory run starts only
@@ -312,7 +312,7 @@ no conclusion" and never pooled with confirmatory data.
 
 ### 8b. Confirmatory proposal (frozen only after the pilot review)
 
-Values below are proposed now so that they are fixed before data exists;
+Values below are decided now (Q6, Q7) so that they are fixed before data exists;
 the pilot may change only the items marked *(from pilot)*, with the reason
 written down before the freeze. The old N = 16 pairs and the old sign-test
 cut-offs are **not** carried over.
@@ -329,7 +329,7 @@ one Holm procedure over all six, α = 0.05 one-sided):
   confirmatory run. It is never computed from confirmatory data.
 - Threshold forms (the reference `Ref` is defined below):
   - RAM δ_R = max(10 MiB, 5 % of Ref_A) (form unchanged from revision 2);
-  - CPU δ_C = max(1 s, 10 % of Ref_A) *(proposed, Q7)*.
+  - CPU δ_C = max(1 s, 10 % of Ref_A) *(Q7)*.
 - One family over both outcomes, because a "saves RAM or CPU" statement must
   control the chance of any false saving. With Holm, the first test runs at
   α/6 = 0.0083.
@@ -341,9 +341,9 @@ over the 3 cells within each outcome, α = 0.05 one-sided):
   `d_CA` < +η_{c,o} ("C is not worse than A by η or more"). Sign test on
   `d_CA − η_{c,o}`, with η_{c,o} a constant from the frozen table.
 - Margin forms:
-  - RAM η_R = max(10 MiB, 5 % of Ref_A) *(proposed, Q7)*;
+  - RAM η_R = max(10 MiB, 5 % of Ref_A) *(Q7)*;
   - CPU η_C = 1 s + 10 % of Ref_A. This is the revision 2 CPU guardrail (C
-    above 1.10 × A + 1 s) turned into a test *(proposed, Q7)*.
+    above 1.10 × A + 1 s) turned into a test *(Q7)*.
 - These tests only qualify a saving on the other outcome (below). They never
   support a saving claim on their own. They need no further multiplicity
   adjustment, because a combined statement requires both of its tests
@@ -375,12 +375,12 @@ it is; nothing is pooled across cells.
   for that outcome; otherwise report the interval as the framework's cost or
   saving.
 - RAM ε_R = max(5 MiB, 2 % of Ref_B) (form unchanged); CPU
-  ε_C = max(0.5 s, 5 % of Ref_B) *(proposed, Q7)*. ε_{c,o} is a constant from
+  ε_C = max(0.5 s, 5 % of Ref_B) *(Q7)*. ε_{c,o} is a constant from
   the frozen table, like δ and η.
 - Family F never supports a product-benefit statement, and family P never
   supports a statement about the framework against hand-written code.
 
-**Threshold reference** *(proposed, Q7; from pilot)*. The form of each
+**Threshold reference** *(Q7, decided; values from the pilot)*. The form of each
 threshold (floor and percentage) is fixed in this revision. The value the
 percentage applies to is fixed separately, before any confirmatory data:
 
@@ -404,6 +404,22 @@ percentage applies to is fixed separately, before any confirmatory data:
   limitation, not corrected for.
 - The pilot both gives the references and estimates `p` for the sample size
   (below). Both use pilot data only, so neither reads confirmatory data.
+
+Exact formulas (MiB for RAM, s for CPU; `Ref` rounded as above, the
+threshold itself not rounded):
+
+| Threshold | Comparison | Outcome | Reference | Formula | Used in |
+|---|---|---|---|---|---|
+| δ_R | C − A | RAM | `Ref_A` | max(10, 0.05 × Ref_A) | family P, H0: median `d_CA` ≥ −δ_R |
+| δ_C | C − A | CPU | `Ref_A` | max(1, 0.10 × Ref_A) | family P, H0: median `d_CA` ≥ −δ_C |
+| η_R | C − A | RAM | `Ref_A` | max(10, 0.05 × Ref_A) | non-inferiority, H0: median `d_CA` ≥ +η_R |
+| η_C | C − A | CPU | `Ref_A` | 1 + 0.10 × Ref_A | non-inferiority, H0: median `d_CA` ≥ +η_C |
+| ε_R | C − B | RAM | `Ref_B` | max(5, 0.02 × Ref_B) | family F, interval within ±ε_R |
+| ε_C | C − B | CPU | `Ref_B` | max(0.5, 0.05 × Ref_B) | family F, interval within ±ε_C |
+
+The implementation is `CatalogThresholds.ps1` in #36 (`5be3846`), which
+refuses any phase but `Pilot`; its synthetic tests cover each row at and
+around the floor crossover.
 
 The guardrails in §8d are relative to the confirmatory A and B medians of
 the same run by design. They are not test margins, and they can only block
@@ -555,29 +571,39 @@ Decided by Group 1 (#33 comment 6443417793, 2026-10-27):
   native smoke, and `schedule.csv` and `configuration.json` are kept from
   before the first run. The scheduler is in #36 (`9d78ad6`, fixed in
   `fe31123`). This decision does not open the pilot gate.
-- **Q7, direction confirmed:** RAM and CPU co-primary, whole-run CPU,
-  separate C−A and C−B comparisons, one Holm family for the six superiority
-  hypotheses, and the reading of discordant outcomes in §8b.
+- **Q7 CPU and harm thresholds** (direction in 6443417793, accepted in
+  6446125172):
+  - RAM and CPU co-primary, CPU as `RunCpuSeconds` over the whole run;
+  - separate C−A and C−B comparisons;
+  - one Holm family for the six superiority hypotheses, Holm over 3 cells
+    per outcome for non-inferiority, Holm over 8 intervals in family F;
+  - the reading of discordant outcomes in §8b;
+  - the thresholds in the §8b formula table: δ_R, δ_C, η_R, η_C for C−A and
+    ε_R, ε_C for C−B;
+  - reference only from the valid pilot runs of each cell, at least 4 of 6,
+    rounded to 0.1 MiB and 0.01 s, no floor fallback;
+  - `thresholds.csv` committed at the freeze SHA before any confirmatory
+    data, and the analysis reads thresholds only from that file;
+  - a difference exactly at the threshold counts against H1 and stays in
+    `n`;
+  - synthetic checks in #36 `CatalogThresholds.ps1` / `Test-CatalogScripts.ps1`.
 
-Open (proposals, for review before the pilot):
+No decision is open in this revision.
 
-- **Q7 numeric thresholds and their reference:**
-  - forms: δ_C = max(1 s, 10 % of Ref_A); η_R = max(10 MiB, 5 % of Ref_A);
-    η_C = 1 s + 10 % of Ref_A; ε_C = max(0.5 s, 5 % of Ref_B);
-  - reference: the arm A or B median over valid pilot runs per cell and
-    outcome, written to `thresholds.csv` at the freeze SHA before any
-    confirmatory run (§8b "Threshold reference"). The alternative is
-    absolute thresholds per cell; it is not proposed, because one absolute
-    value cannot fit both N2·D16 and N4·D64.
+**Pilot gate.** Q7 and Q8 do not open the pilot by themselves. The pilot
+runs only after:
+- a current native smoke of scenario M, including arm C once it is
+  integrated;
+- the duration from that smoke replaces the estimate in §8a;
+- a final check of the frozen protocol and its artifacts (`schedule.csv`,
+  `configuration.json`, hashes).
 
-The pilot stays descriptive, is never used for confirmatory conclusions,
-and runs only after this revision's review is complete and the scenario
-build has been checked.
+The pilot stays descriptive and is never used for confirmatory conclusions.
 
 ## 11. Acceptance criteria for this phase
 
 - Revision 3 reviewed; Q1–Q6 decided (done 2026-10-26); Q8 decided
-  (2026-10-27); Q7 decided, including the threshold reference.
+  (2026-10-27); Q7 decided, including the threshold reference (2026-10-27).
 - Scenario M implemented with unit tests for the generator, checksums,
   paging, aggregates and the size report; CI green; a native smoke run.
 - Pilot run only from this revision, reported per §8a, with raw data and the
