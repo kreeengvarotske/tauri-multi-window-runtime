@@ -262,7 +262,7 @@ mod tests {
             .view::<Strings, All>(&caller, 100, 412, CallOptions::default())
             .await
             .unwrap_err();
-        assert_eq!(error.code, AdapterErrorCode::ResponseTooLarge);
+        assert_eq!(error.code(), AdapterErrorCode::ResponseTooLarge);
     }
 
     /// Serialization runs while the projection slot is held: with one slot, a
@@ -305,11 +305,11 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert_eq!(second.code, AdapterErrorCode::DeadlineExceeded);
+        assert_eq!(second.code(), AdapterErrorCode::DeadlineExceeded);
         assert!(
-            second.message.contains("projection slot"),
+            second.message().contains("projection slot"),
             "{}",
-            second.message
+            second.message()
         );
 
         release_tx.send(()).unwrap();
@@ -386,7 +386,7 @@ mod tests {
         );
         assert!(started.elapsed() < Duration::from_secs(1));
         assert_eq!(
-            call.await.unwrap().unwrap_err().code,
+            call.await.unwrap().unwrap_err().code(),
             AdapterErrorCode::ShuttingDown
         );
         let later = state
@@ -399,7 +399,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert_eq!(later.code, AdapterErrorCode::ShuttingDown);
+        assert_eq!(later.code(), AdapterErrorCode::ShuttingDown);
     }
 
     #[tokio::test]
@@ -413,14 +413,14 @@ mod tests {
             .call::<Strings, _>(&caller, 1, 64, CallOptions::default(), |_| ())
             .await
             .unwrap_err();
-        assert_eq!(error.code, AdapterErrorCode::Internal);
-        assert_eq!(error.message, crate::error::messages::INTERNAL);
+        assert_eq!(error.code(), AdapterErrorCode::Internal);
+        assert_eq!(error.message(), crate::error::messages::INTERNAL);
         let error = state
             .view::<Strings, All>(&caller, 1, 64, CallOptions::default())
             .await
             .unwrap_err();
-        assert_eq!(error.code, AdapterErrorCode::Internal);
-        assert_eq!(error.message, crate::error::messages::INTERNAL);
+        assert_eq!(error.code(), AdapterErrorCode::Internal);
+        assert_eq!(error.message(), crate::error::messages::INTERNAL);
         let envelope = serde_json::to_string(&error).unwrap();
         assert!(!envelope.contains("Strings"), "{envelope}");
     }

@@ -60,26 +60,56 @@ impl AdapterErrorCode {
 /// because any of them can echo request content or private data. The only
 /// numbers in a message are the command's configured byte limits. The code
 /// says what happened; nothing about the request is logged.
+///
+/// Code outside this crate cannot put its own text in the envelope: the
+/// fields are private and the only public constructor,
+/// [`AdapterError::invalid_argument`], takes no message.
+///
+/// ```compile_fail
+/// use shared_runtime_tauri::{AdapterError, AdapterErrorCode};
+/// let _ = AdapterError::new(AdapterErrorCode::InvalidArgument, "app text");
+/// ```
+///
+/// ```compile_fail
+/// let mut error = shared_runtime_tauri::AdapterError::invalid_argument();
+/// error.message = String::from("app text");
+/// ```
+///
+/// ```
+/// use shared_runtime_tauri::{AdapterError, AdapterErrorCode};
+/// let error = AdapterError::invalid_argument();
+/// assert_eq!(error.code(), AdapterErrorCode::InvalidArgument);
+/// assert_eq!(error.message(), "invalid request");
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdapterError {
-    pub code: AdapterErrorCode,
-    pub message: String,
+    code: AdapterErrorCode,
+    message: String,
 }
 
 impl AdapterError {
-    pub fn new(code: AdapterErrorCode, message: impl Into<String>) -> Self {
+    /// `message` is a fixed text from `messages`, or one that carries no more
+    /// than a configured byte limit.
+    pub(crate) fn new(code: AdapterErrorCode, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
         }
     }
 
-    /// An application's own `INVALID_ARGUMENT`. The message is sent to the
-    /// WebView as given, so it must not quote the request; a fixed text such
-    /// as the adapter's own `"invalid request"` is safe.
-    pub fn invalid_argument(message: impl Into<String>) -> Self {
-        Self::new(AdapterErrorCode::InvalidArgument, message)
+    /// An application's own `INVALID_ARGUMENT`, with the same fixed message
+    /// as a request the adapter refuses.
+    pub fn invalid_argument() -> Self {
+        Self::invalid_request()
+    }
+
+    pub fn code(&self) -> AdapterErrorCode {
+        self.code
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
     }
 
     pub(crate) fn invalid_request() -> Self {
@@ -263,6 +293,24 @@ mod tests {
             assert!(!envelope.contains(SENTINEL), "{envelope}");
             assert!(!envelope.contains("7313377"), "{envelope}");
         }
+    }
+
+    #[test]
+    fn application_invalid_argument_does_not_carry_application_text() {
+        // An application maps its own refusal, whose text quotes the request,
+        // to INVALID_ARGUMENT; only the fixed message leaves.
+        let parsed: Result<u32, String> = Err(format!("bad page token {SENTINEL}"));
+        let error = parsed
+            .map_err(|_| AdapterError::invalid_argument())
+            .unwrap_err();
+        let envelope = serde_json::to_string(&error).unwrap();
+
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&envelope).unwrap(),
+            serde_json::json!({ "code": "INVALID_ARGUMENT", "message": messages::INVALID_REQUEST })
+        );
+        assert!(!envelope.contains(SENTINEL), "{envelope}");
+        assert_eq!(error, AdapterError::invalid_request());
     }
 
     #[test]

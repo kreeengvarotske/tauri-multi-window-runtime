@@ -197,12 +197,12 @@ mod tests {
         let before = DESERIALIZED.load(Ordering::SeqCst);
         let body = InvokeBody::Raw(vec![b' '; 1 << 20]);
         let error = decode_body::<Counted>(&body, 1024).unwrap_err();
-        assert_eq!(error.code, AdapterErrorCode::RequestTooLarge);
+        assert_eq!(error.code(), AdapterErrorCode::RequestTooLarge);
         assert_eq!(DESERIALIZED.load(Ordering::SeqCst), before);
         // One byte over the limit is refused too; exactly at it is not.
         let body = raw(r#"{"offset":0,"limit":100}"#);
         assert_eq!(
-            decode_body::<Page>(&body, 23).unwrap_err().code,
+            decode_body::<Page>(&body, 23).unwrap_err().code(),
             AdapterErrorCode::RequestTooLarge
         );
     }
@@ -212,7 +212,7 @@ mod tests {
         let before = DESERIALIZED.load(Ordering::SeqCst);
         let body = InvokeBody::Json(serde_json::json!({ "text": "x".repeat(4096) }));
         let error = decode_body::<Counted>(&body, 1024).unwrap_err();
-        assert_eq!(error.code, AdapterErrorCode::RequestTooLarge);
+        assert_eq!(error.code(), AdapterErrorCode::RequestTooLarge);
         assert_eq!(DESERIALIZED.load(Ordering::SeqCst), before);
         let small = InvokeBody::Json(serde_json::json!({ "offset": 1, "limit": 2 }));
         assert_eq!(
@@ -233,7 +233,7 @@ mod tests {
             r#"{"offset":0,"limit":1,"window":"main"}"#,
         ] {
             let error = decode_body::<Page>(&raw(text), 1024).unwrap_err();
-            assert_eq!(error.code, AdapterErrorCode::InvalidArgument, "{text}");
+            assert_eq!(error.code(), AdapterErrorCode::InvalidArgument, "{text}");
         }
     }
 
@@ -252,8 +252,12 @@ mod tests {
         for body in bodies {
             let error = decode_body::<Page>(&body, 1024).unwrap_err();
             let envelope = serde_json::to_string(&error).unwrap();
-            assert_eq!(error.code, AdapterErrorCode::InvalidArgument, "{envelope}");
-            assert_eq!(error.message, crate::error::messages::INVALID_REQUEST);
+            assert_eq!(
+                error.code(),
+                AdapterErrorCode::InvalidArgument,
+                "{envelope}"
+            );
+            assert_eq!(error.message(), crate::error::messages::INVALID_REQUEST);
             assert!(!envelope.contains(SENTINEL), "{envelope}");
             assert!(!envelope.contains("offset"), "{envelope}");
         }
@@ -274,8 +278,8 @@ mod tests {
     fn serialization_errors_never_reach_the_envelope() {
         let error = encode_json(&Leaky, 1024).unwrap_err();
         let envelope = serde_json::to_string(&error).unwrap();
-        assert_eq!(error.code, AdapterErrorCode::Internal);
-        assert_eq!(error.message, crate::error::messages::INTERNAL);
+        assert_eq!(error.code(), AdapterErrorCode::Internal);
+        assert_eq!(error.message(), crate::error::messages::INTERNAL);
         assert!(!envelope.contains(SENTINEL), "{envelope}");
     }
 
@@ -288,6 +292,6 @@ mod tests {
             full.as_slice()
         );
         let error = encode_json(&value, full.len() - 1).unwrap_err();
-        assert_eq!(error.code, AdapterErrorCode::ResponseTooLarge);
+        assert_eq!(error.code(), AdapterErrorCode::ResponseTooLarge);
     }
 }
