@@ -27,7 +27,7 @@ pub enum AdapterErrorCode {
     Overloaded,
     /// The runtime is shutting down.
     ShuttingDown,
-    /// The operation itself failed; the message is its `Display`.
+    /// The operation itself failed; the message is deliberately generic.
     OperationFailed,
     /// A bug in the application or adapter: an operation or view that is not
     /// registered, or a response that cannot be serialized.
@@ -53,10 +53,9 @@ impl AdapterErrorCode {
 /// The error a command returns: `{ "code": "...", "message": "..." }`, the
 /// same envelope as the demo IPC.
 ///
-/// Messages are for developers. They never contain request values, cached
-/// data or window labels; an operation's message is its own `Display`, so an
-/// operation whose errors may carry private data must keep it out of
-/// `Display`.
+/// Messages are safe to expose to the WebView. Operation failures use a
+/// generic message so an operation's error details cannot disclose private
+/// data through its `Display` implementation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdapterError {
@@ -76,10 +75,10 @@ impl AdapterError {
         Self::new(AdapterErrorCode::InvalidArgument, message)
     }
 
-    pub(crate) fn from_call<E: fmt::Display>(error: CallError<E>) -> Self {
+    pub(crate) fn from_call<E>(error: CallError<E>) -> Self {
         match error {
-            CallError::Operation(error) => {
-                Self::new(AdapterErrorCode::OperationFailed, error.to_string())
+            CallError::Operation(_) => {
+                Self::new(AdapterErrorCode::OperationFailed, "operation failed")
             }
             CallError::DeadlineExceeded => {
                 Self::new(AdapterErrorCode::DeadlineExceeded, "deadline exceeded")
@@ -91,7 +90,7 @@ impl AdapterError {
         }
     }
 
-    pub(crate) fn from_view_call<E: fmt::Display>(error: ViewCallError<E>) -> Self {
+    pub(crate) fn from_view_call<E>(error: ViewCallError<E>) -> Self {
         match error {
             ViewCallError::Source(error) => Self::from_call(error),
             ViewCallError::DeadlineExceeded => Self::new(
@@ -187,5 +186,17 @@ mod tests {
             AdapterError::from_view_call::<String>(ViewCallError::DeadlineExceeded).code,
             AdapterErrorCode::DeadlineExceeded
         );
+    }
+
+    #[test]
+    fn operation_error_details_are_not_serialized_to_the_webview() {
+        let error = AdapterError::from_call(CallError::Operation(Arc::new(
+            "authentication token: secret-value".to_owned(),
+        )));
+        let envelope = serde_json::to_string(&error).unwrap();
+
+        assert_eq!(error.code, AdapterErrorCode::OperationFailed);
+        assert_eq!(error.message, "operation failed");
+        assert!(!envelope.contains("secret-value"), "{envelope}");
     }
 }

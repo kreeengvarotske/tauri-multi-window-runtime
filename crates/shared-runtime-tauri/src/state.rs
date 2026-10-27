@@ -54,7 +54,6 @@ impl SharedRuntime {
     ) -> Result<JsonBytes, AdapterError>
     where
         O: Operation,
-        O::Error: fmt::Display,
         V: View<O>,
         V::Response: Serialize,
     {
@@ -84,7 +83,6 @@ impl SharedRuntime {
     ) -> Result<JsonBytes, AdapterError>
     where
         O: Operation,
-        O::Error: fmt::Display,
         T: Serialize,
     {
         let handle = self.runtime.operation::<O>().map_err(internal)?;
