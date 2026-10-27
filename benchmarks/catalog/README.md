@@ -58,7 +58,9 @@ One run by hand: `catalog-bench.exe --data-mib 16 --windows 2 --report out.json`
 - Validity (protocol §7): report passed; exit codes 0; ≥ 80 % of expected load samples; median load interval within 20 % of 1 s and no gap over 5 s; the same process count in every load sample; both co-primary measures finite. Whole-run CPU is checked over the whole measured interval, post-load idle included: first sample no later than the idle-before start, no unreadable CPU in any monitor row, a cumulative CPU value in every diagnostics row, ≥ 80 % coverage and no gap over 5 s. A process that leaves the tree early contributes its last observed value (at most one interval of its CPU is missing) and is counted in `CpuExitedProcesses`; a process that starts and exits between two samples is not seen at all. Invalid runs stay in the tables with their reasons.
 - Retained size (protocol §4): host and WebView2 Private above the D0 cell with the same windows and arm, next to the generator size and the JS heap.
 
-`Test-CatalogScripts.ps1` checks the schedule's balance for the pilot shape and the summarizer end to end on synthetic data, in Windows PowerShell 5.1 and PowerShell 7 (CI).
+**Thresholds** (`CatalogThresholds.ps1`, protocol #33 §8b, Q7 proposal): the reference for a percentage threshold is the arm A (δ, η) or arm B (ε) median over the valid **pilot** runs of a cell, rounded to 0.1 MiB / 0.01 s, with at least 4 valid runs; otherwise that cell has no threshold for that outcome (no fallback to the floor). `New-CatalogThresholds` gives the rows of `thresholds.csv`, which is frozen before any confirmatory run, and refuses any phase but `Pilot`. In the sign test a difference exactly at the threshold counts against H1 and stays in `n`. Nothing here is run yet; the confirmatory analysis will read thresholds only from the frozen file.
+
+`Test-CatalogScripts.ps1` checks the schedule's balance for the pilot shape, the threshold forms, references, sign counts at the threshold and the protocol's cut-offs, and the summarizer end to end on synthetic data, in Windows PowerShell 5.1 and PowerShell 7 (CI).
 
 ## What this does not show
 

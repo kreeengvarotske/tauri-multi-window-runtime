@@ -1,7 +1,8 @@
 <#
 .SYNOPSIS
-Tests CatalogSchedule.ps1 (balance of the pilot order) and
-Summarize-CatalogRuns.ps1 (validity, triplet differences, retained size) on
+Tests CatalogSchedule.ps1 (balance of the pilot order),
+CatalogThresholds.ps1 (threshold forms, pilot reference, sign counts at the
+threshold, cut-offs) and Summarize-CatalogRuns.ps1 (validity, triplet differences, retained size) on
 synthetic data.
 
 .DESCRIPTION
@@ -15,6 +16,7 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $culture = [System.Globalization.CultureInfo]::InvariantCulture
 . (Join-Path $PSScriptRoot 'CatalogSchedule.ps1')
+. (Join-Path $PSScriptRoot 'CatalogThresholds.ps1')
 $failures = New-Object System.Collections.Generic.List[string]
 
 function Assert-True {
@@ -226,6 +228,100 @@ try {
 finally {
     Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
 }
+
+# --- Thresholds (protocol §8b, Q7): forms at and around the floor crossover.
+$marginCases = @(
+    @('Delta', 'RAM', 150.0, 10.0), @('Delta', 'RAM', 200.0, 10.0), @('Delta', 'RAM', 300.0, 15.0),
+    @('Delta', 'CPU', 5.0, 1.0), @('Delta', 'CPU', 10.0, 1.0), @('Delta', 'CPU', 25.0, 2.5),
+    @('Eta', 'RAM', 200.0, 10.0), @('Eta', 'RAM', 400.0, 20.0),
+    @('Eta', 'CPU', 0.0, 1.0), @('Eta', 'CPU', 20.0, 3.0),
+    @('Epsilon', 'RAM', 250.0, 5.0), @('Epsilon', 'RAM', 400.0, 8.0),
+    @('Epsilon', 'CPU', 10.0, 0.5), @('Epsilon', 'CPU', 30.0, 1.5)
+)
+foreach ($case in $marginCases) {
+    $margin = Get-CatalogMargin -Kind $case[0] -Outcome $case[1] -Reference $case[2]
+    Assert-Near "margin $($case[0]) $($case[1]) at reference $($case[2])" $margin.ToString('R', $culture) $case[3] 1e-12
+}
+$threw = $false
+try { Get-CatalogMargin -Kind Delta -Outcome RAM -Reference -1 | Out-Null } catch { $threw = $true }
+Assert-True 'margin: negative reference refused' $threw
+
+# Pilot reference: median of valid pilot runs per cell and arm, rounded; invalid runs and other cells ignored.
+function New-ThresholdRun {
+    param([string]$Cell, [string]$Arm, [bool]$Valid, [double]$Ram, [double]$Cpu)
+    [pscustomobject]@{ Cell = $Cell; Arm = $Arm; Valid = $Valid; LoadPrivateMBAvg = $Ram.ToString('R', $culture); RunCpuSeconds = $Cpu.ToString('R', $culture) }
+}
+$pilot = New-Object System.Collections.Generic.List[object]
+foreach ($pair in @(@(300.04, 20.004), @(310.0, 21.0), @(305.0, 20.5), @(320.0, 22.0), @(290.0, 19.0))) { $pilot.Add((New-ThresholdRun 'N2D16' 'A' $true $pair[0] $pair[1])) }
+$pilot.Add((New-ThresholdRun 'N2D16' 'A' $false 1.0 0.1))
+foreach ($pair in @(@(250.0, 10.0), @(260.0, 11.0), @(255.0, 10.5), @(270.0, 12.0))) { $pilot.Add((New-ThresholdRun 'N2D16' 'B' $true $pair[0] $pair[1])) }
+foreach ($pair in @(@(500.0, 30.0), @(510.0, 31.0), @(505.0, 30.5))) { $pilot.Add((New-ThresholdRun 'N4D64' 'A' $true $pair[0] $pair[1])) }
+$pilot.Add((New-ThresholdRun 'N4D64' 'A' $false 900.0 90.0))
+foreach ($pair in @(@(400.0, 20.0), @(410.0, 21.0), @(405.0, 20.5), @(415.0, 21.5))) { $pilot.Add((New-ThresholdRun 'N4D64' 'B' $true $pair[0] $pair[1])) }
+
+$refRam = Get-CatalogReference -Runs $pilot.ToArray() -Phase Pilot -Cell N2D16 -Arm A -Outcome RAM
+Assert-Near 'reference: odd count, invalid run ignored' $refRam.Reference.ToString('R', $culture) 305.0
+Assert-True 'reference: 5 valid runs counted' ($refRam.ValidRuns -eq 5) "got $($refRam.ValidRuns)"
+$refB = Get-CatalogReference -Runs $pilot.ToArray() -Phase Pilot -Cell N2D16 -Arm B -Outcome CPU
+Assert-Near 'reference: even count takes the mean of the middle two' $refB.Reference.ToString('R', $culture) 10.75
+$rounding = @((New-ThresholdRun 'X' 'A' $true 100.04 1.004), (New-ThresholdRun 'X' 'A' $true 100.06 1.006), (New-ThresholdRun 'X' 'A' $true 100.05 1.005), (New-ThresholdRun 'X' 'A' $true 100.05 1.005))
+Assert-Near 'reference: RAM rounded to 0.1 MiB' (Get-CatalogReference -Runs $rounding -Phase Pilot -Cell X -Arm A -Outcome RAM).Reference.ToString('R', $culture) 100.1
+Assert-Near 'reference: CPU rounded to 0.01 s' (Get-CatalogReference -Runs $rounding -Phase Pilot -Cell X -Arm A -Outcome CPU).Reference.ToString('R', $culture) 1.01
+$short = Get-CatalogReference -Runs $pilot.ToArray() -Phase Pilot -Cell N4D64 -Arm A -Outcome RAM
+Assert-True 'reference: 3 valid runs give no reference' ($null -eq $short.Reference -and $short.Reason -like '3 valid pilot runs*need 4*') "got '$($short.Reference)' '$($short.Reason)'"
+foreach ($phase in @('Confirmatory', 'Smoke', '')) {
+    $threw = $false
+    try { Get-CatalogReference -Runs $pilot.ToArray() -Phase $phase -Cell N2D16 -Arm A -Outcome RAM | Out-Null } catch { $threw = $true }
+    Assert-True "reference: phase '$phase' refused" $threw
+    $threw = $false
+    try { New-CatalogThresholds -Runs $pilot.ToArray() -Phase $phase -Cells N2D16 | Out-Null } catch { $threw = $true }
+    Assert-True "thresholds: phase '$phase' refused" $threw
+}
+
+# thresholds.csv content: every cell x kind x outcome; no floor fallback without a reference; CSV round trip keeps the values.
+$table = @(New-CatalogThresholds -Runs $pilot.ToArray() -Phase Pilot -Cells N2D16, N4D64)
+Assert-True 'thresholds: 2 cells x 6 rows' ($table.Count -eq 12) "got $($table.Count)"
+$row = @($table | Where-Object { $_.Cell -eq 'N2D16' -and $_.Kind -eq 'Delta' -and $_.Outcome -eq 'RAM' })[0]
+Assert-Near 'thresholds: N2D16 delta RAM = max(10, 5% of 305)' $row.Threshold.ToString('R', $culture) 15.25
+$row = @($table | Where-Object { $_.Cell -eq 'N2D16' -and $_.Kind -eq 'Eta' -and $_.Outcome -eq 'CPU' })[0]
+Assert-Near 'thresholds: N2D16 eta CPU = 1 + 10% of 20.5' $row.Threshold.ToString('R', $culture) 3.05
+$row = @($table | Where-Object { $_.Cell -eq 'N2D16' -and $_.Kind -eq 'Epsilon' -and $_.Outcome -eq 'CPU' })[0]
+Assert-Near 'thresholds: N2D16 epsilon CPU from arm B = max(0.5, 5% of 10.75)' $row.Threshold.ToString('R', $culture) 0.5375
+$missing = @($table | Where-Object { $_.Cell -eq 'N4D64' -and $_.ReferenceArm -eq 'A' })
+Assert-True 'thresholds: N4D64 arm-A rows have no threshold (no floor fallback)' (@($missing | Where-Object { $null -ne $_.Threshold }).Count -eq 0 -and $missing.Count -eq 4)
+$present = @($table | Where-Object { $_.Cell -eq 'N4D64' -and $_.ReferenceArm -eq 'B' -and $null -ne $_.Threshold })
+Assert-True 'thresholds: N4D64 arm-B rows still have a threshold' ($present.Count -eq 2) "got $($present.Count)"
+$csvRuns = @($pilot | ConvertTo-Csv -NoTypeInformation | ConvertFrom-Csv)
+$csvTable = @(New-CatalogThresholds -Runs $csvRuns -Phase Pilot -Cells N2D16, N4D64)
+Assert-True 'thresholds: same values after a CSV round trip of the runs' ((($table | ForEach-Object { "$($_.Threshold)" }) -join ',') -eq (($csvTable | ForEach-Object { "$($_.Threshold)" }) -join ','))
+
+# Sign counts at the threshold: d = -delta exactly counts against H1 and stays in n.
+$count = Get-SignCount -Differences @(-12.0, -10.0, -15.0, -9.0, -11.0) -Shift 10.0
+Assert-True 'sign: at the threshold is neither below nor dropped' ($count.N -eq 5 -and $count.Below -eq 3 -and $count.AtZero -eq 1 -and $count.Above -eq 1) "got $($count.Below)/$($count.AtZero)/$($count.Above) of $($count.N)"
+$count = Get-SignCount -Differences @(-1.1, -1.2, 0.5) -Shift 1.1
+Assert-True 'sign: fractional CPU threshold hit exactly' ($count.Below -eq 1 -and $count.AtZero -eq 1 -and $count.Above -eq 1)
+$count = Get-SignCount -Differences @(2.9, 3.05, 3.1) -Shift -3.05
+Assert-True 'sign: non-inferiority shift (d - eta)' ($count.Below -eq 1 -and $count.AtZero -eq 1 -and $count.Above -eq 1)
+
+# Cut-offs of the protocol table (§8b): family P at 0.05/6, non-inferiority at 0.05/3.
+foreach ($case in @(@(11, 10), @(14, 12), @(20, 16), @(28, 21))) {
+    foreach ($alpha in @((0.05 / 6), (0.05 / 3))) {
+        $k = Get-SignCritical -N $case[0] -Alpha $alpha
+        Assert-True "critical: n=$($case[0]) alpha=$([Math]::Round($alpha, 4)) is $($case[1])" ($k -eq $case[1]) "got $k"
+        Assert-True "critical: n=$($case[0]) size at k within alpha, k-1 above" ((Get-BinomialUpperTail -N $case[0] -K $k -P 0.5) -le $alpha -and (Get-BinomialUpperTail -N $case[0] -K ($k - 1) -P 0.5) -gt $alpha)
+    }
+}
+Assert-Near 'power: n=14, k=12, p=0.90' (Get-BinomialUpperTail -N 14 -K 12 -P 0.9).ToString('R', $culture) 0.8416 0.0001
+Assert-True 'critical: too few triplets can never reject' ((Get-SignCritical -N 5 -Alpha (0.05 / 6)) -eq 6)
+
+$diffs = @(-20.0, -20.0, -20.0, -20.0, -20.0, -20.0, -20.0, -20.0, -20.0, -20.0, 5.0)
+$test = Test-SignMargin -Differences $diffs -Shift 10.0 -Alpha (0.05 / 6)
+Assert-True 'test: 10 of 11 below -delta rejects' ($test.Reject -and $test.Critical -eq 10)
+$diffs[0] = -10.0
+$test = Test-SignMargin -Differences $diffs -Shift 10.0 -Alpha (0.05 / 6)
+Assert-True 'test: one moved onto the threshold no longer rejects' (-not $test.Reject -and $test.Below -eq 9 -and $test.AtZero -eq 1 -and $test.N -eq 11)
+$test = Test-SignMargin -Differences @() -Shift 10.0 -Alpha (0.05 / 6)
+Assert-True 'test: no triplets never rejects' (-not $test.Reject)
 
 if ($failures.Count -gt 0) {
     Write-Host ''
