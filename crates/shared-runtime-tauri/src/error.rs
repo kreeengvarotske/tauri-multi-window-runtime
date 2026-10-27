@@ -53,39 +53,86 @@ impl AdapterErrorCode {
 /// The error a command returns: `{ "code": "...", "message": "..." }`, the
 /// same envelope as the demo IPC.
 ///
-/// Messages are safe to expose to the WebView. Operation failures use a
-/// generic message so an operation's error details cannot disclose private
-/// data through its `Display` implementation.
+/// Messages are safe to expose to the WebView. Every error the adapter maps
+/// carries a fixed message for its class (`messages` below): no `Display` of
+/// an operation error, a view's `InvalidRequest` text, a serde or parser
+/// error, a registry error or a serialization error reaches the envelope,
+/// because any of them can echo request content or private data. The only
+/// numbers in a message are the command's configured byte limits. The code
+/// says what happened; nothing about the request is logged.
+///
+/// Code outside this crate cannot put its own text in the envelope: the
+/// fields are private and the only public constructor,
+/// [`AdapterError::invalid_argument`], takes no message.
+///
+/// ```compile_fail
+/// use shared_runtime_tauri::{AdapterError, AdapterErrorCode};
+/// let _ = AdapterError::new(AdapterErrorCode::InvalidArgument, "app text");
+/// ```
+///
+/// ```compile_fail
+/// let mut error = shared_runtime_tauri::AdapterError::invalid_argument();
+/// error.message = String::from("app text");
+/// ```
+///
+/// ```
+/// use shared_runtime_tauri::{AdapterError, AdapterErrorCode};
+/// let error = AdapterError::invalid_argument();
+/// assert_eq!(error.code(), AdapterErrorCode::InvalidArgument);
+/// assert_eq!(error.message(), "invalid request");
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdapterError {
-    pub code: AdapterErrorCode,
-    pub message: String,
+    code: AdapterErrorCode,
+    message: String,
 }
 
 impl AdapterError {
-    pub fn new(code: AdapterErrorCode, message: impl Into<String>) -> Self {
+    /// `message` is a fixed text from `messages`, or one that carries no more
+    /// than a configured byte limit.
+    pub(crate) fn new(code: AdapterErrorCode, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
         }
     }
 
-    pub fn invalid_argument(message: impl Into<String>) -> Self {
-        Self::new(AdapterErrorCode::InvalidArgument, message)
+    /// An application's own `INVALID_ARGUMENT`, with the same fixed message
+    /// as a request the adapter refuses.
+    pub fn invalid_argument() -> Self {
+        Self::invalid_request()
+    }
+
+    pub fn code(&self) -> AdapterErrorCode {
+        self.code
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub(crate) fn invalid_request() -> Self {
+        Self::new(AdapterErrorCode::InvalidArgument, messages::INVALID_REQUEST)
+    }
+
+    pub(crate) fn internal() -> Self {
+        Self::new(AdapterErrorCode::Internal, messages::INTERNAL)
     }
 
     pub(crate) fn from_call<E>(error: CallError<E>) -> Self {
         match error {
-            CallError::Operation(_) => {
-                Self::new(AdapterErrorCode::OperationFailed, "operation failed")
-            }
-            CallError::DeadlineExceeded => {
-                Self::new(AdapterErrorCode::DeadlineExceeded, "deadline exceeded")
-            }
-            CallError::Overloaded => Self::new(AdapterErrorCode::Overloaded, "runtime overloaded"),
+            CallError::Operation(_) => Self::new(
+                AdapterErrorCode::OperationFailed,
+                messages::OPERATION_FAILED,
+            ),
+            CallError::DeadlineExceeded => Self::new(
+                AdapterErrorCode::DeadlineExceeded,
+                messages::DEADLINE_EXCEEDED,
+            ),
+            CallError::Overloaded => Self::new(AdapterErrorCode::Overloaded, messages::OVERLOADED),
             CallError::ShuttingDown => {
-                Self::new(AdapterErrorCode::ShuttingDown, "runtime is shutting down")
+                Self::new(AdapterErrorCode::ShuttingDown, messages::SHUTTING_DOWN)
             }
         }
     }
@@ -95,14 +142,31 @@ impl AdapterError {
             ViewCallError::Source(error) => Self::from_call(error),
             ViewCallError::DeadlineExceeded => Self::new(
                 AdapterErrorCode::DeadlineExceeded,
-                "deadline exceeded waiting for a projection slot",
+                messages::PROJECTION_DEADLINE_EXCEEDED,
             ),
-            ViewCallError::View(ViewError::InvalidRequest(why)) => Self::invalid_argument(why),
-            ViewCallError::View(error) => {
-                Self::new(AdapterErrorCode::ResponseTooLarge, error.to_string())
-            }
+            // The view's own text may quote the request; only the class leaves.
+            ViewCallError::View(ViewError::InvalidRequest(_)) => Self::invalid_request(),
+            ViewCallError::View(
+                ViewError::TooManyItems { .. } | ViewError::TooManyBytes { .. },
+            ) => Self::new(
+                AdapterErrorCode::ResponseTooLarge,
+                messages::RESPONSE_TOO_LARGE,
+            ),
         }
     }
+}
+
+/// The fixed message of each error class the adapter maps.
+pub(crate) mod messages {
+    pub const INVALID_REQUEST: &str = "invalid request";
+    pub const RESPONSE_TOO_LARGE: &str = "response is too large";
+    pub const DEADLINE_EXCEEDED: &str = "deadline exceeded";
+    pub const PROJECTION_DEADLINE_EXCEEDED: &str =
+        "deadline exceeded waiting for a projection slot";
+    pub const OVERLOADED: &str = "runtime overloaded";
+    pub const SHUTTING_DOWN: &str = "runtime is shutting down";
+    pub const OPERATION_FAILED: &str = "operation failed";
+    pub const INTERNAL: &str = "internal error";
 }
 
 impl fmt::Display for AdapterError {
@@ -186,6 +250,67 @@ mod tests {
             AdapterError::from_view_call::<String>(ViewCallError::DeadlineExceeded).code,
             AdapterErrorCode::DeadlineExceeded
         );
+    }
+
+    const SENTINEL: &str = "sentinel-7f3a9c";
+
+    #[test]
+    fn view_error_details_are_not_serialized_to_the_webview() {
+        let cases = [
+            (
+                ViewCallError::<String>::View(ViewError::InvalidRequest(format!(
+                    "unknown sort key {SENTINEL}"
+                ))),
+                AdapterErrorCode::InvalidArgument,
+                messages::INVALID_REQUEST,
+            ),
+            (
+                ViewCallError::View(ViewError::TooManyItems {
+                    items: 7_313_377,
+                    max_items: 1,
+                }),
+                AdapterErrorCode::ResponseTooLarge,
+                messages::RESPONSE_TOO_LARGE,
+            ),
+            (
+                ViewCallError::View(ViewError::TooManyBytes {
+                    bytes: 7_313_377,
+                    max_bytes: 1,
+                }),
+                AdapterErrorCode::ResponseTooLarge,
+                messages::RESPONSE_TOO_LARGE,
+            ),
+            (
+                ViewCallError::Source(CallError::Operation(Arc::new(SENTINEL.to_owned()))),
+                AdapterErrorCode::OperationFailed,
+                messages::OPERATION_FAILED,
+            ),
+        ];
+        for (error, code, message) in cases {
+            let error = AdapterError::from_view_call(error);
+            let envelope = serde_json::to_string(&error).unwrap();
+            assert_eq!((error.code, error.message.as_str()), (code, message));
+            assert!(!envelope.contains(SENTINEL), "{envelope}");
+            assert!(!envelope.contains("7313377"), "{envelope}");
+        }
+    }
+
+    #[test]
+    fn application_invalid_argument_does_not_carry_application_text() {
+        // An application maps its own refusal, whose text quotes the request,
+        // to INVALID_ARGUMENT; only the fixed message leaves.
+        let parsed: Result<u32, String> = Err(format!("bad page token {SENTINEL}"));
+        let error = parsed
+            .map_err(|_| AdapterError::invalid_argument())
+            .unwrap_err();
+        let envelope = serde_json::to_string(&error).unwrap();
+
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&envelope).unwrap(),
+            serde_json::json!({ "code": "INVALID_ARGUMENT", "message": messages::INVALID_REQUEST })
+        );
+        assert!(!envelope.contains(SENTINEL), "{envelope}");
+        assert_eq!(error, AdapterError::invalid_request());
     }
 
     #[test]

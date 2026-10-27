@@ -177,6 +177,29 @@ fn a_forged_window_or_scope_in_the_request_is_refused() {
     ] {
         let error = invoke(&w1, "demo_catalog_page", raw(forged)).unwrap_err();
         assert_eq!(code(&error), "INVALID_ARGUMENT", "{error}");
+        // Only the class leaves: no serde text naming the forged field.
+        assert_eq!(error["message"], "invalid request", "{error}");
+    }
+}
+
+#[test]
+fn refused_requests_do_not_echo_their_content_to_the_webview() {
+    const SENTINEL: &str = "sentinel-7f3a9c";
+    let app = build(DemoConfig::default());
+    let main = window(&app, "main");
+    for body in [
+        // Unknown field, malformed value, and a value the view itself refuses.
+        raw(json!({ "offset": 0, "limit": 1, SENTINEL: true })),
+        raw(json!({ "offset": SENTINEL, "limit": 1 })),
+        InvokeBody::Raw(format!(r#"{{"offset":0,"limit":"{SENTINEL}"#).into_bytes()),
+        raw(json!({ "offset": 0, "limit": 0 })),
+    ] {
+        let error = invoke(&main, "demo_catalog_page", body).unwrap_err();
+        let envelope = error.to_string();
+        assert_eq!(code(&error), "INVALID_ARGUMENT", "{envelope}");
+        assert_eq!(error["message"], "invalid request", "{envelope}");
+        assert!(!envelope.contains(SENTINEL), "{envelope}");
+        assert!(!envelope.contains("limit"), "{envelope}");
     }
 }
 
