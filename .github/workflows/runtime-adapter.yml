@@ -39,7 +39,9 @@ jobs:
         shell: bash
         run: |
           for crate in runtime-core shared-runtime; do
-            if cargo tree -p "$crate" -e normal --locked | grep -i tauri; then
+            # One package name per line, so a path containing "tauri"
+            # (the checkout directory) does not match.
+            if cargo tree -p "$crate" -e normal --locked --prefix none --format '{p}' | grep -E '^tauri'; then
               echo "$crate depends on Tauri"; exit 1
             fi
           done
