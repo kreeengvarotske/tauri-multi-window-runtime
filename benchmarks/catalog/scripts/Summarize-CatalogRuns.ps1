@@ -9,16 +9,30 @@ Descriptive only: smoke and pilot results carry "descriptive, no conclusion"
 whatever the numbers. The confirmatory analysis (protocol §8b) is not here;
 it is written and reviewed before any confirmatory run.
 
-Primary measure (protocol §3, §8c): LoadPrivateMBAvg, the time average over
-the load phase of the sum of Private Bytes over the process tree (host and
-every WebView2 process). Working Set is shown only as a diagnostic upper
-bound (shared pages counted once per process) and never used for a claim.
+Co-primary measures (protocol revision 3, §3, §8c):
+- RAM: LoadPrivateMBAvg, the time average over the load phase of the sum of
+  Private Bytes over the process tree (host and every WebView2 process);
+- CPU: RunCpuSeconds, for every process of the tree its last readable
+  cumulative CPU time (user + kernel, from the monitor diagnostics) at or
+  before the end of the idle-after phase, summed. StartupCpuSeconds is the
+  same at the start of the warm-up; LoadCpuSeconds the sum of the monitor's
+  per-sample deltas in the load phase.
+Working Set is shown only as a diagnostic upper bound (shared pages counted
+once per process) and never used for a claim.
 
 Validity (protocol §7): the report exists and passed; exit codes are 0; the
 monitor covers at least 80 % of expected load samples; the median load
 interval is within 20 % of 1 s and none is longer than 5 s; the process
-count is the same in every load sample; the primary measure is finite. A
-difference inside a triplet uses only valid runs. Invalid runs stay in
+count is the same in every load sample; both co-primary measures are
+finite. Whole-run CPU adds its own checks over the whole measured interval
+(first sample to the end of the idle-after phase, post-load idle included):
+the first sample is no later than the start of the idle-before phase; no
+monitor row has an unreadable CPU value and every in-tree diagnostics row
+has a cumulative CPU value; coverage is at least 80 % and no interval is
+longer than 5 s. A process that leaves the tree before the end contributes
+its last observed value, so its CPU after that sample (at most one interval)
+is missing; such processes are counted in CpuExitedProcesses and do not
+invalidate the run. A difference inside a triplet uses only valid runs. Invalid runs stay in
 runs.csv with their reasons.
 
 Output goes to a new directory (default <results>\analysis-<timestamp>);
@@ -133,6 +147,8 @@ foreach ($planned in $schedule) {
         LoadIntervalMedianSeconds = $null; LoadIntervalMaxSeconds = $null; LoadProcessCountMin = $null; LoadProcessCountMax = $null
         LoadPrivateMBAvg = $null; LoadPrivateMBMaxSample = $null; SteadyPrivateMBAvg = $null; IdleBeforePrivateMBAvg = $null
         ExePrivateMBLoadAvg = $null; WebViewPrivateMBLoadAvg = $null; LoadCpuSeconds = $null; LoadWorkingSetMBUpperBound = $null
+        RunCpuSeconds = $null; StartupCpuSeconds = $null; CpuExitedProcesses = $null; CpuProcesses = $null
+        RunRows = $null; RunCoverage = $null; RunIntervalMaxSeconds = $null
         MonitorCpuSeconds = $null
     }
 
@@ -229,13 +245,52 @@ foreach ($planned in $schedule) {
                 $reasons.Add("process count changed during load ($($row.LoadProcessCountMin)-$($row.LoadProcessCountMax))")
             }
 
-            # Host vs WebView2 split and per-process detail, from the monitor's diagnostics.
+            # Host vs WebView2 split, per-process detail and whole-run CPU, from the monitor's diagnostics.
             $diagnosticsFile = Join-Path $runsDirectory "$name.monitor.diagnostics.csv"
+            $runEnd = Get-Time $report.phases.endedAt
+            $runSamples = @($samples | Where-Object { $_.Time -le $runEnd })
+            $row.RunRows = $runSamples.Count
+            if ($runSamples.Count -gt 0) {
+                $runSpan = ($runEnd - $runSamples[0].Time).TotalSeconds
+                $row.RunCoverage = if ($runSpan -gt 0) { $runSamples.Count / [Math]::Floor($runSpan / $nominalInterval + 1) } else { $null }
+                $runIntervals = [double[]]@($runSamples | Where-Object { $_.Sample -gt 0 -and $null -ne $_.Interval -and $_.Interval -gt 0 } | ForEach-Object { $_.Interval })
+                $row.RunIntervalMaxSeconds = Get-Stat $runIntervals Maximum
+            }
+            $cpuReasons = New-Object System.Collections.Generic.List[string]
+            if ($runSamples.Count -eq 0) { $cpuReasons.Add('no monitor sample before the end of the run') }
+            else {
+                if ($runSamples[0].Time -gt (Get-Time $report.phases.idleBeforeStartedAt)) { $cpuReasons.Add('first monitor sample after the idle-before phase started') }
+                if (@($runSamples | Where-Object { $null -eq $_.CpuUnreadable -or $_.CpuUnreadable -gt 0 }).Count -gt 0) { $cpuReasons.Add('unreadable CPU in a monitor row') }
+                if ($null -eq $row.RunCoverage -or $row.RunCoverage -lt $minLoadCoverage) { $cpuReasons.Add("coverage $(Format-Number $row.RunCoverage 2) < $minLoadCoverage") }
+                if ($null -ne $row.RunIntervalMaxSeconds -and $row.RunIntervalMaxSeconds -gt $maxIntervalSeconds) { $cpuReasons.Add("gap $(Format-Number $row.RunIntervalMaxSeconds 3) s > $maxIntervalSeconds s") }
+            }
+            if (-not (Test-Path -LiteralPath $diagnosticsFile)) { $cpuReasons.Add('no monitor diagnostics CSV') }
             if ((Test-Path -LiteralPath $diagnosticsFile) -and $samples.Count -gt 0) {
                 $rootPid = $samples[0].RootPid
-                $diagnosticLoadRows = @(Import-Csv -LiteralPath $diagnosticsFile | Where-Object { $_.InTree -eq 'True' } | Where-Object {
-                        $time = Get-Time $_.Timestamp; $time -ge $loadFrom -and $time -lt $loadTo
+                $diagnosticRows = @(Import-Csv -LiteralPath $diagnosticsFile | Where-Object { $_.InTree -eq 'True' } | ForEach-Object {
+                        [pscustomobject]@{ Row = $_; Time = Get-Time $_.Timestamp; Pid = [int]$_.Pid; Cpu = ConvertTo-Number (Get-Property $_ 'ProcTotalProcessorSeconds') }
                     })
+                $runDiagnostics = @($diagnosticRows | Where-Object { $_.Time -le $runEnd })
+                if (@($runDiagnostics | Where-Object { $null -eq $_.Cpu }).Count -gt 0) { $cpuReasons.Add('missing cumulative CPU in a diagnostics row') }
+                elseif ($runDiagnostics.Count -gt 0 -and $runSamples.Count -gt 0) {
+                    $lastSampleTime = $runSamples[$runSamples.Count - 1].Time
+                    $warmupFrom = Get-Time $report.phases.warmupStartedAt
+                    $runCpu = 0.0; $startupCpu = 0.0; $exited = 0; $cpuProcesses = 0
+                    foreach ($group in ($runDiagnostics | Group-Object Pid)) {
+                        $ordered = @($group.Group | Sort-Object Time)
+                        $last = $ordered[$ordered.Count - 1]
+                        $runCpu += $last.Cpu
+                        $cpuProcesses++
+                        if ($last.Time -lt $lastSampleTime) { $exited++ }
+                        $beforeWarmup = @($ordered | Where-Object { $_.Time -le $warmupFrom })
+                        if ($beforeWarmup.Count -gt 0) { $startupCpu += $beforeWarmup[$beforeWarmup.Count - 1].Cpu }
+                    }
+                    $row.RunCpuSeconds = $runCpu
+                    $row.StartupCpuSeconds = $startupCpu
+                    $row.CpuExitedProcesses = $exited
+                    $row.CpuProcesses = $cpuProcesses
+                }
+                $diagnosticLoadRows = @($diagnosticRows | Where-Object { $_.Time -ge $loadFrom -and $_.Time -lt $loadTo } | ForEach-Object { $_.Row })
                 foreach ($group in ($diagnosticLoadRows | Group-Object Pid)) {
                     $values = [double[]]@($group.Group | ForEach-Object { ConvertTo-Number $_.CimPrivatePageCount } | Where-Object { $null -ne $_ })
                     $first = $group.Group[0]
@@ -253,6 +308,8 @@ foreach ($planned in $schedule) {
                     if ($null -ne $row.LoadPrivateMBAvg) { $row.WebViewPrivateMBLoadAvg = $row.LoadPrivateMBAvg - $row.ExePrivateMBLoadAvg }
                 }
             }
+            if ($cpuReasons.Count -eq 0 -and $null -eq $row.RunCpuSeconds) { $cpuReasons.Add('no cumulative CPU value') }
+            foreach ($reason in $cpuReasons) { $reasons.Add("whole-run CPU: $reason") }
         }
     }
     $row.Valid = $reasons.Count -eq 0
@@ -277,13 +334,15 @@ foreach ($group in ($runs | Group-Object Cell, Triplet)) {
                 LoadPrivateMBDiff = if ($valid) { $x.LoadPrivateMBAvg - $y.LoadPrivateMBAvg } else { $null }
                 ExePrivateMBDiff = if ($valid -and $null -ne $x.ExePrivateMBLoadAvg -and $null -ne $y.ExePrivateMBLoadAvg) { $x.ExePrivateMBLoadAvg - $y.ExePrivateMBLoadAvg } else { $null }
                 WebViewPrivateMBDiff = if ($valid -and $null -ne $x.WebViewPrivateMBLoadAvg -and $null -ne $y.WebViewPrivateMBLoadAvg) { $x.WebViewPrivateMBLoadAvg - $y.WebViewPrivateMBLoadAvg } else { $null }
+                RunCpuSecondsDiff = if ($valid) { $x.RunCpuSeconds - $y.RunCpuSeconds } else { $null }
+                StartupCpuSecondsDiff = if ($valid -and $null -ne $x.StartupCpuSeconds -and $null -ne $y.StartupCpuSeconds) { $x.StartupCpuSeconds - $y.StartupCpuSeconds } else { $null }
                 LoadCpuSecondsDiff = if ($valid -and $null -ne $x.LoadCpuSeconds -and $null -ne $y.LoadCpuSeconds) { $x.LoadCpuSeconds - $y.LoadCpuSeconds } else { $null }
             })
     }
 }
 
 # Descriptive statistics per cell and arm, and per cell and comparison.
-$measures = @('LoadPrivateMBAvg', 'ExePrivateMBLoadAvg', 'WebViewPrivateMBLoadAvg', 'SteadyPrivateMBAvg', 'LoadPrivateMBMaxSample', 'LoadCpuSeconds', 'P95LatencyMsMax', 'TimeToFirstPageMsMax', 'JsHeapLoadAvgMB', 'RustDataMB')
+$measures = @('LoadPrivateMBAvg', 'RunCpuSeconds', 'StartupCpuSeconds', 'ExePrivateMBLoadAvg', 'WebViewPrivateMBLoadAvg', 'SteadyPrivateMBAvg', 'LoadPrivateMBMaxSample', 'LoadCpuSeconds', 'CpuExitedProcesses', 'P95LatencyMsMax', 'TimeToFirstPageMsMax', 'JsHeapLoadAvgMB', 'RustDataMB')
 $summary = New-Object System.Collections.Generic.List[object]
 foreach ($group in ($runs | Group-Object Cell, Arm)) {
     $valid = @($group.Group | Where-Object { $_.Valid })
@@ -297,7 +356,7 @@ foreach ($group in ($runs | Group-Object Cell, Arm)) {
 }
 foreach ($group in ($triplets | Group-Object Cell, Comparison)) {
     $valid = @($group.Group | Where-Object { $_.Valid })
-    foreach ($measure in @('LoadPrivateMBDiff', 'ExePrivateMBDiff', 'WebViewPrivateMBDiff', 'LoadCpuSecondsDiff')) {
+    foreach ($measure in @('LoadPrivateMBDiff', 'RunCpuSecondsDiff', 'StartupCpuSecondsDiff', 'ExePrivateMBDiff', 'WebViewPrivateMBDiff', 'LoadCpuSecondsDiff')) {
         $values = [double[]]@($valid | ForEach-Object { $_.$measure } | Where-Object { $null -ne $_ })
         $summary.Add([pscustomobject][ordered]@{
                 Cell = $group.Group[0].Cell; Group = $group.Group[0].Comparison; Measure = $measure; Runs = $group.Count; ValidRuns = $valid.Count; N = $values.Count
@@ -342,14 +401,14 @@ $lines.Add("**$($configuration.phase): descriptive, no conclusion.** Platform: $
 $lines.Add('')
 $lines.Add("Git $($configuration.gitHead)$(if ($configuration.gitDirty) { ' (dirty)' }); arms $(@($configuration.arms) -join ', '); cells $(@($configuration.cells) -join ', '); $($configuration.triplets) triplets; schedule seed $($configuration.scheduleSeed).")
 $lines.Add('')
-$lines.Add('Primary measure: LoadPrivateMBAvg = time average over the load phase of the sum of Private Bytes over the host and every WebView2 process. Working Set is a diagnostic upper bound only.')
+$lines.Add('Co-primary measures: LoadPrivateMBAvg (RAM) = time average over the load phase of the sum of Private Bytes over the host and every WebView2 process; RunCpuSeconds (CPU) = CPU time of the whole tree from process start to the end of the idle-after phase. Working Set is a diagnostic upper bound only.')
 $lines.Add('')
 $lines.Add("Runs: $($runs.Count), valid: $(@($runs | Where-Object { $_.Valid }).Count).")
 $lines.Add('')
 $lines.Add('## Per cell and arm (valid runs; median [min, max])')
 $lines.Add('')
-$lines.Add('| Cell | Arm | Valid | Σ Private MB | Host MB | WebView2 MB | Steady MB | CPU s | p95 ms | First page ms | JS heap MB |')
-$lines.Add('|---|---|---|---|---|---|---|---|---|---|---|')
+$lines.Add('| Cell | Arm | Valid | Σ Private MB | Run CPU s | Startup CPU s | Host MB | WebView2 MB | Steady MB | Load CPU s | p95 ms | First page ms | JS heap MB |')
+$lines.Add('|---|---|---|---|---|---|---|---|---|---|---|---|---|')
 function Format-Range {
     param([string]$Cell, [string]$Group, [string]$Measure, [int]$Digits = 1)
     $item = @($summary | Where-Object { $_.Cell -eq $Cell -and $_.Group -eq $Group -and $_.Measure -eq $Measure })
@@ -359,8 +418,8 @@ function Format-Range {
 foreach ($group in ($runs | Group-Object Cell, Arm)) {
     $cell = $group.Group[0].Cell; $armGroup = "arm $($group.Group[0].Arm)"
     $validCount = @($group.Group | Where-Object { $_.Valid }).Count
-    $lines.Add(("| {0} | {1} | {2}/{3} | {4} | {5} | {6} | {7} | {8} | {9} | {10} | {11} |" -f $cell, $group.Group[0].Arm, $validCount, $group.Count,
-            (Format-Range $cell $armGroup 'LoadPrivateMBAvg'), (Format-Range $cell $armGroup 'ExePrivateMBLoadAvg'), (Format-Range $cell $armGroup 'WebViewPrivateMBLoadAvg'),
+    $lines.Add(("| {0} | {1} | {2}/{3} | {4} | {5} | {6} | {7} | {8} | {9} | {10} | {11} | {12} | {13} |" -f $cell, $group.Group[0].Arm, $validCount, $group.Count,
+            (Format-Range $cell $armGroup 'LoadPrivateMBAvg'), (Format-Range $cell $armGroup 'RunCpuSeconds' 2), (Format-Range $cell $armGroup 'StartupCpuSeconds' 2), (Format-Range $cell $armGroup 'ExePrivateMBLoadAvg'), (Format-Range $cell $armGroup 'WebViewPrivateMBLoadAvg'),
             (Format-Range $cell $armGroup 'SteadyPrivateMBAvg'), (Format-Range $cell $armGroup 'LoadCpuSeconds' 2), (Format-Range $cell $armGroup 'P95LatencyMsMax'),
             (Format-Range $cell $armGroup 'TimeToFirstPageMsMax' 0), (Format-Range $cell $armGroup 'JsHeapLoadAvgMB')))
 }
@@ -369,22 +428,23 @@ $lines.Add('## Differences inside triplets (valid pairs; median [min, max])')
 $lines.Add('')
 $lines.Add('C vs A is the product comparison; C vs B is the framework cost. One is never read as the other.')
 $lines.Add('')
-$lines.Add('| Cell | Comparison | Pairs | Σ Private MB | Host MB | WebView2 MB | CPU s |')
-$lines.Add('|---|---|---|---|---|---|---|')
+$lines.Add('| Cell | Comparison | Pairs | Σ Private MB | Run CPU s | Host MB | WebView2 MB | Load CPU s |')
+$lines.Add('|---|---|---|---|---|---|---|---|')
 foreach ($group in ($triplets | Group-Object Cell, Comparison)) {
     $cell = $group.Group[0].Cell; $comparison = $group.Group[0].Comparison
-    $lines.Add(("| {0} | {1} | {2}/{3} | {4} | {5} | {6} | {7} |" -f $cell, $comparison, @($group.Group | Where-Object { $_.Valid }).Count, $group.Count,
-            (Format-Range $cell $comparison 'LoadPrivateMBDiff'), (Format-Range $cell $comparison 'ExePrivateMBDiff'), (Format-Range $cell $comparison 'WebViewPrivateMBDiff'),
+    $lines.Add(("| {0} | {1} | {2}/{3} | {4} | {5} | {6} | {7} | {8} |" -f $cell, $comparison, @($group.Group | Where-Object { $_.Valid }).Count, $group.Count,
+            (Format-Range $cell $comparison 'LoadPrivateMBDiff'), (Format-Range $cell $comparison 'RunCpuSecondsDiff' 2), (Format-Range $cell $comparison 'ExePrivateMBDiff'), (Format-Range $cell $comparison 'WebViewPrivateMBDiff'),
             (Format-Range $cell $comparison 'LoadCpuSecondsDiff' 2)))
 }
 $lines.Add('')
-$lines.Add('## Position effect (Σ Private MB difference by the arm that ran first)')
+$lines.Add('## Position effect (differences by the arm that ran first)')
 $lines.Add('')
-$lines.Add('| Cell | Comparison | First arm | Pairs | Median |')
-$lines.Add('|---|---|---|---|---|')
+$lines.Add('| Cell | Comparison | First arm | Pairs | Σ Private MB median | Run CPU s median |')
+$lines.Add('|---|---|---|---|---|---|')
 foreach ($group in ($triplets | Where-Object { $_.Valid } | Group-Object Cell, Comparison, FirstArm)) {
     $values = [double[]]@($group.Group | ForEach-Object { $_.LoadPrivateMBDiff })
-    $lines.Add(("| {0} | {1} | {2} | {3} | {4} |" -f $group.Group[0].Cell, $group.Group[0].Comparison, $group.Group[0].FirstArm, $group.Count, (Format-Number (Get-Median $values))))
+    $cpuValues = [double[]]@($group.Group | ForEach-Object { $_.RunCpuSecondsDiff })
+    $lines.Add(("| {0} | {1} | {2} | {3} | {4} | {5} |" -f $group.Group[0].Cell, $group.Group[0].Comparison, $group.Group[0].FirstArm, $group.Count, (Format-Number (Get-Median $values)), (Format-Number (Get-Median $cpuValues) 2)))
 }
 $lines.Add('')
 $lines.Add('## Retained size (protocol §4)')

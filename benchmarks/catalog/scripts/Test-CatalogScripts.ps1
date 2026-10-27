@@ -31,42 +31,89 @@ function Assert-Near {
     else { Write-Host "ok   $Name" }
 }
 
-# --- Schedule: the pilot shape (protocol §6, §8a).
+# --- Schedule: the pilot shape of protocol revision 3 (§6, §8a, Q8): 6 triplets per cell.
 $cells = @('N2D0', 'N2D16', 'N2D64', 'N4D64')
-foreach ($seed in 0, 1, 7, 23) {
-    $schedule = @(New-CatalogSchedule -Cells $cells -Arms A, B, C -Triplets 5 -Seed $seed)
-    Assert-True "seed ${seed}: 60 runs" ($schedule.Count -eq 60) "got $($schedule.Count)"
-    Assert-True "seed ${seed}: Seq is 1..60" ((@($schedule | ForEach-Object { $_.Seq }) -join ',') -eq ((1..60) -join ','))
+$allPermutations = @('ABC', 'ACB', 'BAC', 'BCA', 'CAB', 'CBA')
+foreach ($seed in 0..23) {
+    $schedule = @(New-CatalogSchedule -Cells $cells -Arms A, B, C -Triplets 6 -Seed $seed)
+    Assert-True "seed ${seed}: 72 runs" ($schedule.Count -eq 72) "got $($schedule.Count)"
+    Assert-True "seed ${seed}: Seq is 1..72" ((@($schedule | ForEach-Object { $_.Seq }) -join ',') -eq ((1..72) -join ','))
+    $problems = @(Test-CatalogSchedule -Schedule $schedule -Cells $cells -Arms A, B, C -Triplets 6)
+    Assert-True "seed ${seed}: complete schedule" ($problems.Count -eq 0) ($problems -join '; ')
     $units = @($schedule | Where-Object { $_.Position -eq 1 })
-    $permutationCounts = @($units | Group-Object Permutation | ForEach-Object { $_.Count })
-    Assert-True "seed ${seed}: all 6 permutations used" (@($units | Group-Object Permutation).Count -eq 6)
-    Assert-True "seed ${seed}: every permutation 3-4 times" (@($permutationCounts | Where-Object { $_ -lt 3 -or $_ -gt 4 }).Count -eq 0) ($permutationCounts -join ',')
+    $cellsOk = $true
+    $detail = ''
+    foreach ($cell in $cells) {
+        $cellPermutations = @($units | Where-Object { $_.Cell -eq $cell } | ForEach-Object { $_.Permutation } | Sort-Object)
+        if (($cellPermutations -join ',') -ne ($allPermutations -join ',')) { $cellsOk = $false; $detail += "$cell=$($cellPermutations -join ',') " }
+        $cellPositions = @($schedule | Where-Object { $_.Cell -eq $cell } | Group-Object Arm, Position | ForEach-Object { $_.Count })
+        if ($cellPositions.Count -ne 9 -or @($cellPositions | Where-Object { $_ -ne 2 }).Count -gt 0) { $cellsOk = $false; $detail += "$cell positions=$($cellPositions -join ',') " }
+    }
+    Assert-True "seed ${seed}: every cell uses each permutation once and each arm in each position twice" $cellsOk $detail
     $positionCounts = @($schedule | Group-Object Arm, Position | ForEach-Object { $_.Count })
-    Assert-True "seed ${seed}: every arm in every position 6-7 times" ($positionCounts.Count -eq 9 -and @($positionCounts | Where-Object { $_ -lt 6 -or $_ -gt 7 }).Count -eq 0) ($positionCounts -join ',')
+    Assert-True "seed ${seed}: every arm in every position 8 times overall" ($positionCounts.Count -eq 9 -and @($positionCounts | Where-Object { $_ -ne 8 }).Count -eq 0) ($positionCounts -join ',')
     $firstPermutations = @($cells | ForEach-Object { $cell = $_; @($units | Where-Object { $_.Cell -eq $cell -and $_.Triplet -eq 1 })[0].Permutation })
     Assert-True "seed ${seed}: each cell starts at a different permutation" (@($firstPermutations | Select-Object -Unique).Count -eq 4) ($firstPermutations -join ',')
     $blocksOk = $true
-    for ($block = 1; $block -le 5; $block++) {
+    for ($block = 1; $block -le 6; $block++) {
         $blockRows = @($schedule | Where-Object { $_.Block -eq $block })
         $blockCells = @($blockRows | Where-Object { $_.Position -eq 1 } | ForEach-Object { $_.Cell })
         if ($blockRows.Count -ne 12 -or @($blockCells | Select-Object -Unique).Count -ne 4) { $blocksOk = $false }
-        foreach ($group in ($blockRows | Group-Object Cell)) {
-            $arms = @($group.Group | Sort-Object Position | ForEach-Object { $_.Arm }) -join ''
-            $seqs = @($group.Group | ForEach-Object { $_.Seq })
-            if ((@($arms.ToCharArray() | Sort-Object) -join '') -ne 'ABC' -or (($seqs | Measure-Object -Maximum).Maximum - ($seqs | Measure-Object -Minimum).Minimum) -ne 2) { $blocksOk = $false }
-        }
     }
-    Assert-True "seed ${seed}: blocks hold one adjacent triplet of each cell" $blocksOk
-    $firstCells = @(1..5 | ForEach-Object { $b = $_; @($schedule | Where-Object { $_.Block -eq $b })[0].Cell })
+    Assert-True "seed ${seed}: blocks hold one triplet of each cell" $blocksOk
+    $firstCells = @(1..4 | ForEach-Object { $b = $_; @($schedule | Where-Object { $_.Block -eq $b })[0].Cell })
     Assert-True "seed ${seed}: cell order rotates per block" (@($firstCells | Select-Object -Unique).Count -eq 4) ($firstCells -join ',')
 }
-$again = (@(New-CatalogSchedule -Cells $cells -Arms A, B, C -Triplets 5 -Seed 7) | ConvertTo-Csv -NoTypeInformation) -join "`n"
-$once = (@(New-CatalogSchedule -Cells $cells -Arms A, B, C -Triplets 5 -Seed 7) | ConvertTo-Csv -NoTypeInformation) -join "`n"
+
+# Confirmatory sizes that are not a multiple of 6 (§8b): per cell, uses of the
+# permutations differ by at most one.
+foreach ($triplets in 5, 11, 14, 20, 28) {
+    foreach ($seed in 0, 5, 13) {
+        $schedule = @(New-CatalogSchedule -Cells $cells -Arms A, B, C -Triplets $triplets -Seed $seed)
+        $problems = @(Test-CatalogSchedule -Schedule $schedule -Cells $cells -Arms A, B, C -Triplets $triplets)
+        $balanced = $true
+        foreach ($cell in $cells) {
+            $counts = @($allPermutations | ForEach-Object { $permutation = $_; @($schedule | Where-Object { $_.Cell -eq $cell -and $_.Position -eq 1 -and $_.Permutation -eq $permutation }).Count })
+            if ((($counts | Measure-Object -Maximum).Maximum - ($counts | Measure-Object -Minimum).Minimum) -gt 1) { $balanced = $false }
+        }
+        Assert-True "$triplets triplets, seed ${seed}: complete and balanced within one per cell" ($problems.Count -eq 0 -and $balanced) ($problems -join '; ')
+    }
+}
+
+# The check catches an incomplete or edited schedule, also after a CSV round trip.
+$root = Join-Path ([System.IO.Path]::GetTempPath()) ("catalog-schedule-test-{0}" -f [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Force -Path $root | Out-Null
+try {
+    $csv = Join-Path $root 'schedule.csv'
+    New-CatalogSchedule -Cells $cells -Arms A, B, C -Triplets 6 -Seed 3 | Export-Csv -LiteralPath $csv -NoTypeInformation -Encoding UTF8
+    $read = @(Import-Csv -LiteralPath $csv)
+    Assert-True 'schedule.csv round trip is complete' (@(Test-CatalogSchedule -Schedule $read -Cells $cells -Arms A, B, C -Triplets 6).Count -eq 0)
+    $missing = @($read | Select-Object -Skip 1)
+    Assert-True 'a missing run is reported' (@(Test-CatalogSchedule -Schedule $missing -Cells $cells -Arms A, B, C -Triplets 6).Count -gt 0)
+    $edited = @(Import-Csv -LiteralPath $csv)
+    $edited[1].Arm = $edited[0].Arm
+    Assert-True 'a repeated arm in a triplet is reported' (@(Test-CatalogSchedule -Schedule $edited -Cells $cells -Arms A, B, C -Triplets 6).Count -gt 0)
+    $moved = @(Import-Csv -LiteralPath $csv)
+    $swap = $moved[2]; $moved[2] = $moved[3]; $moved[3] = $swap
+    Assert-True 'runs out of order are reported' (@(Test-CatalogSchedule -Schedule $moved -Cells $cells -Arms A, B, C -Triplets 6).Count -gt 0)
+    Assert-True 'a schedule for other arms is reported' (@(Test-CatalogSchedule -Schedule $read -Cells $cells -Arms A, B -Triplets 6).Count -gt 0)
+}
+finally {
+    Remove-Item -LiteralPath $root -Recurse -Force
+}
+$again = (@(New-CatalogSchedule -Cells $cells -Arms A, B, C -Triplets 6 -Seed 7) | ConvertTo-Csv -NoTypeInformation) -join "`n"
+$once = (@(New-CatalogSchedule -Cells $cells -Arms A, B, C -Triplets 6 -Seed 7) | ConvertTo-Csv -NoTypeInformation) -join "`n"
 Assert-True 'schedule is reproducible from its seed' ($again -eq $once)
 $pairs = @(New-CatalogSchedule -Cells N2D0, N4D16 -Arms A, B -Triplets 3 -Seed 0)
 Assert-True 'two arms: 12 runs' ($pairs.Count -eq 12)
 $pairOrders = @($pairs | Where-Object { $_.Position -eq 1 } | ForEach-Object { $_.Permutation }) -join ','
 Assert-True 'two arms: orders alternate' ($pairOrders -eq 'AB,BA,AB,BA,AB,BA') $pairOrders
+$pairCellsOk = $true
+foreach ($cell in 'N2D0', 'N4D16') {
+    $cellOrders = @($pairs | Where-Object { $_.Cell -eq $cell -and $_.Position -eq 1 } | ForEach-Object { $_.Permutation })
+    for ($i = 1; $i -lt $cellOrders.Count; $i++) { if ($cellOrders[$i] -eq $cellOrders[$i - 1]) { $pairCellsOk = $false } }
+}
+Assert-True 'two arms: each cell alternates' $pairCellsOk
 foreach ($bad in 'N0D16', 'N9D16', 'N2D300', 'D16', 'n2d16') {
     $threw = $false
     try { $null = New-CatalogSchedule -Cells $bad -Arms A, B -Triplets 1 -Seed 0 } catch { $threw = $true }
@@ -111,16 +158,21 @@ try {
         $monitor = New-Object System.Collections.Generic.List[string]
         $diagnostics = New-Object System.Collections.Generic.List[string]
         $monitor.Add('Timestamp,Sample,RootPid,ProcessCount,WorkingSetMB,PrivateBytesMB,CpuDeltaSeconds,IntervalSeconds,PrivateMissingCount,CpuUnreadableCount')
-        $diagnostics.Add('Timestamp,Pid,Name,InTree,CimPrivatePageCount')
+        $diagnostics.Add('Timestamp,Pid,Name,InTree,CimPrivatePageCount,ProcTotalProcessorSeconds')
+        # Cumulative CPU: host 2 s + 0.3 s/s, WebView2 1 s + 0.2 s/s, and a helper process that leaves the tree after 10 s (0.5 s + 0.1 s/s).
+        # The second A run in N2D0 has an unreadable CPU value after the load phase.
+        $cpuGap = $run.Cell -eq 'N2D0' -and $run.Triplet -eq 2 -and $run.Arm -eq 'A'
         # The first A run in N2D0 has a 7 s monitor gap during load.
         $gap = $run.Cell -eq 'N2D0' -and $run.Triplet -eq 1 -and $run.Arm -eq 'A'
         for ($s = 0; $s -le 36; $s++) {
             if ($gap -and $s -ge 15 -and $s -lt 22) { continue }
             $time = $t0.AddSeconds($s).ToString('o')
             $interval = if ($s -eq 0) { '' } elseif ($gap -and $s -eq 22) { '7' } else { '1' }
-            $monitor.Add(('{0},{1},4242,5,{2},{3},0.5,{4},0,0' -f $time, $s, ($hostMb + $webMb + 50).ToString($culture), ($hostMb + $webMb).ToString($culture), $interval))
-            $diagnostics.Add(('{0},4242,catalog-bench,True,{1}' -f $time, ($hostMb * 1MB).ToString($culture)))
-            $diagnostics.Add(('{0},5000,msedgewebview2,True,{1}' -f $time, ($webMb * 1MB).ToString($culture)))
+            $unreadable = if ($cpuGap -and $s -eq 33) { 1 } else { 0 }
+            $monitor.Add(('{0},{1},4242,5,{2},{3},0.5,{4},0,{5}' -f $time, $s, ($hostMb + $webMb + 50).ToString($culture), ($hostMb + $webMb).ToString($culture), $interval, $unreadable))
+            $diagnostics.Add(('{0},4242,catalog-bench,True,{1},{2}' -f $time, ($hostMb * 1MB).ToString($culture), (2.0 + 0.3 * $s).ToString($culture)))
+            $diagnostics.Add(('{0},5000,msedgewebview2,True,{1},{2}' -f $time, ($webMb * 1MB).ToString($culture), (1.0 + 0.2 * $s).ToString($culture)))
+            if ($s -le 10) { $diagnostics.Add(('{0},5100,msedgewebview2,True,{1},{2}' -f $time, (10MB).ToString($culture), (0.5 + 0.1 * $s).ToString($culture))) }
         }
         $monitor | Set-Content -LiteralPath (Join-Path $runsDir "$($run.Name).monitor.csv") -Encoding UTF8
         $diagnostics | Set-Content -LiteralPath (Join-Path $runsDir "$($run.Name).monitor.diagnostics.csv") -Encoding UTF8
@@ -134,7 +186,7 @@ try {
     $triplets = @(Import-Csv -LiteralPath (Join-Path $analysis 'triplets.csv'))
     $summaryText = Get-Content -LiteralPath (Join-Path $analysis 'summary.md') -Raw
     Assert-True 'summary: 8 runs' ($runs.Count -eq 8)
-    Assert-True 'summary: 6 valid runs' (@($runs | Where-Object { $_.Valid -eq 'True' }).Count -eq 6) (($runs | ForEach-Object { "$($_.Name)=$($_.InvalidReason)" }) -join '; ')
+    Assert-True 'summary: 5 valid runs' (@($runs | Where-Object { $_.Valid -eq 'True' }).Count -eq 5) (($runs | ForEach-Object { "$($_.Name)=$($_.InvalidReason)" }) -join '; ')
     $gapRun = @($runs | Where-Object { $_.Cell -eq 'N2D0' -and $_.Triplet -eq '1' -and $_.Arm -eq 'A' })[0]
     Assert-True 'summary: a 7 s load gap invalidates the run' ($gapRun.Valid -eq 'False' -and $gapRun.InvalidReason -like '*load gap*') $gapRun.InvalidReason
     $failedRun = @($runs | Where-Object { $_.Cell -eq 'N2D16' -and $_.Triplet -eq '2' -and $_.Arm -eq 'B' })[0]
@@ -146,10 +198,21 @@ try {
     Assert-Near 'summary: load CPU is the sum of 20 samples' $valid.LoadCpuSeconds 10
     Assert-Near 'summary: steady Private' $valid.SteadyPrivateMBAvg 341
     Assert-Near 'summary: coverage' $valid.LoadCoverage 1
+    # At the end of the run (35 s): host 12.5 + WebView2 8.0 + the helper's last value 1.5 (it left after 10 s).
+    Assert-Near 'summary: whole-run CPU sums each process''s last cumulative value' $valid.RunCpuSeconds 22.0 1e-6
+    # At the warm-up start (5 s): host 3.5 + WebView2 2.0 + helper 1.0.
+    Assert-Near 'summary: startup CPU' $valid.StartupCpuSeconds 6.5 1e-6
+    Assert-Near 'summary: one process left the tree before the end' $valid.CpuExitedProcesses 1
+    Assert-Near 'summary: three processes counted for CPU' $valid.CpuProcesses 3
+    Assert-Near 'summary: whole-run coverage' $valid.RunCoverage 1
+    $cpuGapRun = @($runs | Where-Object { $_.Cell -eq 'N2D0' -and $_.Triplet -eq '2' -and $_.Arm -eq 'A' })[0]
+    Assert-True 'summary: unreadable CPU after the load phase invalidates the run' ($cpuGapRun.Valid -eq 'False' -and $cpuGapRun.InvalidReason -like '*whole-run CPU: unreadable CPU*' -and $cpuGapRun.InvalidReason -notlike '*load gap*') $cpuGapRun.InvalidReason
+    Assert-True 'summary: the 7 s load gap also fails the whole-run check' ($gapRun.InvalidReason -like '*whole-run CPU: gap*') $gapRun.InvalidReason
     $diff = @($triplets | Where-Object { $_.Cell -eq 'N2D16' -and $_.Triplet -eq '1' -and $_.Comparison -eq 'B-A' })[0]
     Assert-Near 'triplet: B - A Σ Private' $diff.LoadPrivateMBDiff (-60)
     Assert-Near 'triplet: B - A host' $diff.ExePrivateMBDiff 40
     Assert-Near 'triplet: B - A WebView2' $diff.WebViewPrivateMBDiff (-100)
+    Assert-Near 'triplet: B - A whole-run CPU' $diff.RunCpuSecondsDiff 0 1e-6
     $invalidPair = @($triplets | Where-Object { $_.Cell -eq 'N2D16' -and $_.Triplet -eq '2' })[0]
     Assert-True 'triplet: an invalid run gives no difference' ($invalidPair.Valid -eq 'False' -and $invalidPair.LoadPrivateMBDiff -eq '') $invalidPair.InvalidReason
     Assert-True 'summary.md: descriptive, no conclusion' ($summaryText -like '*Smoke: descriptive, no conclusion*')
