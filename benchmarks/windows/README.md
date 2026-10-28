@@ -78,6 +78,15 @@ Run the deterministic regression checks (Windows PowerShell 5.1 and PowerShell 7
 
 `Test-PrivateUnitValidation.ps1` covers an empty ratio list, a list containing only non-finite values, and ratios consistent with a page-count rather than byte-count interpretation. `Test-ProcessTreeIdentity.ps1` uses synthetic snapshots: a WebView2 child that appears late, a PID reused by a process created before its claimed parent (the Edge case), a reused root PID, a child with unknown creation time, a short-lived child that is really in the tree, growing processes at startup (no false unit failure), and stable processes with a real unit mismatch (still a failure). These test the decision logic; they do not replace a native end-to-end monitor run.
 
+`Test-MonitorEndToEnd.ps1` runs the monitor itself, in a fresh PowerShell process per case, on a real `cmd.exe`/`ping` tree:
+- unchanged: exit 0, identities recorded, root identity constant, nothing rejected or unverified;
+- a controlled wrong unit (`PrivatePageCount` divided by 4096 on real, stable processes): exit 1, no measurement CSV, unit-check CSV kept;
+- memory that never stabilizes, with a 3 s timeout: exit 1, no measurement CSV, unit-check CSV kept with no stable row;
+- an injected process that names the root as parent but is 3 h older (PID reuse): rejected in every row and not summed;
+- an injected child with no creation time: reported as unverified in every row and not summed.
+
+The controlled cases wrap the real `Get-CimInstance` in the child process and change one value; the real CIM instances are not modified. CI runs this script in Windows PowerShell 5.1 and PowerShell 7; run it on the measurement machine as the native check.
+
 Add `-Diagnostics` to also write `<output>.diagnostics.csv` (or `-DiagnosticsPath`), with one row per process per sample:
 
 ```powershell
