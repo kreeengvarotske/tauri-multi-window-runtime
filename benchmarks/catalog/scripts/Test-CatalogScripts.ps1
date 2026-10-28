@@ -229,6 +229,86 @@ finally {
     Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+# --- Summarizer with a monitor that records process identities (#43).
+# Four runs, one case each:
+#   N2D0 A  : a WebView2 child (5200) is in the tree for 3 load samples -> valid, 1 transient process
+#   N2D0 B  : one load row has an unverified process                      -> invalid
+#   N2D16 A : a WebView2 process of the app is outside the tree           -> invalid
+#   N2D16 B : PID 5100 is reused by a new process after the first exits   -> valid, the two are separate CPU processes
+$root = Join-Path ([System.IO.Path]::GetTempPath()) ("catalog-test-id-{0}" -f [guid]::NewGuid().ToString('N'))
+try {
+    $results = Join-Path $root 'results'
+    $runsDir = Join-Path $results 'runs'
+    New-Item -ItemType Directory -Force -Path $runsDir | Out-Null
+    $schedule = @(New-CatalogSchedule -Cells N2D0, N2D16 -Arms A, B -Triplets 1 -Seed 0)
+    $schedule | Export-Csv -LiteralPath (Join-Path $results 'schedule.csv') -NoTypeInformation -Encoding UTF8
+    [ordered]@{
+        scenario = 'M'; phase = 'Smoke'; os = 'Synthetic OS'; machine = 'TEST'; gitHead = 'abc'; gitDirty = $false
+        arms = @('A', 'B'); cells = @('N2D0', 'N2D16'); triplets = 1; scheduleSeed = 0; sampleIntervalSeconds = 1
+    } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $results 'configuration.json') -Encoding UTF8
+    $start = [DateTimeOffset]::Parse('2026-10-28T10:00:00Z', $culture)
+    $log = New-Object System.Collections.Generic.List[string]
+    $offset = 0
+    foreach ($run in $schedule) {
+        $t0 = $start.AddMinutes($offset); $offset += 10
+        $case = '{0}{1}' -f $run.Cell, $run.Arm
+        [ordered]@{
+            schemaVersion = 1; scenario = 'M'; passed = $true; problems = @()
+            config = [ordered]@{ arm = $run.Arm; windows = [int]$run.Windows; dataMib = [int]$run.DataMib; records = 1000; rustDataBytes = [int]$run.DataMib * 1MB }
+            phases = [ordered]@{
+                idleBeforeStartedAt = $t0.ToString('o'); warmupStartedAt = $t0.AddSeconds(5).ToString('o'); loadStartedAt = $t0.AddSeconds(10).ToString('o')
+                loadEndedAt = $t0.AddSeconds(30).ToString('o'); endedAt = $t0.AddSeconds(35).ToString('o')
+            }
+            totals = [ordered]@{ scheduledSteps = 80; completedSteps = 80; failures = 0; mismatches = 0; overruns = 0; maxP95LatencyMs = 3.5; maxTimeToFirstPageMs = 120; loadJsHeapAvgBytes = 8MB }
+        } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $runsDir "$($run.Name).json") -Encoding UTF8
+        $monitor = New-Object System.Collections.Generic.List[string]
+        $diagnostics = New-Object System.Collections.Generic.List[string]
+        $monitor.Add('Timestamp,Sample,RootPid,ProcessCount,ProcessIds,ProcessKeys,WorkingSetMB,PrivateBytesMB,CpuDeltaSeconds,IntervalSeconds,PrivateMissingCount,CpuUnreadableCount,RejectedPidReuseCount,UnverifiedProcessCount')
+        $diagnostics.Add('Timestamp,Pid,ProcessKey,Name,InTree,CimPrivatePageCount,ProcTotalProcessorSeconds')
+        for ($s = 0; $s -le 36; $s++) {
+            $time = $t0.AddSeconds($s).ToString('o')
+            $interval = if ($s -eq 0) { '' } else { '1' }
+            $members = New-Object System.Collections.Generic.List[object]
+            $members.Add(@(4242, '4242@1', 'catalog-bench', 100.0, (2.0 + 0.3 * $s)))
+            $members.Add(@(5000, '5000@2', 'msedgewebview2', 200.0, (1.0 + 0.2 * $s)))
+            if ($case -eq 'N2D0A' -and $s -ge 15 -and $s -le 17) { $members.Add(@(5200, '5200@9', 'msedgewebview2', 20.0, (0.1 * ($s - 14)))) }
+            if ($case -eq 'N2D16B') {
+                if ($s -le 10) { $members.Add(@(5100, '5100@3', 'msedgewebview2', 10.0, (0.5 + 0.1 * $s))) }
+                elseif ($s -ge 20) { $members.Add(@(5100, '5100@7', 'msedgewebview2', 10.0, (0.05 * ($s - 19)))) }
+            }
+            $unverified = if ($case -eq 'N2D0B' -and $s -eq 20) { 1 } else { 0 }
+            $private = ($members | ForEach-Object { $_[3] } | Measure-Object -Sum).Sum
+            $monitor.Add(('{0},{1},4242,{2},{3},{4},{5},{6},0.5,{7},0,0,0,{8}' -f $time, $s, $members.Count, (($members | ForEach-Object { $_[0] }) -join ';'), (($members | ForEach-Object { $_[1] }) -join ';'), ($private + 50).ToString($culture), $private.ToString($culture), $interval, $unverified))
+            foreach ($m in $members) { $diagnostics.Add(('{0},{1},{2},{3},True,{4},{5}' -f $time, $m[0], $m[1], $m[2], ($m[3] * 1MB).ToString($culture), ([double]$m[4]).ToString($culture))) }
+            if ($case -eq 'N2D16A' -and $s -eq 12) { $diagnostics.Add(('{0},6100,6100@8,msedgewebview2,False,{1},0.1' -f $time, (30MB).ToString($culture))) }
+        }
+        $monitor | Set-Content -LiteralPath (Join-Path $runsDir "$($run.Name).monitor.csv") -Encoding UTF8
+        $diagnostics | Set-Content -LiteralPath (Join-Path $runsDir "$($run.Name).monitor.diagnostics.csv") -Encoding UTF8
+        $log.Add((@{ name = $run.Name; exitCode = 0; timedOut = $false; monitorExit = 0; monitorCpuSeconds = 1.0 } | ConvertTo-Json -Compress))
+    }
+    $log | Set-Content -LiteralPath (Join-Path $results 'runs.log') -Encoding UTF8
+    $analysis = Join-Path $root 'analysis'
+    & (Join-Path $PSScriptRoot 'Summarize-CatalogRuns.ps1') -ResultsDirectory $results -OutputDirectory $analysis | Out-Null
+    $runs = @(Import-Csv -LiteralPath (Join-Path $analysis 'runs.csv'))
+    $byCase = @{}
+    foreach ($r in $runs) { $byCase['{0}{1}' -f $r.Cell, $r.Arm] = $r }
+    $all = ($runs | ForEach-Object { "$($_.Cell)$($_.Arm)=$($_.InvalidReason)" }) -join '; '
+    Assert-True 'identity: a verified short-lived child does not invalidate the run' ($byCase['N2D0A'].Valid -eq 'True') $all
+    Assert-Near 'identity: the short-lived child is counted as transient' $byCase['N2D0A'].TransientProcesses 1
+    Assert-True 'identity: the process count still shows the change' ($byCase['N2D0A'].LoadProcessCountMin -eq '2' -and $byCase['N2D0A'].LoadProcessCountMax -eq '3')
+    Assert-Near 'identity: the short-lived child is in the load average (20 MB in 3 of 20 rows)' $byCase['N2D0A'].LoadPrivateMBAvg 303
+    Assert-True 'identity: an unverified process in a load row invalidates the run' ($byCase['N2D0B'].Valid -eq 'False' -and $byCase['N2D0B'].InvalidReason -like '*process tree not verified in 1 load row*') $byCase['N2D0B'].InvalidReason
+    Assert-True 'identity: an unverified process also fails whole-run CPU' ($byCase['N2D0B'].InvalidReason -like '*whole-run CPU: unverified processes*') $byCase['N2D0B'].InvalidReason
+    Assert-True 'identity: a WebView2 process of the app outside the tree invalidates the run' ($byCase['N2D16A'].Valid -eq 'False' -and $byCase['N2D16A'].InvalidReason -like '*outside the monitored tree: 6100*') $byCase['N2D16A'].InvalidReason
+    Assert-True 'identity: a reused PID does not invalidate the run' ($byCase['N2D16B'].Valid -eq 'True') $byCase['N2D16B'].InvalidReason
+    Assert-Near 'identity: a reused PID is a separate CPU process' $byCase['N2D16B'].CpuProcesses 4
+    # host 2 + 0.3 * 35 = 12.5, WebView2 1 + 0.2 * 35 = 8.0, first 5100 last 1.5, second 5100 last 0.05 * 16 = 0.8
+    Assert-Near 'identity: whole-run CPU keeps both processes that had PID 5100' $byCase['N2D16B'].RunCpuSeconds 22.8 1e-6
+}
+finally {
+    Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+}
+
 # --- Thresholds (protocol §8b, Q7): forms at and around the floor crossover.
 $marginCases = @(
     @('Delta', 'RAM', 150.0, 10.0), @('Delta', 'RAM', 200.0, 10.0), @('Delta', 'RAM', 300.0, 15.0),

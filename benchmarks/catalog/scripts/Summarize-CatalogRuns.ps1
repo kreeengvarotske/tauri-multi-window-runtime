@@ -23,8 +23,19 @@ once per process) and never used for a claim.
 Validity (protocol §7): the report exists and passed; exit codes are 0; the
 monitor covers at least 80 % of expected load samples; the median load
 interval is within 20 % of 1 s and none is longer than 5 s; the process
-count is the same in every load sample; both co-primary measures are
-finite. Whole-run CPU adds its own checks over the whole measured interval
+tree is verified (below); both co-primary measures are finite.
+
+Process tree. With a monitor that records process identities (PID and
+creation time: ProcessKeys, UnverifiedProcessCount, RejectedPidReuseCount;
+#43), every load row must have UnverifiedProcessCount = 0 and the monitor
+diagnostics must show no WebView2 process of the app outside the tree
+during the run. A change in the process count during load is then allowed
+and reported: a short-lived child seen in some samples is a verified part
+of the tree and is in the sums of those samples (TransientProcesses counts
+such identities). A child that starts and exits between two samples is
+never seen; that limit stays. With an older monitor CSV that has no
+identities, the earlier rule applies unchanged: the process count must be
+the same in every load sample. Whole-run CPU adds its own checks over the whole measured interval
 (first sample to the end of the idle-after phase, post-load idle included):
 the first sample is no later than the start of the idle-before phase; no
 monitor row has an unreadable CPU value and every in-tree diagnostics row
@@ -145,6 +156,7 @@ foreach ($planned in $schedule) {
         P95LatencyMsMax = $null; TimeToFirstPageMsMax = $null; JsHeapLoadAvgMB = $null; Records = $null; RustDataMB = $null
         MonitorRows = $null; LoadRows = $null; LoadRowsExpected = $null; LoadCoverage = $null
         LoadIntervalMedianSeconds = $null; LoadIntervalMaxSeconds = $null; LoadProcessCountMin = $null; LoadProcessCountMax = $null
+        TreeIdentity = $null; TransientProcesses = $null; RejectedPidReuseRows = $null
         LoadPrivateMBAvg = $null; LoadPrivateMBMaxSample = $null; SteadyPrivateMBAvg = $null; IdleBeforePrivateMBAvg = $null
         ExePrivateMBLoadAvg = $null; WebViewPrivateMBLoadAvg = $null; LoadCpuSeconds = $null; LoadWorkingSetMBUpperBound = $null
         RunCpuSeconds = $null; StartupCpuSeconds = $null; CpuExitedProcesses = $null; CpuProcesses = $null
@@ -191,7 +203,10 @@ foreach ($planned in $schedule) {
         $monitorFile = Join-Path $runsDirectory "$name.monitor.csv"
         if (-not (Test-Path -LiteralPath $monitorFile)) { $reasons.Add('no monitor CSV') }
         else {
-            $samples = @(Import-Csv -LiteralPath $monitorFile | ForEach-Object {
+            $monitorRows = @(Import-Csv -LiteralPath $monitorFile)
+            $hasIdentity = $monitorRows.Count -gt 0 -and $null -ne $monitorRows[0].PSObject.Properties['ProcessKeys'] -and $null -ne $monitorRows[0].PSObject.Properties['UnverifiedProcessCount']
+            $row.TreeIdentity = $hasIdentity
+            $samples = @($monitorRows | ForEach-Object {
                     [pscustomobject]@{
                         Timestamp      = [string]$_.Timestamp
                         Time           = Get-Time $_.Timestamp
@@ -204,6 +219,9 @@ foreach ($planned in $schedule) {
                         Interval       = ConvertTo-Number $_.IntervalSeconds
                         PrivateMissing = ConvertTo-Number $_.PrivateMissingCount
                         CpuUnreadable  = ConvertTo-Number $_.CpuUnreadableCount
+                        Keys           = if ($hasIdentity) { @(([string]$_.ProcessKeys).Split(';') | Where-Object { $_ -ne '' }) } else { @() }
+                        Unverified     = if ($hasIdentity) { ConvertTo-Number $_.UnverifiedProcessCount } else { $null }
+                        Rejected       = if ($hasIdentity) { ConvertTo-Number (Get-Property $_ 'RejectedPidReuseCount') } else { $null }
                     }
                 })
             $row.MonitorRows = $samples.Count
@@ -241,7 +259,14 @@ foreach ($planned in $schedule) {
                 $reasons.Add("median load interval $(Format-Number $row.LoadIntervalMedianSeconds 3) s not within $($maxIntervalDeviation * 100) % of $nominalInterval s")
             }
             if ($null -ne $row.LoadIntervalMaxSeconds -and $row.LoadIntervalMaxSeconds -gt $maxIntervalSeconds) { $reasons.Add("load gap $(Format-Number $row.LoadIntervalMaxSeconds 3) s > $maxIntervalSeconds s") }
-            if ($null -ne $row.LoadProcessCountMin -and $row.LoadProcessCountMin -ne $row.LoadProcessCountMax) {
+            if ($hasIdentity) {
+                $unverifiedRows = @($load | Where-Object { $null -eq $_.Unverified -or $_.Unverified -gt 0 }).Count
+                if ($unverifiedRows -gt 0) { $reasons.Add("process tree not verified in $unverifiedRows load row(s) (unverified processes)") }
+                $loadKeys = @($load | ForEach-Object { $_.Keys } | Sort-Object -Unique)
+                $row.TransientProcesses = @($loadKeys | Where-Object { $key = $_; @($load | Where-Object { $_.Keys -notcontains $key }).Count -gt 0 }).Count
+                $row.RejectedPidReuseRows = @($samples | Where-Object { $null -ne $_.Rejected -and $_.Rejected -gt 0 }).Count
+            }
+            elseif ($null -ne $row.LoadProcessCountMin -and $row.LoadProcessCountMin -ne $row.LoadProcessCountMax) {
                 $reasons.Add("process count changed during load ($($row.LoadProcessCountMin)-$($row.LoadProcessCountMax))")
             }
 
@@ -261,14 +286,24 @@ foreach ($planned in $schedule) {
             else {
                 if ($runSamples[0].Time -gt (Get-Time $report.phases.idleBeforeStartedAt)) { $cpuReasons.Add('first monitor sample after the idle-before phase started') }
                 if (@($runSamples | Where-Object { $null -eq $_.CpuUnreadable -or $_.CpuUnreadable -gt 0 }).Count -gt 0) { $cpuReasons.Add('unreadable CPU in a monitor row') }
+                if ($hasIdentity -and @($runSamples | Where-Object { $null -eq $_.Unverified -or $_.Unverified -gt 0 }).Count -gt 0) { $cpuReasons.Add('unverified processes in a monitor row') }
                 if ($null -eq $row.RunCoverage -or $row.RunCoverage -lt $minLoadCoverage) { $cpuReasons.Add("coverage $(Format-Number $row.RunCoverage 2) < $minLoadCoverage") }
                 if ($null -ne $row.RunIntervalMaxSeconds -and $row.RunIntervalMaxSeconds -gt $maxIntervalSeconds) { $cpuReasons.Add("gap $(Format-Number $row.RunIntervalMaxSeconds 3) s > $maxIntervalSeconds s") }
             }
             if (-not (Test-Path -LiteralPath $diagnosticsFile)) { $cpuReasons.Add('no monitor diagnostics CSV') }
             if ((Test-Path -LiteralPath $diagnosticsFile) -and $samples.Count -gt 0) {
                 $rootPid = $samples[0].RootPid
-                $diagnosticRows = @(Import-Csv -LiteralPath $diagnosticsFile | Where-Object { $_.InTree -eq 'True' } | ForEach-Object {
-                        [pscustomobject]@{ Row = $_; Time = Get-Time $_.Timestamp; Pid = [int]$_.Pid; Cpu = ConvertTo-Number (Get-Property $_ 'ProcTotalProcessorSeconds') }
+                $allDiagnostics = @(Import-Csv -LiteralPath $diagnosticsFile)
+                if ($hasIdentity) {
+                    $runStart = $samples[0].Time
+                    $outside = @($allDiagnostics | Where-Object { $_.InTree -ne 'True' } | Where-Object { $time = Get-Time $_.Timestamp; $time -ge $runStart -and $time -le $runEnd } | ForEach-Object { $_.Pid } | Sort-Object -Unique)
+                    if ($outside.Count -gt 0) { $reasons.Add("WebView2 process(es) of the app outside the monitored tree: $($outside -join ', ')") }
+                }
+                # Processes are told apart by identity (PID and creation time) when the monitor records it, else by PID.
+                $diagnosticRows = @($allDiagnostics | Where-Object { $_.InTree -eq 'True' } | ForEach-Object {
+                        $identity = Get-Property $_ 'ProcessKey'
+                        if ([string]::IsNullOrEmpty([string]$identity)) { $identity = [string]$_.Pid }
+                        [pscustomobject]@{ Row = $_; Time = Get-Time $_.Timestamp; Pid = [int]$_.Pid; Identity = $identity; Cpu = ConvertTo-Number (Get-Property $_ 'ProcTotalProcessorSeconds') }
                     })
                 $runDiagnostics = @($diagnosticRows | Where-Object { $_.Time -le $runEnd })
                 if (@($runDiagnostics | Where-Object { $null -eq $_.Cpu }).Count -gt 0) { $cpuReasons.Add('missing cumulative CPU in a diagnostics row') }
@@ -276,7 +311,7 @@ foreach ($planned in $schedule) {
                     $lastSampleTime = $runSamples[$runSamples.Count - 1].Time
                     $warmupFrom = Get-Time $report.phases.warmupStartedAt
                     $runCpu = 0.0; $startupCpu = 0.0; $exited = 0; $cpuProcesses = 0
-                    foreach ($group in ($runDiagnostics | Group-Object Pid)) {
+                    foreach ($group in ($runDiagnostics | Group-Object Identity)) {
                         $ordered = @($group.Group | Sort-Object Time)
                         $last = $ordered[$ordered.Count - 1]
                         $runCpu += $last.Cpu
