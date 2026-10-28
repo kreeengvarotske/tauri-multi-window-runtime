@@ -20,12 +20,21 @@ param(
     # listing WebView2 processes of this app that the tree walk did not reach.
     [switch]$Diagnostics,
 
-    [string]$DiagnosticsPath
+    [string]$DiagnosticsPath,
+
+    # How long the startup unit check may wait for processes whose private
+    # memory is stable between two samples (see "Unit check" in README.md).
+    # Nothing is written to OutputPath before the check passes.
+    [ValidateRange(1, 600)]
+    [int]$UnitCheckTimeoutSeconds = 30,
+
+    [string]$UnitCheckPath
 )
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 Import-Module -Name (Join-Path $PSScriptRoot 'PrivateUnitValidation.psm1') -Force
+Import-Module -Name (Join-Path $PSScriptRoot 'ProcessTreeIdentity.psm1') -Force
 
 function Get-ProcessSnapshot {
     param([bool]$IncludeDiagnostics = $false)
@@ -34,7 +43,9 @@ function Get-ProcessSnapshot {
     # it equalled Get-Process PrivateMemorySize64 and PageFileUsage * 1024 for
     # every sampled process (issue #13, stage 8). The script re-checks this at
     # startup instead of relying on it.
-    $properties = @('ProcessId', 'ParentProcessId', 'Name', 'WorkingSetSize', 'PrivatePageCount')
+    # CreationDate makes PID + creation time the identity of a process, so a
+    # reused PID is not taken for the process that had it before.
+    $properties = @('ProcessId', 'ParentProcessId', 'Name', 'CreationDate', 'WorkingSetSize', 'PrivatePageCount')
     if ($IncludeDiagnostics) {
         $properties += @('PageFileUsage', 'CommandLine')
     }
@@ -72,48 +83,30 @@ function Resolve-RootPid {
     return [int]$matches[0].ProcessId
 }
 
-function Get-TreeProcesses {
-    param(
-        [object[]]$Snapshot,
-        [int]$StartingPid
-    )
-
-    $children = @{}
-    foreach ($item in $Snapshot) {
-        $parent = [int]$item.ParentProcessId
-        if (-not $children.ContainsKey($parent)) {
-            $children[$parent] = New-Object System.Collections.ArrayList
-        }
-        [void]$children[$parent].Add([int]$item.ProcessId)
-    }
-
-    $seen = New-Object 'System.Collections.Generic.HashSet[int]'
-    $queue = New-Object 'System.Collections.Generic.Queue[int]'
-    [void]$seen.Add($StartingPid)
-    $queue.Enqueue($StartingPid)
-
-    while ($queue.Count -gt 0) {
-        $current = $queue.Dequeue()
-        if ($children.ContainsKey($current)) {
-            foreach ($childPid in $children[$current]) {
-                if ($seen.Add([int]$childPid)) {
-                    $queue.Enqueue([int]$childPid)
-                }
-            }
-        }
-    }
-
-    $pidSet = $seen
-    @($Snapshot | Where-Object { $pidSet.Contains([int]$_.ProcessId) })
-}
-
 function Get-ProcessOrNull {
-    param([int]$Id)
+    # The Get-Process object of a snapshot record, or $null when the process
+    # has exited, cannot be read, or its PID now belongs to another process.
+    param([object]$ProcessInfo)
     try {
-        return Get-Process -Id $Id -ErrorAction Stop
+        $process = Get-Process -Id ([int]$ProcessInfo.ProcessId) -ErrorAction Stop
     }
     catch {
         return $null
+    }
+    if (-not (Test-SameProcess -ProcessInfo $ProcessInfo -Process $process)) {
+        return $null
+    }
+    return $process
+}
+
+function Write-CsvRows {
+    param([string]$Path, [object[]]$Rows, [bool]$Append)
+    if ($Rows.Count -eq 0) { return }
+    if ($Append) {
+        $Rows | Export-Csv -LiteralPath $Path -NoTypeInformation -Encoding UTF8 -Append
+    }
+    else {
+        $Rows | Export-Csv -LiteralPath $Path -NoTypeInformation -Encoding UTF8
     }
 }
 
@@ -174,6 +167,7 @@ function New-DiagnosticRow {
         Timestamp                  = $Timestamp
         Sample                     = $Sample
         Pid                        = [int]$ProcessInfo.ProcessId
+        ProcessKey                 = Get-ProcessKey -ProcessInfo $ProcessInfo
         ParentPid                  = [int]$ProcessInfo.ParentProcessId
         Name                       = [string]$ProcessInfo.Name
         InTree                     = $InTree
@@ -212,20 +206,16 @@ $firstSnapshot = @(Get-ProcessSnapshot)
 $isPidMode = $PSCmdlet.ParameterSetName -eq 'ByPid'
 $resolvedRootPid = Resolve-RootPid -Snapshot $firstSnapshot -UsePid $isPidMode -RequestedPid $RootPid -RequestedProcessName $ProcessName
 $rootRecord = $firstSnapshot | Where-Object { [int]$_.ProcessId -eq $resolvedRootPid } | Select-Object -First 1
+$rootKey = Get-ProcessKey -ProcessInfo $rootRecord
+if ($null -eq $rootKey) {
+    throw "The creation time of PID $resolvedRootPid cannot be read, so its child processes cannot be told apart from processes that reuse a PID. Refusing to measure."
+}
 $logicalCpuCount = [Environment]::ProcessorCount
 
-# PrivateBytesMB sums PrivatePageCount as bytes. Verify that unit on this
-# system against Get-Process before measuring; a wrong unit would make every
-# PrivateBytesMB value wrong by a factor of 4096.
-$unitRatios = New-Object System.Collections.Generic.List[double]
-foreach ($procInfo in @(Get-TreeProcesses -Snapshot $firstSnapshot -StartingPid $resolvedRootPid)) {
-    $ratio = Get-PrivateUnitRatio -ProcessInfo $procInfo -Process (Get-ProcessOrNull -Id ([int]$procInfo.ProcessId))
-    if ($null -ne $ratio) {
-        [void]$unitRatios.Add($ratio)
-    }
+if ([string]::IsNullOrWhiteSpace($UnitCheckPath)) {
+    $UnitCheckPath = [System.IO.Path]::ChangeExtension($resolvedOutput, '.unitcheck.csv')
 }
-$unitRatio = Get-VerifiedPrivateUnitRatio -Ratios $unitRatios.ToArray()
-Write-Host ("PrivatePageCount unit check: median ratio to PrivateMemorySize64 = {0} over {1} processes (bytes)." -f (Format-InvariantDecimal -Value $unitRatio -DecimalPlaces 6), $unitRatios.Count)
+$unitCheckOutput = [System.IO.Path]::GetFullPath($UnitCheckPath)
 
 $diagnosticsOutput = $null
 $rootExecutable = [string]$rootRecord.Name
@@ -238,34 +228,47 @@ if ($Diagnostics) {
     $diagnosticsOutput = [System.IO.Path]::GetFullPath($DiagnosticsPath)
 }
 
-Write-Host "Measuring process: $($rootRecord.Name), PID=$resolvedRootPid"
+Write-Host "Measuring process: $($rootRecord.Name), PID=$resolvedRootPid, identity $rootKey"
 Write-Host "Duration: $DurationSeconds seconds; interval: $SampleIntervalSeconds seconds"
 Write-Host "CSV: $resolvedOutput"
 if ($null -ne $diagnosticsOutput) {
     Write-Host "Diagnostics CSV: $diagnosticsOutput"
 }
+Write-Host "Unit check CSV: $unitCheckOutput (rows are held in memory until the unit check passes, at most $UnitCheckTimeoutSeconds s)"
 Write-Host ("CpuPercentAllCores is normalized to total capacity of all logical CPUs (0 to 100%). This system has {0} logical CPUs, so one fully utilized core is about {1}%." -f $logicalCpuCount, (Format-InvariantDecimal -Value (100.0 / $logicalCpuCount) -DecimalPlaces 2))
 Write-Host "Stop: Ctrl+C"
 
 $watch = [System.Diagnostics.Stopwatch]::StartNew()
 $previousSampleTime = $watch.Elapsed.TotalSeconds
-$previousCpuByPid = @{}
-$firstRow = $true
+$previousCpuByKey = @{}
 $sampleNumber = 0
+# PrivateBytesMB sums PrivatePageCount as bytes. The unit is verified against
+# Get-Process on processes whose memory is stable between two samples; until
+# then rows are held back, so no unverified value reaches OutputPath.
+$unitVerified = $false
+$unitRatio = $null
+$previousUnitByKey = @{}
+$unitCheckWritten = $false
+$heldRows = New-Object System.Collections.Generic.List[object]
+$heldDiagnosticRows = New-Object System.Collections.Generic.List[object]
+$outputWritten = $false
+$diagnosticsWritten = $false
 $rowsWithMissingPrivate = 0
 $rowsWithUnreadableCpu = 0
 
 while ($watch.Elapsed.TotalSeconds -lt $DurationSeconds) {
     $sampleStartedAt = $watch.Elapsed.TotalSeconds
     $snapshot = @(Get-ProcessSnapshot -IncludeDiagnostics $Diagnostics.IsPresent)
-    $rootStillExists = @($snapshot | Where-Object { [int]$_.ProcessId -eq $resolvedRootPid }).Count -gt 0
-    if (-not $rootStillExists) {
-        Write-Warning "Root process PID=$resolvedRootPid has exited. Measurement stopped."
+    $treeResult = Get-IdentifiedProcessTree -Snapshot $snapshot -RootPid $resolvedRootPid -RootKey $rootKey
+    if (-not $treeResult.RootFound) {
+        Write-Warning "Root process PID=$resolvedRootPid ($rootKey) has exited. Measurement stopped."
         break
     }
 
-    $tree = @(Get-TreeProcesses -Snapshot $snapshot -StartingPid $resolvedRootPid)
-    $currentCpuByPid = @{}
+    $tree = @($treeResult.Processes)
+    $currentCpuByKey = @{}
+    $unitInputs = New-Object System.Collections.Generic.List[object]
+    $treeKeys = New-Object System.Collections.Generic.List[string]
     $cpuDeltaSeconds = 0.0
     $cpuDeltaKnown = $false
 
@@ -279,6 +282,8 @@ while ($watch.Elapsed.TotalSeconds -lt $DurationSeconds) {
 
     foreach ($procInfo in $tree) {
         $procId = [int]$procInfo.ProcessId
+        $procKey = Get-ProcessKey -ProcessInfo $procInfo
+        [void]$treeKeys.Add($procKey)
         $workingSetBytes += [long]$procInfo.WorkingSetSize
         if ($null -ne $procInfo.PrivatePageCount) {
             $privateBytes += [long]$procInfo.PrivatePageCount
@@ -288,8 +293,17 @@ while ($watch.Elapsed.TotalSeconds -lt $DurationSeconds) {
         }
         [void]$treeDescriptions.Add("$procId`:$($procInfo.Name)")
 
-        $process = Get-ProcessOrNull -Id $procId
+        $process = Get-ProcessOrNull -ProcessInfo $procInfo
         $cpuNow = Get-CpuSeconds -Process $process
+        if (-not $unitVerified) {
+            [void]$unitInputs.Add([pscustomobject]@{
+                    Pid  = $procId
+                    Key  = $procKey
+                    Name = [string]$procInfo.Name
+                    Cim  = $procInfo.PrivatePageCount
+                    Proc = if ($null -ne $process) { $process.PrivateMemorySize64 } else { $null }
+                })
+        }
         if ($Diagnostics) {
             $ratio = Get-PrivateUnitRatio -ProcessInfo $procInfo -Process $process
             if ($null -ne $ratio) {
@@ -302,9 +316,9 @@ while ($watch.Elapsed.TotalSeconds -lt $DurationSeconds) {
             $cpuUnreadableCount++
         }
         if ($null -ne $cpuNow) {
-            $currentCpuByPid[$procId] = [double]$cpuNow
-            if ($previousCpuByPid.ContainsKey($procId)) {
-                $delta = [double]$cpuNow - [double]$previousCpuByPid[$procId]
+            $currentCpuByKey[$procKey] = [double]$cpuNow
+            if ($previousCpuByKey.ContainsKey($procKey)) {
+                $delta = [double]$cpuNow - [double]$previousCpuByKey[$procKey]
                 if ($delta -ge 0) {
                     $cpuDeltaSeconds += $delta
                     $cpuDeltaKnown = $true
@@ -326,17 +340,16 @@ while ($watch.Elapsed.TotalSeconds -lt $DurationSeconds) {
                 continue
             }
             [void]$missedWebViewPids.Add([int]$procInfo.ProcessId)
-            $process = Get-ProcessOrNull -Id ([int]$procInfo.ProcessId)
+            $process = Get-ProcessOrNull -ProcessInfo $procInfo
             $ratio = Get-PrivateUnitRatio -ProcessInfo $procInfo -Process $process
             [void]$diagnosticRows.Add((New-DiagnosticRow -Timestamp $sampleTimestamp -Sample $sampleNumber -ProcessInfo $procInfo -Process $process -InTree $false -Ratio $ratio))
         }
-        if ($diagnosticRows.Count -gt 0) {
-            if ($firstRow) {
-                $diagnosticRows | Export-Csv -LiteralPath $diagnosticsOutput -NoTypeInformation -Encoding UTF8
-            }
-            else {
-                $diagnosticRows | Export-Csv -LiteralPath $diagnosticsOutput -NoTypeInformation -Encoding UTF8 -Append
-            }
+        if ($unitVerified) {
+            Write-CsvRows -Path $diagnosticsOutput -Rows $diagnosticRows.ToArray() -Append $diagnosticsWritten
+            if ($diagnosticRows.Count -gt 0) { $diagnosticsWritten = $true }
+        }
+        else {
+            $heldDiagnosticRows.AddRange($diagnosticRows)
         }
     }
 
@@ -357,6 +370,8 @@ while ($watch.Elapsed.TotalSeconds -lt $DurationSeconds) {
         RootPid            = $resolvedRootPid
         ProcessCount       = $tree.Count
         ProcessIds         = (($tree | ForEach-Object { [string]$_.ProcessId }) -join ';')
+        # PID@creation-ticks of each process; tells a reused PID apart.
+        ProcessKeys        = ($treeKeys -join ';')
         ProcessTree        = ($treeDescriptions -join ';')
         WorkingSetMB       = Format-InvariantDecimal -Value ([Math]::Round(($workingSetBytes / 1MB), 2)) -DecimalPlaces 2
         PrivateBytesMB     = Format-InvariantDecimal -Value ([Math]::Round(($privateBytes / 1MB), 2)) -DecimalPlaces 2
@@ -367,21 +382,71 @@ while ($watch.Elapsed.TotalSeconds -lt $DurationSeconds) {
         # because the value could not be read. Non-zero means the sum is low.
         PrivateMissingCount = $privateMissingCount
         CpuUnreadableCount  = $cpuUnreadableCount
+        # Processes whose ParentProcessId points into the tree but which are
+        # not in it: created before that parent (PID reuse), or with an
+        # unreadable creation time. Unverified > 0 means the tree may be
+        # incomplete for this row.
+        RejectedPidReuseCount  = @($treeResult.Rejected).Count
+        RejectedPidReuseIds    = (@($treeResult.Rejected) -join ';')
+        UnverifiedProcessCount = @($treeResult.Unverified).Count
+        UnverifiedProcessIds   = (@($treeResult.Unverified) -join ';')
     }
     if ($privateMissingCount -gt 0) { $rowsWithMissingPrivate++ }
     if ($cpuUnreadableCount -gt 0) { $rowsWithUnreadableCpu++ }
 
-    if ($firstRow) {
-        $row | Export-Csv -LiteralPath $resolvedOutput -NoTypeInformation -Encoding UTF8
-        $firstRow = $false
+    if (-not $unitVerified) {
+        [void]$heldRows.Add($row)
+        $evaluated = @(Get-StablePrivateUnitRatios -Current $unitInputs.ToArray() -Previous $previousUnitByKey)
+        $unitCheckRows = New-Object System.Collections.Generic.List[object]
+        for ($i = 0; $i -lt $evaluated.Count; $i++) {
+            [void]$unitCheckRows.Add([pscustomobject]@{
+                    Timestamp                = $sampleTimestamp
+                    Sample                   = $sampleNumber
+                    Pid                      = $unitInputs[$i].Pid
+                    ProcessKey               = $unitInputs[$i].Key
+                    Name                     = $unitInputs[$i].Name
+                    CimPrivatePageCount      = $evaluated[$i].Cim
+                    ProcPrivateMemorySize64  = $evaluated[$i].Proc
+                    PreviousCimPrivatePageCount     = $evaluated[$i].PrevCim
+                    PreviousProcPrivateMemorySize64 = $evaluated[$i].PrevProc
+                    Stable                   = $evaluated[$i].Stable
+                    Ratio                    = Format-InvariantDecimal -Value $evaluated[$i].Ratio -DecimalPlaces 6
+                })
+        }
+        Write-CsvRows -Path $unitCheckOutput -Rows $unitCheckRows.ToArray() -Append $unitCheckWritten
+        if ($unitCheckRows.Count -gt 0) { $unitCheckWritten = $true }
+
+        $stableRatios = [double[]]@($evaluated | Where-Object { $_.Stable -and $null -ne $_.Ratio } | ForEach-Object { [double]$_.Ratio })
+        if ($stableRatios.Count -gt 0) {
+            # Throws (fail closed) when stable processes disagree on the unit.
+            $unitRatio = Get-VerifiedPrivateUnitRatio -Ratios $stableRatios
+            $unitVerified = $true
+            Write-Host ("PrivatePageCount unit check: median ratio to PrivateMemorySize64 = {0} over {1} stable processes at sample {2} (bytes)." -f (Format-InvariantDecimal -Value $unitRatio -DecimalPlaces 6), $stableRatios.Count, $sampleNumber)
+            Write-CsvRows -Path $resolvedOutput -Rows $heldRows.ToArray() -Append $false
+            $outputWritten = $true
+            $heldRows.Clear()
+            if ($Diagnostics) {
+                Write-CsvRows -Path $diagnosticsOutput -Rows $heldDiagnosticRows.ToArray() -Append $false
+                if ($heldDiagnosticRows.Count -gt 0) { $diagnosticsWritten = $true }
+                $heldDiagnosticRows.Clear()
+            }
+        }
+        elseif ($now -ge $UnitCheckTimeoutSeconds) {
+            throw ("No process of the tree had stable private memory (both PrivatePageCount and PrivateMemorySize64 within 1 % of the previous sample) within {0} s, so the PrivateBytesMB unit is unverified. Nothing was written to {1}. Per-process values: {2}" -f $UnitCheckTimeoutSeconds, $resolvedOutput, $unitCheckOutput)
+        }
+        $previousUnitByKey = @{}
+        foreach ($item in $unitInputs) {
+            if (-not [string]::IsNullOrEmpty([string]$item.Key)) { $previousUnitByKey[[string]$item.Key] = $item }
+        }
     }
     else {
-        $row | Export-Csv -LiteralPath $resolvedOutput -NoTypeInformation -Encoding UTF8 -Append
+        Write-CsvRows -Path $resolvedOutput -Rows @($row) -Append $outputWritten
+        $outputWritten = $true
     }
 
     Write-Progress -Activity 'Measuring process resources' -Status ("Time {0}/{1} s; processes: {2}; working set: {3} MB; CPU: {4}%" -f [Math]::Round($now,0), $DurationSeconds, $tree.Count, $row.WorkingSetMB, $(if ($null -eq $cpuPercent) { 'n/a' } else { $cpuPercent })) -PercentComplete ([Math]::Min(100, ($now / $DurationSeconds) * 100))
 
-    $previousCpuByPid = $currentCpuByPid
+    $previousCpuByKey = $currentCpuByKey
     $previousSampleTime = $now
     $sampleNumber++
 
@@ -399,6 +464,9 @@ while ($watch.Elapsed.TotalSeconds -lt $DurationSeconds) {
 
 $watch.Stop()
 Write-Progress -Activity 'Measuring process resources' -Completed
+if (-not $unitVerified) {
+    throw ("The run ended after {0} sample(s) before the PrivateBytesMB unit could be verified on a stable process. Nothing was written to {1}. Per-process values: {2}" -f $sampleNumber, $resolvedOutput, $unitCheckOutput)
+}
 Write-Host "Done. Rows written: $sampleNumber"
 Write-Host "Output file: $resolvedOutput"
 if ($rowsWithMissingPrivate -gt 0 -or $rowsWithUnreadableCpu -gt 0) {

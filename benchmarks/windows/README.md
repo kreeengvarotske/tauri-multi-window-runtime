@@ -12,11 +12,18 @@ This directory contains a PowerShell script for sampling a Windows application's
 - `CpuDeltaSeconds` — sum over the included processes of the increase in `Get-Process` `TotalProcessorTime` (user + kernel) since the previous sample. Only processes present in both samples contribute, so CPU used by a process that started or exited between two samples is not counted for that interval. It is empty, like `CpuPercentAllCores`, when no process of the row had readable CPU time in both samples, so an unknown value never looks like a real zero. Sum `CpuDeltaSeconds` over a run to get total CPU seconds.
 - `PrivateMissingCount`, `CpuUnreadableCount` — how many processes of the row were left out of `PrivateBytesMB` or `CpuDeltaSeconds` because `PrivatePageCount` was empty or `Get-Process` could not read the process (it exited after the snapshot, or access was denied). A missing value is never counted as zero silently: a non-zero count means that row's sum is low, and the script prints a warning at the end. If `Win32_Process` itself cannot be queried (WMI error), the script stops with that error; the rows written so far stay in the CSV.
 - `ProcessCount`, `ProcessIds`, `ProcessTree` — processes included in each sample.
+- `ProcessKeys` — the identity of each included process, `PID@creation time` (UTC ticks). Windows reuses PIDs; two processes with the same PID at different times have different keys. CPU deltas are taken per key, so the CPU time of a new process is never subtracted from that of an earlier one with the same PID.
+- `RejectedPidReuseCount`, `RejectedPidReuseIds` — processes whose `ParentProcessId` points at a process of the tree but which were created **before** it. Their parent was an earlier process with the same PID, so they are not descendants and are left out (see below).
+- `UnverifiedProcessCount`, `UnverifiedProcessIds` — processes whose `ParentProcessId` points into the tree but whose creation time cannot be read. They are left out of the sums, together with anything below them. A non-zero value means the tree of that row may be incomplete; an analysis must not treat such a row as complete.
 - `Timestamp`, `ElapsedSeconds`, `IntervalSeconds` — sample timing: `Timestamp` is the wall clock at the start of the sample, `ElapsedSeconds` the stopwatch after the processes were read.
 
 ## Which processes are included
 
-The script walks `ParentProcessId` from the root process. This finds the WebView2 browser process and its children (GPU, renderers, utility) when they are descendants of the app. It cannot see processes that are not descendants: a process whose parent exited is reparented to nothing, and a WebView2 browser shared with another app is not counted. A reused PID can also attach an unrelated process. Before treating a sum as the application's total, check `ProcessTree`, or run with `-Diagnostics` (below), which lists WebView2 processes started for this executable that the walk missed.
+The script walks `ParentProcessId` from the root process. This finds the WebView2 browser process and its children (GPU, renderers, utility) when they are descendants of the app.
+
+A process is identified by PID **and** creation time (`Win32_Process.CreationDate`). A child is kept only if it was created no earlier than the process it names as parent. This removes reused PIDs exactly: a live process created before the child held that PID when the child was created, so it is the child's real parent; a process created after the child cannot be its parent. On the #36 smoke (2026-10-27) the PID-only walk attached a running Edge browser (5 processes, about 176 MB) because Edge's parent PID equalled a PID of the app's tree; Edge was created hours earlier and is now rejected. The root is checked the same way: if its PID is reused after it exits, measurement stops. A `Get-Process` handle is used for memory or CPU only if its start time matches the snapshot's creation time (within 1 s).
+
+Limits: a process whose parent exited is reparented to nothing and is not found; a WebView2 browser shared with another app is not counted; a process that starts and exits between two samples is never seen, so its memory and CPU are missing from every row. Before treating a sum as the application's total, check `ProcessTree`, `UnverifiedProcessCount`, or run with `-Diagnostics` (below), which lists WebView2 processes started for this executable that the walk missed.
 
 ## Requirements
 
@@ -52,15 +59,24 @@ Replace `12345` with the PID of the application's main process.
 
 ## Unit check and diagnostics
 
-At startup the script compares `PrivatePageCount` with `Get-Process` `PrivateMemorySize64` for every process in the tree and prints the median ratio. If it is outside 0.9–1.1, the script stops instead of writing wrong `PrivateBytesMB` values. It also stops if no finite valid ratio can be computed (for example, because process-memory access is denied or all candidate values are zero/missing); an unverified unit must not be presented as a verified measurement. The validation logic is isolated in `PrivateUnitValidation.psm1` so the empty-input and wrong-unit paths can be tested without relying on OS-specific protected processes.
+At startup the script compares `PrivatePageCount` with `Get-Process` `PrivateMemorySize64` and stops instead of writing wrong `PrivateBytesMB` values if the median ratio is outside 0.9–1.1.
 
-Run the deterministic PowerShell 5.1 regression checks with:
+The two values are read milliseconds apart. While a process is growing, as WebView2 processes do in their first seconds, the ratio is far from 1 even though both are bytes: the #36 smoke saw 0.87, 0.80 and 0.51 at startup and stopped in 8 of 20 runs. So a process is used for the check only when both of its values changed by at most 1 % since the previous sample of the same process (same identity). Sampling starts at once; the check runs on every sample until some process of the tree is stable, and decides on the first such sample:
+
+- median of the stable ratios in 0.9–1.1: the unit is bytes; the rows held so far are written and sampling continues normally;
+- median outside 0.9–1.1: a real unit mismatch; the script stops (exit code 1) and writes no measurement;
+- no stable process within `-UnitCheckTimeoutSeconds` (default 30), or the root exits first: the unit is unverified; the script stops (exit code 1) and writes no measurement.
+
+The acceptance band is unchanged. Until the check passes, rows are kept in memory, so `OutputPath` never holds an unverified value, and sampling from the first second is kept for a run that passes. Every evaluated process and sample (both values, the previous values, `Stable`, `Ratio`) is written to `<output>.unitcheck.csv` (or `-UnitCheckPath`), also when the check fails. The logic is in `PrivateUnitValidation.psm1` (`Get-StablePrivateUnitRatios`, `Get-VerifiedPrivateUnitRatio`) and `ProcessTreeIdentity.psm1`.
+
+Run the deterministic regression checks (Windows PowerShell 5.1 and PowerShell 7) with:
 
 ```powershell
 .\Test-PrivateUnitValidation.ps1
+.\Test-ProcessTreeIdentity.ps1
 ```
 
-The test covers an empty ratio list, a list containing only non-finite values, and ratios consistent with a page-count rather than byte-count interpretation. These are unit tests for fail-closed behavior; they do not replace a native end-to-end monitor run.
+`Test-PrivateUnitValidation.ps1` covers an empty ratio list, a list containing only non-finite values, and ratios consistent with a page-count rather than byte-count interpretation. `Test-ProcessTreeIdentity.ps1` uses synthetic snapshots: a WebView2 child that appears late, a PID reused by a process created before its claimed parent (the Edge case), a reused root PID, a child with unknown creation time, a short-lived child that is really in the tree, growing processes at startup (no false unit failure), and stable processes with a real unit mismatch (still a failure). These test the decision logic; they do not replace a native end-to-end monitor run.
 
 Add `-Diagnostics` to also write `<output>.diagnostics.csv` (or `-DiagnosticsPath`), with one row per process per sample:
 
@@ -68,7 +84,7 @@ Add `-Diagnostics` to also write `<output>.diagnostics.csv` (or `-DiagnosticsPat
 .\Measure-ProcessTree.ps1 -RootPid 12345 -DurationSeconds 60 -Diagnostics -OutputPath .\tauri-runtime.csv
 ```
 
-Columns: `Pid`, `ParentPid`, `Name`, `InTree`, `CimWorkingSetSize`, `CimPrivatePageCount`, `CimPageFileUsageKB`, `ProcPrivateMemorySize64`, `ProcWorkingSet64`, `ProcTotalProcessorSeconds`, `RatioPrivatePageCountToPrivateMemorySize64`. Rows with `InTree=False` are WebView2 processes whose command line names this executable (`--webview-exe-name=`) but which are outside the `ParentProcessId` tree; they are not in the main CSV's sums. At the end the script prints the median ratio and any such processes. The CIM and `Get-Process` values are read a few milliseconds apart, so a process whose memory is changing can show a ratio slightly different from 1. Diagnostics read each process's command line and are slower; use them for checks, not for the measured runs.
+Columns: `Pid`, `ProcessKey`, `ParentPid`, `Name`, `InTree`, `CimWorkingSetSize`, `CimPrivatePageCount`, `CimPageFileUsageKB`, `ProcPrivateMemorySize64`, `ProcWorkingSet64`, `ProcTotalProcessorSeconds`, `RatioPrivatePageCountToPrivateMemorySize64`. Rows with `InTree=False` are WebView2 processes whose command line names this executable (`--webview-exe-name=`) but which are outside the `ParentProcessId` tree; they are not in the main CSV's sums. At the end the script prints the median ratio and any such processes. The CIM and `Get-Process` values are read a few milliseconds apart, so a process whose memory is changing can show a ratio slightly different from 1. Diagnostics read each process's command line and are slower; use them for checks, not for the measured runs.
 
 ## If PowerShell blocks script execution
 
