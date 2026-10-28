@@ -227,8 +227,27 @@ Windows 11.
 A run is valid only if: the report exists and passed (every checksum right,
 no error, no abort); exit codes are 0; the monitor covers ≥ 80 % of expected
 load samples; the median load interval is within ±20 % of 1 s and none is
-longer than 5 s; the WebView2 process count during load equals the expected
-count for `N`; both co-primary measures are finite.
+longer than 5 s; the process tree is verified (below); both co-primary
+measures are finite.
+
+Process tree (#24 comment 6466355032, monitor #43, summarizer #36
+`5c05f6c`). The monitor identifies each process by PID and creation time
+and keeps a child only if it was created no earlier than its parent, so a
+reused PID cannot attach an unrelated process. A run is invalid if:
+- a load row has a process whose creation time could not be read
+  (`UnverifiedProcessCount` > 0), reason "process tree not verified";
+- the monitor diagnostics show a WebView2 process of the app outside the
+  tree during the run.
+
+A change in the process count during load does not invalidate the run by
+itself: a short-lived child that is verified as part of the tree is
+included in the samples where it is seen and counted in
+`TransientProcesses`, reported per run. A child that starts and exits
+between two samples is never seen; this limit is stated with every result.
+The expected steady count per `N` (8 for N2 and 10 for N4 in the
+2026-10-27 smoke) is reported, not used as a filter. Results from a monitor
+without process identities keep the earlier rule (the same count in every
+load sample).
 
 Whole-run CPU (`RunCpuSeconds`) covers more than the load phase, so it has
 its own checks over the **whole measured interval**, from the first monitor
@@ -248,8 +267,9 @@ How processes are counted:
   of CPU. It is counted in `CpuExitedProcesses`, reported per run, and does
   not invalidate the run.
 - A process that starts and exits between two samples is never observed.
-  This limit is stated with every CPU result. The WebView2 process count
-  during load is checked separately (above).
+  This limit is stated with every CPU result. The process tree is checked
+  separately (above); CPU is summed per process identity, so two processes
+  that had the same PID are counted separately.
 
 These checks are implemented in the #36 summarizer (`ff09868`; #36 head
 `fe31123`, hosted CI green on Linux and Windows), with tests
