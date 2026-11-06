@@ -1,0 +1,28 @@
+[package]
+name = "catalog-bench"
+version = "0.1.0"
+description = "Memory benchmark scenario M: one catalog, per-window copies (arm A), one shared Rust copy by hand (arm B) or through shared-runtime (arm C)"
+edition = "2024"
+publish = false
+
+[lib]
+name = "catalog_bench_lib"
+crate-type = ["rlib"]
+
+[features]
+# Arm is fixed at compile time. Without features: arm A, every window loads
+# and keeps its own copy of the catalog in JS. With `shared`: arm B, a
+# hand-written Rust service keeps one copy and windows request bounded views.
+shared = []
+# Arm C: the same catalog as an `Operation` of `shared-runtime` (#35), with
+# pages, totals and records as `View`s behind the same three commands.
+framework = ["dep:shared-runtime"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+shared-runtime = { path = "../../../crates/shared-runtime", optional = true }
+tauri = { version = "2", features = [] }
