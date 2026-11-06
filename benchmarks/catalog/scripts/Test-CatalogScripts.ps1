@@ -17,6 +17,7 @@ $ErrorActionPreference = 'Stop'
 $culture = [System.Globalization.CultureInfo]::InvariantCulture
 . (Join-Path $PSScriptRoot 'CatalogSchedule.ps1')
 . (Join-Path $PSScriptRoot 'CatalogThresholds.ps1')
+. (Join-Path $PSScriptRoot 'CatalogJobCpu.ps1')
 $failures = New-Object System.Collections.Generic.List[string]
 
 function Assert-True {
@@ -307,6 +308,7 @@ try {
     Assert-Near 'identity: a reused PID is a separate CPU process' $byCase['N2D16B'].CpuProcesses 4
     # host 2 + 0.3 * 35 = 12.5, WebView2 1 + 0.2 * 35 = 8.0, first 5100 last 1.5, second 5100 last 0.05 * 16 = 0.8
     Assert-Near 'identity: whole-run CPU keeps both processes that had PID 5100' $byCase['N2D16B'].RunCpuSeconds 22.8 1e-6
+    Assert-True 'identity: results without cpuSource are legacy and use the monitor rule' (@($runs | Where-Object { $_.CpuSource -ne 'legacy-monitor' }).Count -eq 0)
 }
 finally {
     Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
@@ -451,6 +453,185 @@ $test = Test-SignMargin -Differences $diffs -Shift 10.0 -Alpha (0.05 / 6)
 Assert-True 'test: one moved onto the threshold no longer rejects' (-not $test.Reject -and $test.Below -eq 9 -and $test.AtZero -eq 1 -and $test.N -eq 11)
 $test = Test-SignMargin -Differences @() -Shift 10.0 -Alpha (0.05 / 6)
 Assert-True 'test: no triplets never rejects' (-not $test.Reject)
+
+# --- Whole-run CPU from the job (CatalogJobCpu.ps1, protocol §7 with job CPU).
+# Fixture: app started at t0 in an empty job; phases idle-before t0+1, warm-up
+# t0+5, load t0+10..t0+30, end t0+35; job rows every 0.25 s from t0 to t0+40 with
+# 0.3 s user + 0.1 s kernel per second; the host (4242) and a WebView2 process
+# (5000) live through the run; a short child (6000) lives 50 ms between two rows
+# at t0+12.1 and is never seen by the monitor; every process has exited by t0+37.
+function New-JobFixture {
+    param([DateTimeOffset]$T0)
+    $rows = New-Object System.Collections.Generic.List[object]
+    for ($k = 0; $k -le 160; $k++) {
+        $t = $k * 0.25
+        $total = if ($t -ge 12.25) { 3 } else { 2 }
+        $active = if ($t -ge 37) { 0 } elseif ($t -ge 36.5) { 1 } else { 2 }
+        $rows.Add([pscustomobject][ordered]@{
+                Utc = $T0.AddSeconds($t).UtcDateTime.ToString('o', $culture); ElapsedSeconds = $t.ToString('F6', $culture)
+                UserTicks = [long](0.3 * $t * 1e7); KernelTicks = [long](0.1 * $t * 1e7); CpuSeconds = (0.4 * $t).ToString('F7', $culture)
+                TotalProcesses = $total; ActiveProcesses = $active; LimitTerminatedProcesses = 0
+            })
+    }
+    $message = { param($offset, $kind, $id) [pscustomobject][ordered]@{ Utc = $T0.AddSeconds($offset).UtcDateTime.ToString('o', $culture); UtcTicks = $T0.AddSeconds($offset).UtcTicks; Message = $kind; ProcessId = $id } }
+    $messages = New-Object System.Collections.Generic.List[object]
+    $messages.Add((& $message 0.001 6 4242)); $messages.Add((& $message 0.5 6 5000)); $messages.Add((& $message 12.1 6 6000)); $messages.Add((& $message 12.15 7 6000))
+    $messages.Add((& $message 36.5 7 5000)); $messages.Add((& $message 37 7 4242)); $messages.Add((& $message 37 4 0))
+    $phases = [pscustomobject][ordered]@{
+        idleBeforeStartedAt = $T0.AddSeconds(1).ToString('o'); warmupStartedAt = $T0.AddSeconds(5).ToString('o'); loadStartedAt = $T0.AddSeconds(10).ToString('o')
+        loadEndedAt = $T0.AddSeconds(30).ToString('o'); endedAt = $T0.AddSeconds(35).ToString('o')
+    }
+    [pscustomobject]@{ Rows = $rows; Messages = $messages; Phases = $phases; Keys = @("4242@$($T0.UtcTicks)", "5000@$($T0.AddSeconds(0.49).UtcTicks)") }
+}
+$jobT0 = [DateTimeOffset]::Parse('2026-11-06T19:00:00Z', $culture)
+$f = New-JobFixture $jobT0
+$job = Get-CatalogJobCpu -Rows $f.Rows -Messages $f.Messages -Phases $f.Phases -MonitorKeys $f.Keys
+Assert-True 'job: a complete run has no problems' ($job.Problems.Count -eq 0) (@($job.Problems) -join '; ')
+Assert-Near 'job: whole-run CPU at the end of idle-after; CPU after the end is not counted' $job.RunCpuSeconds 14.0 1e-6
+Assert-Near 'job: startup CPU at the warm-up start' $job.StartupCpuSeconds 2.0 1e-6
+Assert-Near 'job: load CPU between the load boundaries' $job.LoadCpuSeconds 8.0 1e-6
+Assert-Near 'job: a short process between two samples is in the job count' $job.JobProcesses 3
+Assert-Near 'job: both monitor processes are members' $job.MonitorProcessesInJob 2
+Assert-Near 'job: the short process is the one the monitor never saw' $job.JobProcessesNeverSeenByMonitor 1
+Assert-Near 'job: the end boundary falls on a row' $job.EndGapSeconds 0 1e-9
+
+# Artificial CPU after endedAt: 100 s of CPU from 50 ms after the end; the whole-run value stays 14.0.
+$f = New-JobFixture $jobT0
+foreach ($r in $f.Rows) { if ([DateTimeOffset]::Parse($r.Utc, $culture) -gt $jobT0.AddSeconds(35)) { $r.UserTicks = [long]$r.UserTicks + 1000000000 } }
+$job = Get-CatalogJobCpu -Rows $f.Rows -Messages $f.Messages -Phases $f.Phases -MonitorKeys $f.Keys
+Assert-True 'job: artificial CPU after endedAt does not enter the whole-run value' ($job.Problems.Count -eq 0 -and [Math]::Abs($job.RunCpuSeconds - 14.0) -lt 1e-6) ("{0}; {1}" -f $job.RunCpuSeconds, (@($job.Problems) -join '; '))
+
+$f = New-JobFixture $jobT0
+$f.Rows = @($f.Rows | Where-Object { $t = ([DateTimeOffset]::Parse($_.Utc, $culture) - $jobT0).TotalSeconds; $t -le 34 -or $t -ge 36 })
+$job = Get-CatalogJobCpu -Rows $f.Rows -Messages $f.Messages -Phases $f.Phases -MonitorKeys $f.Keys
+Assert-True 'job: a row more than 0.5 s before the end is refused' ((@($job.Problems) -join ';') -like '*end of the interval: last job row 1.000 s before*' -and $null -eq $job.RunCpuSeconds) (@($job.Problems) -join '; ')
+Assert-True 'job: a 2 s gap between rows is refused' ((@($job.Problems) -join ';') -like '*job rows 2.000 s apart*') (@($job.Problems) -join '; ')
+
+$f = New-JobFixture $jobT0
+$f.Rows[50].UserTicks = $f.Rows[49].UserTicks - 1
+$job = Get-CatalogJobCpu -Rows $f.Rows -Messages $f.Messages -Phases $f.Phases -MonitorKeys $f.Keys
+Assert-True 'job: a counter that decreases is refused' ((@($job.Problems) -join ';') -like '*decrease at row 50*') (@($job.Problems) -join '; ')
+
+$f = New-JobFixture $jobT0
+for ($k = 100; $k -lt $f.Rows.Count; $k++) { $f.Rows[$k].ElapsedSeconds = ([double]::Parse($f.Rows[$k].ElapsedSeconds, $culture) + 0.2).ToString('F6', $culture) }
+$job = Get-CatalogJobCpu -Rows $f.Rows -Messages $f.Messages -Phases $f.Phases -MonitorKeys $f.Keys
+Assert-True 'job: a wall clock that drifts 0.2 s from the stopwatch is refused' ((@($job.Problems) -join ';') -like '*wall clock drifted 0.200 s*') (@($job.Problems) -join '; ')
+
+$f = New-JobFixture $jobT0
+$f.Messages = @($f.Messages | Where-Object { -not ($_.Message -eq 6 -and $_.ProcessId -eq 6000) })
+$job = Get-CatalogJobCpu -Rows $f.Rows -Messages $f.Messages -Phases $f.Phases -MonitorKeys $f.Keys
+Assert-True 'job: a lost membership message makes membership unverified' ((@($job.Problems) -join ';') -like '*job messages incomplete (new 2 of 3*membership not verified*') (@($job.Problems) -join '; ')
+
+$f = New-JobFixture $jobT0
+$foreign = "7000@$($jobT0.AddSeconds(3).UtcTicks)"
+$job = Get-CatalogJobCpu -Rows $f.Rows -Messages $f.Messages -Phases $f.Phases -MonitorKeys (@($f.Keys) + $foreign)
+Assert-True 'job: a monitor-tree process outside the job is refused' ((@($job.Problems) -join ';') -like "*without a job membership message: $foreign*") (@($job.Problems) -join '; ')
+
+$f = New-JobFixture $jobT0
+$reused = "5000@$($jobT0.AddSeconds(20).UtcTicks)"
+$job = Get-CatalogJobCpu -Rows $f.Rows -Messages $f.Messages -Phases $f.Phases -MonitorKeys @($f.Keys[0], $reused)
+Assert-True 'job: a reused PID is not matched to the earlier process''s message' ((@($job.Problems) -join ';') -like "*without a job membership message: $reused*") (@($job.Problems) -join '; ')
+
+$f = New-JobFixture $jobT0
+foreach ($r in $f.Rows) { if ([int]$r.ActiveProcesses -eq 0) { $r.ActiveProcesses = 1 } }
+$f.Messages = @($f.Messages | Where-Object { $_.Message -ne 4 -and -not ($_.Message -eq 7 -and $_.ProcessId -eq 4242) })
+$job = Get-CatalogJobCpu -Rows $f.Rows -Messages $f.Messages -Phases $f.Phases -MonitorKeys $f.Keys
+Assert-True 'job: a process still running at the last row is refused' ((@($job.Problems) -join ';') -like '*1 job process(es) still running*') (@($job.Problems) -join '; ')
+Assert-True 'job: with one process running the exit messages still match' ((@($job.Problems) -join ';') -notlike '*messages incomplete*') (@($job.Problems) -join '; ')
+
+$f = New-JobFixture $jobT0
+$f.Rows = @($f.Rows | Where-Object { ([DateTimeOffset]::Parse($_.Utc, $culture) - $jobT0).TotalSeconds -ge 1.5 })
+$job = Get-CatalogJobCpu -Rows $f.Rows -Messages $f.Messages -Phases $f.Phases -MonitorKeys $f.Keys
+Assert-True 'job: sampling that starts after the idle-before phase is refused' ((@($job.Problems) -join ';') -like '*first job row after the idle-before phase*') (@($job.Problems) -join '; ')
+
+$f = New-JobFixture $jobT0
+$f.Rows[150].LimitTerminatedProcesses = 1
+$job = Get-CatalogJobCpu -Rows $f.Rows -Messages $f.Messages -Phases $f.Phases -MonitorKeys $f.Keys
+Assert-True 'job: a process terminated by a job limit is refused' ((@($job.Problems) -join ';') -like '*terminated by a job limit*') (@($job.Problems) -join '; ')
+
+# Summarizer with cpuSource = job in configuration.json. Six runs:
+#   N2D0 A  : job complete; the monitor lost a child's CPU (ExitedUnread) -> valid, CPU from the job
+#   N2D0 B  : job complete; private memory missing in a load row          -> invalid for RAM only
+#   N2D16 A : a monitor-tree process has no job membership message         -> invalid (job CPU)
+#   N2D16 B : valid RAM and monitor CPU, but no job CSV or messages        -> invalid, never the monitor
+#   N2D64 A : job CSV present, messages file missing                       -> invalid
+#   N2D64 B : job complete                                                 -> valid
+$root = Join-Path ([System.IO.Path]::GetTempPath()) ("catalog-test-job-{0}" -f [guid]::NewGuid().ToString('N'))
+try {
+    $results = Join-Path $root 'results'
+    $runsDir = Join-Path $results 'runs'
+    New-Item -ItemType Directory -Force -Path $runsDir | Out-Null
+    $schedule = @(New-CatalogSchedule -Cells N2D0, N2D16, N2D64 -Arms A, B -Triplets 1 -Seed 0)
+    $schedule | Export-Csv -LiteralPath (Join-Path $results 'schedule.csv') -NoTypeInformation -Encoding UTF8
+    [ordered]@{
+        scenario = 'M'; phase = 'Smoke'; os = 'Synthetic OS'; machine = 'TEST'; gitHead = 'abc'; gitDirty = $false
+        arms = @('A', 'B'); cells = @('N2D0', 'N2D16', 'N2D64'); triplets = 1; scheduleSeed = 0; sampleIntervalSeconds = 1; cpuSource = 'job'
+    } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $results 'configuration.json') -Encoding UTF8
+    $log = New-Object System.Collections.Generic.List[string]
+    $offset = 0
+    foreach ($run in $schedule) {
+        $t0 = $jobT0.AddMinutes($offset); $offset += 10
+        $case = '{0}{1}' -f $run.Cell, $run.Arm
+        $f = New-JobFixture $t0
+        [ordered]@{
+            schemaVersion = 1; scenario = 'M'; passed = $true; problems = @()
+            config = [ordered]@{ arm = $run.Arm; windows = [int]$run.Windows; dataMib = [int]$run.DataMib; records = 1000; rustDataBytes = [int]$run.DataMib * 1MB }
+            phases = $f.Phases
+            totals = [ordered]@{ scheduledSteps = 80; completedSteps = 80; failures = 0; mismatches = 0; overruns = 0; maxP95LatencyMs = 3.5; maxTimeToFirstPageMs = 120; loadJsHeapAvgBytes = 8MB }
+        } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $runsDir "$($run.Name).json") -Encoding UTF8
+        $monitor = New-Object System.Collections.Generic.List[string]
+        $diagnostics = New-Object System.Collections.Generic.List[string]
+        $monitor.Add('Timestamp,Sample,RootPid,ProcessCount,ProcessIds,ProcessKeys,WorkingSetMB,PrivateBytesMB,CpuDeltaSeconds,IntervalSeconds,PrivateMissingCount,CpuUnreadableCount,RejectedPidReuseCount,UnverifiedProcessCount,CpuExitedUnreadIds,CpuAccessDeniedIds,CpuIdentityChangedIds,CpuLeftTreeIds,CpuReadErrorIds')
+        $diagnostics.Add('Timestamp,Pid,ProcessKey,Name,InTree,CimPrivatePageCount,ProcTotalProcessorSeconds')
+        $keys = @($f.Keys)
+        if ($case -eq 'N2D16A') { $keys += "7000@$($t0.AddSeconds(3).UtcTicks)" }
+        for ($s = 1; $s -le 36; $s++) {
+            $time = $t0.AddSeconds($s).ToString('o')
+            $members = New-Object System.Collections.Generic.List[object]
+            $members.Add(@(4242, $keys[0], 'catalog-bench', 100.0, (0.3 * $s)))
+            $members.Add(@(5000, $keys[1], 'msedgewebview2', 200.0, (0.1 * $s)))
+            if ($case -eq 'N2D16A' -and $s -ge 3 -and $s -le 5) { $members.Add(@(7000, $keys[2], 'msedgewebview2', 10.0, 0.01)) }
+            $cpuMissing = if ($case -eq 'N2D0A' -and $s -eq 12) { @(1, '6000,,,,') } else { @(0, ',,,,') }
+            $privateMissing = if ($case -eq 'N2D0B' -and $s -eq 20) { 1 } else { 0 }
+            $private = ($members | ForEach-Object { $_[3] } | Measure-Object -Sum).Sum
+            $monitor.Add(('{0},{1},4242,{2},{3},{4},{5},{6},0.4,{7},{8},{9},0,0,{10}' -f $time, $s, $members.Count, (($members | ForEach-Object { $_[0] }) -join ';'), (($members | ForEach-Object { $_[1] }) -join ';'), ($private + 50).ToString($culture), $private.ToString($culture), $(if ($s -eq 1) { '' } else { '1' }), $privateMissing, $cpuMissing[0], $cpuMissing[1]))
+            foreach ($m in $members) { $diagnostics.Add(('{0},{1},{2},{3},True,{4},{5}' -f $time, $m[0], $m[1], $m[2], ($m[3] * 1MB).ToString($culture), ([double]$m[4]).ToString($culture))) }
+        }
+        $monitor | Set-Content -LiteralPath (Join-Path $runsDir "$($run.Name).monitor.csv") -Encoding UTF8
+        $diagnostics | Set-Content -LiteralPath (Join-Path $runsDir "$($run.Name).monitor.diagnostics.csv") -Encoding UTF8
+        if ($case -ne 'N2D16B') { $f.Rows | Export-Csv -LiteralPath (Join-Path $runsDir "$($run.Name).job.csv") -NoTypeInformation -Encoding UTF8 }
+        if ($case -ne 'N2D16B' -and $case -ne 'N2D64A') { $f.Messages | Export-Csv -LiteralPath (Join-Path $runsDir "$($run.Name).job.messages.csv") -NoTypeInformation -Encoding UTF8 }
+        $log.Add((@{ name = $run.Name; exitCode = 0; timedOut = $false; monitorExit = 0; monitorCpuSeconds = 1.0; jobTerminated = $false; jobLeftoverProcesses = 0; jobError = $null } | ConvertTo-Json -Compress))
+    }
+    $log | Set-Content -LiteralPath (Join-Path $results 'runs.log') -Encoding UTF8
+    $analysis = Join-Path $root 'analysis'
+    & (Join-Path $PSScriptRoot 'Summarize-CatalogRuns.ps1') -ResultsDirectory $results -OutputDirectory $analysis | Out-Null
+    $runs = @(Import-Csv -LiteralPath (Join-Path $analysis 'runs.csv'))
+    $byCase = @{}
+    foreach ($r in $runs) { $byCase['{0}{1}' -f $r.Cell, $r.Arm] = $r }
+    $all = ($runs | ForEach-Object { "$($_.Cell)$($_.Arm)=$($_.InvalidReason)" }) -join '; '
+    Assert-True 'job summary: a CPU value the monitor lost does not invalidate a run with a complete job' ($byCase['N2D0A'].Valid -eq 'True' -and $byCase['N2D0A'].CpuSource -eq 'job') $all
+    Assert-Near 'job summary: whole-run CPU is the job value' $byCase['N2D0A'].RunCpuSeconds 14.0 1e-6
+    Assert-Near 'job summary: load CPU is the job value' $byCase['N2D0A'].LoadCpuSeconds 8.0 1e-6
+    Assert-True 'job summary: the monitor''s reason stays as a note' ($byCase['N2D0A'].MonitorCpuNotes -like '*ExitedUnread 6000*') $byCase['N2D0A'].MonitorCpuNotes
+    Assert-Near 'job summary: the monitor''s own CPU stays as a diagnostic' $byCase['N2D0A'].MonitorRunCpuSeconds 14.0 1e-6
+    Assert-Near 'job summary: processes the monitor never saw' $byCase['N2D0A'].JobProcessesNeverSeenByMonitor 1
+    Assert-True 'job summary: RAM checks still apply with a complete job' ($byCase['N2D0B'].Valid -eq 'False' -and $byCase['N2D0B'].InvalidReason -like '*missing or non-finite private memory*' -and $byCase['N2D0B'].InvalidReason -notlike '*whole-run CPU*') $byCase['N2D0B'].InvalidReason
+    Assert-True 'job summary: a monitor-tree process outside the job invalidates the run' ($byCase['N2D16A'].Valid -eq 'False' -and $byCase['N2D16A'].InvalidReason -like '*whole-run CPU (job): monitor-tree process(es) without a job membership message: 7000@*' -and $byCase['N2D16A'].RunCpuSeconds -eq '') $byCase['N2D16A'].InvalidReason
+    Assert-True 'job summary: cpuSource=job with no job CSV is invalid even with valid RAM and monitor CPU' ($byCase['N2D16B'].Valid -eq 'False' -and $byCase['N2D16B'].CpuSource -eq 'job' -and $byCase['N2D16B'].InvalidReason -eq ("whole-run CPU (job): missing job artifact(s): {0}.job.csv, {0}.job.messages.csv" -f $byCase['N2D16B'].Name) -and $byCase['N2D16B'].RunCpuSeconds -eq '') "$($byCase['N2D16B'].Name): $($byCase['N2D16B'].InvalidReason)"
+    Assert-Near 'job summary: the monitor CPU of that run is still shown as a diagnostic' $byCase['N2D16B'].MonitorRunCpuSeconds 14.0 1e-6
+    Assert-True 'job summary: a missing job messages file is invalid' ($byCase['N2D64A'].Valid -eq 'False' -and $byCase['N2D64A'].InvalidReason -like '*missing job artifact(s): *.job.messages.csv') $byCase['N2D64A'].InvalidReason
+    Assert-True 'job summary: a complete run is valid' ($byCase['N2D64B'].Valid -eq 'True') $byCase['N2D64B'].InvalidReason
+    $config = Get-Content -LiteralPath (Join-Path $results 'configuration.json') -Raw | ConvertFrom-Json
+    $config | Add-Member -NotePropertyName cpuSource -NotePropertyValue 'other' -Force
+    $config | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $results 'configuration.json') -Encoding UTF8
+    $threw = $false
+    try { & (Join-Path $PSScriptRoot 'Summarize-CatalogRuns.ps1') -ResultsDirectory $results -OutputDirectory (Join-Path $root 'analysis-other') | Out-Null } catch { $threw = $_.Exception.Message -like "*unknown cpuSource 'other'*" }
+    Assert-True 'job summary: an unknown cpuSource stops the summarizer' $threw
+}
+finally {
+    Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 if ($failures.Count -gt 0) {
     Write-Host ''

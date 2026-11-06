@@ -14,7 +14,15 @@ The whole order is written to schedule.csv before the first run
 (CatalogSchedule.ps1: cells interleaved block by block, arm permutations
 cycled per cell) and read back and checked for completeness before it. Each run is a fresh process with its own WebView2 user data folder
 (WEBVIEW2_USER_DATA_FOLDER under profiles\), after a pause. The monitor
-samples the whole process tree every second until the app exits. Nothing is
+samples the whole process tree every second until the app exits. Each app
+is created suspended in its own Windows Job Object and resumed only after
+the assignment (CatalogJobCpu.ps1); the runner reads the job's CPU
+accounting every 250 ms into runs\<run>.job.csv and keeps the job's
+process messages in runs\<run>.job.messages.csv. Whole-run CPU comes from
+the job (protocol §7); the monitor gives RAM and the per-process
+diagnostics. On a timeout, or when processes of the app outlive it by more
+than the grace period, the runner terminates its own job and nothing else.
+Nothing is
 discarded: every report, monitor CSV, diagnostics file and log stays in
 -OutputDirectory, failed runs included. An existing results directory is
 never reused. Summarize-CatalogRuns.ps1 then computes the per-run measures
@@ -79,6 +87,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'CatalogSchedule.ps1')
+. (Join-Path $PSScriptRoot 'CatalogJobCpu.ps1')
 
 $benchRoot = Split-Path -Parent $PSScriptRoot
 $repoRoot = Split-Path -Parent (Split-Path -Parent $benchRoot)
@@ -204,6 +213,9 @@ $configuration = [ordered]@{
     monitorSha256         = (Get-FileHash -LiteralPath $MonitorScript -Algorithm SHA256).Hash
     monitorGitHead        = ((& git -C (Split-Path -Parent $MonitorScript) rev-parse HEAD 2>$null) | Out-String).Trim()
     monitorUnitCheckRequireChildName = $unitCheckChildName
+    cpuSource             = 'job'
+    jobLimits             = $script:CatalogJob
+    jobScriptSha256       = (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'CatalogJobCpu.ps1') -Algorithm SHA256).Hash
     expectedSchedule      = if ($ExpectedSchedule) { (Resolve-Path -LiteralPath $ExpectedSchedule).Path } else { $null }
     expectedScheduleSha256 = $expectedScheduleSha256
     executables           = $executables
@@ -260,34 +272,32 @@ foreach ($planned in $schedule) {
         '--idle-before', $IdleBeforeSeconds, '--warmup', $WarmupSeconds, '--duration', $LoadSeconds,
         '--idle-after', $IdleAfterSeconds, '--step-interval-ms', $StepIntervalMs
     )
-    $previousProfile = $env:WEBVIEW2_USER_DATA_FOLDER
-    $env:WEBVIEW2_USER_DATA_FOLDER = $webViewProfile
+    $jobCsv = Join-Path $runsDirectory "$name.job.csv"
+    $jobMessagesCsv = Join-Path $runsDirectory "$name.job.messages.csv"
+    $commandLine = '"{0}" {1}' -f $exe[$planned.Arm], ($arguments -join ' ')
     $started = Get-Date
-    try {
-        $app = Start-Process -FilePath $exe[$planned.Arm] -ArgumentList $arguments -PassThru
-    }
-    finally {
-        $env:WEBVIEW2_USER_DATA_FOLDER = $previousProfile
-    }
-    # Windows PowerShell reports ExitCode only if the handle was opened before exit.
-    $null = $app.Handle
     $monitorArguments = @(
-        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$MonitorScript`"", '-RootPid', $app.Id,
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$MonitorScript`"", '-RootPid', '{PID}',
         '-DurationSeconds', ($timeoutSeconds + 30), '-SampleIntervalSeconds', $sampleIntervalSeconds,
         '-OutputPath', "`"$monitorCsv`"", '-Diagnostics', '-UnitCheckRequireChildName', $unitCheckChildName
     )
-    $monitor = Start-Process -FilePath 'powershell.exe' -ArgumentList $monitorArguments -PassThru -NoNewWindow -RedirectStandardOutput $monitorLog -RedirectStandardError "$monitorLog.err"
-    $null = $monitor.Handle
-
-    $timedOut = -not $app.WaitForExit($timeoutSeconds * 1000)
-    if ($timedOut) {
-        Write-Warning "$name did not exit within $timeoutSeconds s; stopping it."
-        Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue
-        $app.WaitForExit()
-    }
-    $monitor.WaitForExit()
-    $monitorCpuSeconds = $null
-    try { $monitorCpuSeconds = [Math]::Round($monitor.TotalProcessorTime.TotalSeconds, 3) } catch { }
+    # The app is created suspended in a new job, resumed, then the monitor is
+    # started on its PID; the job is read every 250 ms until every process of
+    # the app has exited (CatalogJobCpu.ps1, Invoke-CatalogJobRun).
+    $run = Invoke-CatalogJobRun -Label $name -CommandLine $commandLine -WorkingDirectory (Get-Location).Path `
+        -Environment @{ WEBVIEW2_USER_DATA_FOLDER = $webViewProfile } -TimeoutSeconds $timeoutSeconds `
+        -JobCsv (Join-Path $runsDirectory "$name.job.csv") -JobMessagesCsv (Join-Path $runsDirectory "$name.job.messages.csv") `
+        -OnStarted {
+            param($appPid)
+            $arguments = @($monitorArguments | ForEach-Object { if ($_ -eq '{PID}') { $appPid } else { $_ } })
+            $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -PassThru -NoNewWindow -RedirectStandardOutput $monitorLog -RedirectStandardError "$monitorLog.err"
+            $null = $process.Handle
+            $process
+        }.GetNewClosure()
+    $monitor = $run.OnStartedResult
+    $exitCode = $run.ExitCode
+    $timedOut = $run.TimedOut
+    if ($null -ne $monitor) { $monitor.WaitForExit() }
     $entry = [ordered]@{
         name              = $name
         seq               = $planned.Seq
@@ -297,17 +307,22 @@ foreach ($planned in $schedule) {
         arm               = $planned.Arm
         startedAt         = $started.ToString('o')
         endedAt           = (Get-Date).ToString('o')
-        pid               = $app.Id
-        exitCode          = $app.ExitCode
+        pid               = $run.Pid
+        exitCode          = $exitCode
         timedOut          = $timedOut
-        monitorExit       = $monitor.ExitCode
+        jobLimitFlags     = $run.LimitFlags
+        jobRows           = $run.Rows
+        jobLeftoverProcesses = $run.LeftoverProcesses
+        jobTerminated     = $run.Terminated
+        jobError          = $run.Error
+        monitorExit       = $monitorExit
         monitorCpuSeconds = $monitorCpuSeconds
         reportExists      = Test-Path -LiteralPath $report
         webView2Profile   = $webViewProfile
         profileCreated    = Test-Path -LiteralPath $webViewProfile
     }
     ($entry | ConvertTo-Json -Compress) | Add-Content -LiteralPath $runLog -Encoding UTF8
-    Write-Host ("{0}: exit {1}, report {2}" -f $name, $app.ExitCode, $(if ($entry.reportExists) { 'written' } else { 'MISSING' }))
+    Write-Host ("{0}: exit {1}, report {2}" -f $name, $exitCode, $(if ($entry.reportExists) { 'written' } else { 'MISSING' }))
 }
 
 Write-Host "Done. Results: $OutputDirectory"
