@@ -304,6 +304,13 @@ its monitor data. Results without `cpuSource` (smokes 1 to 3, #36 comments
 up to 6691413600) are legacy: they keep their status and the monitor rule
 below.
 
+Before any smoke on the job runner, a short native check (one N4D64
+triplet with short phases, plan `benchmarks/catalog/plans/job-cpu-check` in
+#45) shows on the target machine: the end gap and row interval per run, CPU
+after `endedAt` excluded (a real busy loop after the boundary), RAM checked
+on its own, and the handling of a failed assignment and of leftover
+processes.
+
 Monitor rule (results without a job). Whole-run CPU covers more than the
 load phase, so it has its own checks over the **whole measured interval**,
 from the first monitor sample to the end of the idle-after phase
