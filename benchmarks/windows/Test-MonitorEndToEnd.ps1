@@ -181,3 +181,6 @@ if ($failures.Count -gt 0) {
     exit 1
 }
 Write-Host ("PASS: {0} end-to-end monitor checks. Output kept in {1}" -f $passed, $OutputDirectory)
+# The last case's monitor exits with 1 on purpose; without this the runner
+# would take that $LASTEXITCODE as the result of this script.
+exit 0
