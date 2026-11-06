@@ -297,8 +297,12 @@ the tree, private memory complete in every load row), so the RAM result is
 valid independently of the CPU source. `JobProcessesNeverSeenByMonitor` is
 reported per run.
 
-Results without job files (smokes 1 to 3, #36 comments up to 6691413600)
-keep their status and the monitor rule below.
+The CPU source is recorded by the runner in `configuration.json`
+(`cpuSource` = `job`) and never inferred from which files exist: with
+`job`, a run without its job CSV or job messages file is invalid, whatever
+its monitor data. Results without `cpuSource` (smokes 1 to 3, #36 comments
+up to 6691413600) are legacy: they keep their status and the monitor rule
+below.
 
 Monitor rule (results without a job). Whole-run CPU covers more than the
 load phase, so it has its own checks over the **whole measured interval**,
