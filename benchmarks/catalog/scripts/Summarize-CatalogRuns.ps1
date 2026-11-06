@@ -222,6 +222,8 @@ foreach ($planned in $schedule) {
                         Keys           = if ($hasIdentity) { @(([string]$_.ProcessKeys).Split(';') | Where-Object { $_ -ne '' }) } else { @() }
                         Unverified     = if ($hasIdentity) { ConvertTo-Number $_.UnverifiedProcessCount } else { $null }
                         Rejected       = if ($hasIdentity) { ConvertTo-Number (Get-Property $_ 'RejectedPidReuseCount') } else { $null }
+                        # Why CPU values are missing (monitor #43 167a67d and later): reason and PIDs.
+                        CpuReasons     = @(foreach ($reason in 'ExitedUnread', 'AccessDenied', 'IdentityChanged', 'LeftTree', 'ReadError') { $ids = [string](Get-Property $_ "Cpu${reason}Ids"); if ($ids -ne '') { "${reason} $ids" } })
                     }
                 })
             $row.MonitorRows = $samples.Count
@@ -285,7 +287,11 @@ foreach ($planned in $schedule) {
             if ($runSamples.Count -eq 0) { $cpuReasons.Add('no monitor sample before the end of the run') }
             else {
                 if ($runSamples[0].Time -gt (Get-Time $report.phases.idleBeforeStartedAt)) { $cpuReasons.Add('first monitor sample after the idle-before phase started') }
-                if (@($runSamples | Where-Object { $null -eq $_.CpuUnreadable -or $_.CpuUnreadable -gt 0 }).Count -gt 0) { $cpuReasons.Add('unreadable CPU in a monitor row') }
+                $unreadableRows = @($runSamples | Where-Object { $null -eq $_.CpuUnreadable -or $_.CpuUnreadable -gt 0 })
+                if ($unreadableRows.Count -gt 0) {
+                    $why = @($unreadableRows | ForEach-Object { $_.CpuReasons } | Sort-Object -Unique)
+                    $cpuReasons.Add('unreadable CPU in a monitor row' + $(if ($why.Count -gt 0) { " ($($why -join '; '))" } else { '' }))
+                }
                 if ($hasIdentity -and @($runSamples | Where-Object { $null -eq $_.Unverified -or $_.Unverified -gt 0 }).Count -gt 0) { $cpuReasons.Add('unverified processes in a monitor row') }
                 if ($null -eq $row.RunCoverage -or $row.RunCoverage -lt $minLoadCoverage) { $cpuReasons.Add("coverage $(Format-Number $row.RunCoverage 2) < $minLoadCoverage") }
                 if ($null -ne $row.RunIntervalMaxSeconds -and $row.RunIntervalMaxSeconds -gt $maxIntervalSeconds) { $cpuReasons.Add("gap $(Format-Number $row.RunIntervalMaxSeconds 3) s > $maxIntervalSeconds s") }

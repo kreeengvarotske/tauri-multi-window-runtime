@@ -139,3 +139,14 @@ function Test-CatalogSchedule {
     # result counts 0 and one problem counts 1.
     return $problems.ToArray()
 }
+
+function Test-CatalogScheduleMatchesFile {
+    # True when a schedule.csv written before the run has the same rows,
+    # fields and order as the schedule the runner would follow. Both sides
+    # are compared as CSV text after a round trip, so file encoding and
+    # value types do not matter.
+    param([Parameter(Mandatory)][object[]]$Schedule, [Parameter(Mandatory)][string]$Path)
+    $expected = @(Import-Csv -LiteralPath $Path | ConvertTo-Csv -NoTypeInformation) -join "`n"
+    $planned = @($Schedule | ConvertTo-Csv -NoTypeInformation | ConvertFrom-Csv | ConvertTo-Csv -NoTypeInformation) -join "`n"
+    $expected -eq $planned
+}

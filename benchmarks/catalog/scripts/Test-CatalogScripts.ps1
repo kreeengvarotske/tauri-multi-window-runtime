@@ -263,7 +263,7 @@ try {
         } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $runsDir "$($run.Name).json") -Encoding UTF8
         $monitor = New-Object System.Collections.Generic.List[string]
         $diagnostics = New-Object System.Collections.Generic.List[string]
-        $monitor.Add('Timestamp,Sample,RootPid,ProcessCount,ProcessIds,ProcessKeys,WorkingSetMB,PrivateBytesMB,CpuDeltaSeconds,IntervalSeconds,PrivateMissingCount,CpuUnreadableCount,RejectedPidReuseCount,UnverifiedProcessCount')
+        $monitor.Add('Timestamp,Sample,RootPid,ProcessCount,ProcessIds,ProcessKeys,WorkingSetMB,PrivateBytesMB,CpuDeltaSeconds,IntervalSeconds,PrivateMissingCount,CpuUnreadableCount,RejectedPidReuseCount,UnverifiedProcessCount,CpuExitedUnreadIds,CpuAccessDeniedIds,CpuIdentityChangedIds,CpuLeftTreeIds,CpuReadErrorIds')
         $diagnostics.Add('Timestamp,Pid,ProcessKey,Name,InTree,CimPrivatePageCount,ProcTotalProcessorSeconds')
         for ($s = 0; $s -le 36; $s++) {
             $time = $t0.AddSeconds($s).ToString('o')
@@ -277,8 +277,10 @@ try {
                 elseif ($s -ge 20) { $members.Add(@(5100, '5100@7', 'msedgewebview2', 10.0, (0.05 * ($s - 19)))) }
             }
             $unverified = if ($case -eq 'N2D0B' -and $s -eq 20) { 1 } else { 0 }
+            # N2D16 A also loses the CPU time of a child that exited before its first read (monitor reason columns).
+            $cpuMissing = if ($case -eq 'N2D16A' -and $s -eq 12) { @(1, '6101,,,,') } else { @(0, ',,,,') }
             $private = ($members | ForEach-Object { $_[3] } | Measure-Object -Sum).Sum
-            $monitor.Add(('{0},{1},4242,{2},{3},{4},{5},{6},0.5,{7},0,0,0,{8}' -f $time, $s, $members.Count, (($members | ForEach-Object { $_[0] }) -join ';'), (($members | ForEach-Object { $_[1] }) -join ';'), ($private + 50).ToString($culture), $private.ToString($culture), $interval, $unverified))
+            $monitor.Add(('{0},{1},4242,{2},{3},{4},{5},{6},0.5,{7},0,{9},0,{8},{10}' -f $time, $s, $members.Count, (($members | ForEach-Object { $_[0] }) -join ';'), (($members | ForEach-Object { $_[1] }) -join ';'), ($private + 50).ToString($culture), $private.ToString($culture), $interval, $unverified, $cpuMissing[0], $cpuMissing[1]))
             foreach ($m in $members) { $diagnostics.Add(('{0},{1},{2},{3},True,{4},{5}' -f $time, $m[0], $m[1], $m[2], ($m[3] * 1MB).ToString($culture), ([double]$m[4]).ToString($culture))) }
             if ($case -eq 'N2D16A' -and $s -eq 12) { $diagnostics.Add(('{0},6100,6100@8,msedgewebview2,False,{1},0.1' -f $time, (30MB).ToString($culture))) }
         }
@@ -300,6 +302,7 @@ try {
     Assert-True 'identity: an unverified process in a load row invalidates the run' ($byCase['N2D0B'].Valid -eq 'False' -and $byCase['N2D0B'].InvalidReason -like '*process tree not verified in 1 load row*') $byCase['N2D0B'].InvalidReason
     Assert-True 'identity: an unverified process also fails whole-run CPU' ($byCase['N2D0B'].InvalidReason -like '*whole-run CPU: unverified processes*') $byCase['N2D0B'].InvalidReason
     Assert-True 'identity: a WebView2 process of the app outside the tree invalidates the run' ($byCase['N2D16A'].Valid -eq 'False' -and $byCase['N2D16A'].InvalidReason -like '*outside the monitored tree: 6100*') $byCase['N2D16A'].InvalidReason
+    Assert-True 'identity: a CPU value missing for a stated reason invalidates the run and names the reason' ($byCase['N2D16A'].InvalidReason -like '*whole-run CPU: unreadable CPU in a monitor row (ExitedUnread 6101)*') $byCase['N2D16A'].InvalidReason
     Assert-True 'identity: a reused PID does not invalidate the run' ($byCase['N2D16B'].Valid -eq 'True') $byCase['N2D16B'].InvalidReason
     Assert-Near 'identity: a reused PID is a separate CPU process' $byCase['N2D16B'].CpuProcesses 4
     # host 2 + 0.3 * 35 = 12.5, WebView2 1 + 0.2 * 35 = 8.0, first 5100 last 1.5, second 5100 last 0.05 * 16 = 0.8
@@ -374,6 +377,52 @@ Assert-True 'thresholds: N4D64 arm-B rows still have a threshold' ($present.Coun
 $csvRuns = @($pilot | ConvertTo-Csv -NoTypeInformation | ConvertFrom-Csv)
 $csvTable = @(New-CatalogThresholds -Runs $csvRuns -Phase Pilot -Cells N2D16, N4D64)
 Assert-True 'thresholds: same values after a CSV round trip of the runs' ((($table | ForEach-Object { "$($_.Threshold)" }) -join ',') -eq (($csvTable | ForEach-Object { "$($_.Threshold)" }) -join ','))
+
+# The smoke plan written before the run (plans\smoke-abc-3): the runner's -ExpectedSchedule check accepts it
+# for the planned parameters and refuses any other seed, cell list or edited row.
+$planFile = Join-Path (Split-Path -Parent $PSScriptRoot) 'plans\smoke-abc-3\schedule.csv'
+$planCells = @('N2D0', 'N2D16', 'N2D64', 'N4D64')
+Assert-True 'plan: smoke-abc-3 matches seed 1, 4 cells, 1 triplet' (Test-CatalogScheduleMatchesFile -Schedule @(New-CatalogSchedule -Cells $planCells -Arms A, B, C -Triplets 1 -Seed 1 -DataSeed 1) -Path $planFile)
+Assert-True 'plan: smoke-abc-3 is a complete schedule' (@(Test-CatalogSchedule -Schedule @(Import-Csv -LiteralPath $planFile) -Cells $planCells -Arms A, B, C -Triplets 1).Count -eq 0)
+Assert-True 'plan: another schedule seed is refused' (-not (Test-CatalogScheduleMatchesFile -Schedule @(New-CatalogSchedule -Cells $planCells -Arms A, B, C -Triplets 1 -Seed 2 -DataSeed 1) -Path $planFile))
+Assert-True 'plan: another data seed is refused' (-not (Test-CatalogScheduleMatchesFile -Schedule @(New-CatalogSchedule -Cells $planCells -Arms A, B, C -Triplets 1 -Seed 1 -DataSeed 2) -Path $planFile))
+Assert-True 'plan: fewer cells are refused' (-not (Test-CatalogScheduleMatchesFile -Schedule @(New-CatalogSchedule -Cells N2D0, N2D16 -Arms A, B, C -Triplets 1 -Seed 1 -DataSeed 1) -Path $planFile))
+
+# thresholds.csv for the confirmatory analysis: read only when its SHA-256 matches the frozen value (protocol §10a).
+$root = Join-Path ([System.IO.Path]::GetTempPath()) ("catalog-test-hash-{0}" -f [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Force -Path $root | Out-Null
+try {
+    $thresholdsCsv = Join-Path $root 'thresholds.csv'
+    $table | Export-Csv -LiteralPath $thresholdsCsv -NoTypeInformation -Encoding UTF8
+    $frozen = Get-CatalogFileSha256 -Path $thresholdsCsv
+    $loaded = Import-CatalogThresholds -Path $thresholdsCsv -ExpectedSha256 $frozen.ToUpperInvariant() -Cells N2D16, N4D64
+    Assert-True 'thresholds hash: the frozen file is read, any letter case' ($loaded.Sha256 -eq $frozen -and @($loaded.Rows).Count -eq 12)
+    $row = @($loaded.Rows | Where-Object { $_.Cell -eq 'N2D16' -and $_.Kind -eq 'Delta' -and $_.Outcome -eq 'RAM' })[0]
+    Assert-Near 'thresholds hash: values survive the file' ([string]$row.Threshold) 15.25
+    $refused = {
+        param([string]$Name, [string]$Path, [string]$Hash, [string[]]$ForCells, [string]$Pattern)
+        $message = ''
+        try { Import-CatalogThresholds -Path $Path -ExpectedSha256 $Hash -Cells $ForCells | Out-Null } catch { $message = $_.Exception.Message }
+        Assert-True "thresholds hash: $Name stops the analysis" ($message -match $Pattern) "got '$message'"
+    }
+    $changed = Join-Path $root 'thresholds-changed.csv'
+    [System.IO.File]::WriteAllText($changed, ([System.IO.File]::ReadAllText($thresholdsCsv)).Replace('15.25', '15.26'))
+    & $refused 'one changed value' $changed $frozen @('N2D16', 'N4D64') 'does not match the frozen'
+    & $refused 'a missing file' (Join-Path $root 'none.csv') $frozen @('N2D16', 'N4D64') 'not found'
+    & $refused 'a malformed frozen hash' $thresholdsCsv 'abc' @('N2D16', 'N4D64') 'not a 64-digit'
+    & $refused 'an empty frozen hash' $thresholdsCsv '' @('N2D16', 'N4D64') 'not a 64-digit'
+    & $refused 'a cell missing from the file' $thresholdsCsv $frozen @('N2D16', 'N4D64', 'N2D0') 'missing: N2D0/'
+    & $refused 'a cell not in the plan' $thresholdsCsv $frozen @('N2D16') 'unexpected: N4D64/'
+    $doubled = Join-Path $root 'thresholds-doubled.csv'
+    @($table) + @($table[0]) | Export-Csv -LiteralPath $doubled -NoTypeInformation -Encoding UTF8
+    & $refused 'a duplicated row' $doubled (Get-CatalogFileSha256 -Path $doubled) @('N2D16', 'N4D64') 'duplicated: N2D16/Delta/RAM'
+    $text = Join-Path $root 'thresholds-text.csv'
+    [System.IO.File]::WriteAllText($text, ([System.IO.File]::ReadAllText($thresholdsCsv)).Replace('15.25', 'n/a'))
+    & $refused 'a non-numeric threshold' $text (Get-CatalogFileSha256 -Path $text) @('N2D16', 'N4D64') 'non-numeric threshold'
+}
+finally {
+    Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 # Sign counts at the threshold: d = -delta exactly counts against H1 and stays in n.
 $count = Get-SignCount -Differences @(-12.0, -10.0, -15.0, -9.0, -11.0) -Shift 10.0

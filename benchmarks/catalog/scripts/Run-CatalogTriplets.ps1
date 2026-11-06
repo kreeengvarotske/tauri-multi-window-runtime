@@ -68,7 +68,12 @@ param(
     [switch]$SkipBuild,
 
     # Copy bin\arm-*.exe from an earlier results directory instead of building.
-    [string]$ExecutablesFrom
+    [string]$ExecutablesFrom,
+
+    # A schedule.csv written and reviewed before the run (plans\). The
+    # runner stops before building if the schedule it would follow differs
+    # from this file in any field or order.
+    [string]$ExpectedSchedule
 )
 
 Set-StrictMode -Version 2.0
@@ -85,6 +90,12 @@ if ($Phase -eq 'Pilot') {
 }
 
 $MonitorScript = (Resolve-Path -LiteralPath $MonitorScript).Path
+# Scenario M verifies the PrivatePageCount unit on a stable WebView2 child,
+# not on the host process alone (monitor #43, -UnitCheckRequireChildName).
+$unitCheckChildName = 'msedgewebview2.exe'
+if (-not (Get-Command -Name $MonitorScript).Parameters.ContainsKey('UnitCheckRequireChildName')) {
+    throw "$MonitorScript has no -UnitCheckRequireChildName; scenario M needs the monitor from #43 (167a67d or later)."
+}
 $cellRows = @($Cells | ForEach-Object { ConvertFrom-CellName $_ })
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 $OutputDirectory = (Resolve-Path -LiteralPath $OutputDirectory).Path
@@ -100,6 +111,13 @@ if ((Test-Path -LiteralPath $runsDirectory) -and @(Get-ChildItem -LiteralPath $r
     throw "$runsDirectory is not empty; use a new -OutputDirectory."
 }
 New-Item -ItemType Directory -Force -Path $binDirectory, $runsDirectory, $profilesDirectory | Out-Null
+
+$schedule = New-CatalogSchedule -Cells $Cells -Arms $Arms -Triplets $Triplets -Seed $ScheduleSeed -DataSeed $DataSeed
+$expectedScheduleSha256 = $null
+if ($ExpectedSchedule) {
+    if (-not (Test-CatalogScheduleMatchesFile -Schedule $schedule -Path $ExpectedSchedule)) { throw "The schedule for these parameters differs from $ExpectedSchedule; nothing was built or run." }
+    $expectedScheduleSha256 = (Get-FileHash -LiteralPath $ExpectedSchedule -Algorithm SHA256).Hash
+}
 
 function Invoke-Checked {
     param([string]$Description, [scriptblock]$Command)
@@ -185,6 +203,9 @@ $configuration = [ordered]@{
     monitorScript         = $MonitorScript
     monitorSha256         = (Get-FileHash -LiteralPath $MonitorScript -Algorithm SHA256).Hash
     monitorGitHead        = ((& git -C (Split-Path -Parent $MonitorScript) rev-parse HEAD 2>$null) | Out-String).Trim()
+    monitorUnitCheckRequireChildName = $unitCheckChildName
+    expectedSchedule      = if ($ExpectedSchedule) { (Resolve-Path -LiteralPath $ExpectedSchedule).Path } else { $null }
+    expectedScheduleSha256 = $expectedScheduleSha256
     executables           = $executables
     phase                 = $Phase
     sampleIntervalSeconds = $sampleIntervalSeconds
@@ -211,7 +232,6 @@ Copy-Item -LiteralPath (Join-Path $benchRoot 'README.md') -Destination (Join-Pat
 if (Test-Path -LiteralPath $protocolFile) { Copy-Item -LiteralPath $protocolFile -Destination (Join-Path $OutputDirectory 'protocol.md') }
 
 # The full order, written before the first run.
-$schedule = New-CatalogSchedule -Cells $Cells -Arms $Arms -Triplets $Triplets -Seed $ScheduleSeed -DataSeed $DataSeed
 $schedule | Export-Csv -LiteralPath (Join-Path $OutputDirectory 'schedule.csv') -NoTypeInformation -Encoding UTF8
 # The file as written is read back and checked, and must match the order
 # the runs follow, before the first run.
@@ -254,7 +274,7 @@ foreach ($planned in $schedule) {
     $monitorArguments = @(
         '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$MonitorScript`"", '-RootPid', $app.Id,
         '-DurationSeconds', ($timeoutSeconds + 30), '-SampleIntervalSeconds', $sampleIntervalSeconds,
-        '-OutputPath', "`"$monitorCsv`"", '-Diagnostics'
+        '-OutputPath', "`"$monitorCsv`"", '-Diagnostics', '-UnitCheckRequireChildName', $unitCheckChildName
     )
     $monitor = Start-Process -FilePath 'powershell.exe' -ArgumentList $monitorArguments -PassThru -NoNewWindow -RedirectStandardOutput $monitorLog -RedirectStandardError "$monitorLog.err"
     $null = $monitor.Handle

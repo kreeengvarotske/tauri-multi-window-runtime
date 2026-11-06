@@ -12,7 +12,8 @@ arm B (for ε) over the valid PILOT runs of a cell, rounded to 0.1 MiB or
 threshold for that outcome (no fallback to the floor). The thresholds are
 written to thresholds.csv at the freeze, before any confirmatory run, and
 never recomputed from confirmatory data: New-CatalogThresholds refuses any
-phase but Pilot.
+phase but Pilot. The confirmatory analysis reads them only through
+Import-CatalogThresholds, which checks the SHA-256 recorded at the freeze.
 
 Sign test: a triplet supports H1 only when d + shift is strictly below 0
 (shift = +δ for a saving, −η for non-inferiority). A difference exactly at
@@ -104,6 +105,49 @@ function New-CatalogThresholds {
             }
         }
     }
+}
+
+function Get-CatalogFileSha256 {
+    param([Parameter(Mandatory)][string]$Path)
+    (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Import-CatalogThresholds {
+    <#
+    Reads thresholds.csv for the confirmatory analysis (protocol #33 §10a).
+    ExpectedSha256 is the hash recorded at the confirmatory freeze. The file
+    is hashed before it is parsed, and any difference stops the analysis:
+    a missing file, a malformed expected hash, a hash mismatch, or a table
+    that does not have exactly one row per cell, kind and outcome. Returns
+    the rows and the verified hash, to be written next to the results.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$ExpectedSha256,
+        [Parameter(Mandatory)][string[]]$Cells
+    )
+    if ($ExpectedSha256 -notmatch '^[0-9a-fA-F]{64}$') { throw "The frozen SHA-256 of thresholds.csv is not a 64-digit hex value ('$ExpectedSha256'); the confirmatory analysis stops." }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "thresholds.csv not found at '$Path'; the confirmatory analysis stops." }
+    $actual = Get-CatalogFileSha256 -Path $Path
+    if ($actual -ne $ExpectedSha256.ToLowerInvariant()) { throw "thresholds.csv SHA-256 $actual does not match the frozen $($ExpectedSha256.ToLowerInvariant()); the confirmatory analysis stops." }
+    $rows = @(Import-Csv -LiteralPath $Path)
+    $culture = [System.Globalization.CultureInfo]::InvariantCulture
+    $expected = New-Object System.Collections.Generic.List[string]
+    foreach ($cell in $Cells) { foreach ($form in Get-CatalogThresholdForms) { $expected.Add("$cell/$($form.Kind)/$($form.Outcome)") } }
+    $present = @($rows | ForEach-Object { "$($_.Cell)/$($_.Kind)/$($_.Outcome)" })
+    $missing = @($expected | Where-Object { $present -notcontains $_ })
+    $extra = @($present | Where-Object { $expected -notcontains $_ })
+    $duplicates = @($present | Group-Object | Where-Object { $_.Count -gt 1 } | ForEach-Object { $_.Name })
+    if ($missing.Count -gt 0 -or $extra.Count -gt 0 -or $duplicates.Count -gt 0) {
+        throw "thresholds.csv does not have one row per cell, kind and outcome (missing: $($missing -join ', '); unexpected: $($extra -join ', '); duplicated: $($duplicates -join ', ')); the confirmatory analysis stops."
+    }
+    foreach ($row in $rows) {
+        $value = [double]::NaN
+        if (-not [string]::IsNullOrEmpty([string]$row.Threshold) -and -not [double]::TryParse([string]$row.Threshold, [System.Globalization.NumberStyles]::Float, $culture, [ref]$value)) {
+            throw "thresholds.csv has a non-numeric threshold '$($row.Threshold)' for $($row.Cell)/$($row.Kind)/$($row.Outcome); the confirmatory analysis stops."
+        }
+    }
+    [pscustomobject]@{ Sha256 = $actual; Rows = $rows }
 }
 
 function Get-SignCount {
