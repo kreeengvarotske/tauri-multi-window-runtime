@@ -9,8 +9,9 @@ param(
 # tree (cmd.exe running ping). Each case runs the monitor in a fresh
 # PowerShell process. The controlled cases wrap the real Get-CimInstance and
 # change its output in one way (a wrong unit, growing memory, an injected
-# reused-PID or unverified process), so the monitor's decisions are checked
-# against real snapshots, Get-Process handles and timing. Nothing outside
+# older process claiming the root as parent, a process with no creation
+# time, a PID that no longer exists or names another process), so the
+# monitor's decisions are checked against real snapshots, handles and timing. Nothing outside
 # OutputDirectory is written; nothing is deleted.
 
 Set-StrictMode -Version 2.0
@@ -38,18 +39,23 @@ $wrappers = @{
     pages      = $prelude + '; function global:Get-CimInstance { CimCmdlets\Get-CimInstance @args | ForEach-Object { $v = $_.PrivatePageCount; if ($null -ne $v) { $v = [uint64][Math]::Floor([double]$v / 4096) }; Copy-ProcessRow $_ $v } }'
     growing    = $prelude + '; $global:calls = 0; function global:Get-CimInstance { $global:calls++; $f = 1.0 + 0.05 * $global:calls; CimCmdlets\Get-CimInstance @args | ForEach-Object { $v = $_.PrivatePageCount; if ($null -ne $v) { $v = [uint64]([double]$v * $f) }; Copy-ProcessRow $_ $v } }'
     reuse      = 'function global:Get-CimInstance { $rows = @(CimCmdlets\Get-CimInstance @args); $root = @($rows | Where-Object { [int]$_.ProcessId -eq [int]$env:E2E_ROOT })[0]; $rows; [pscustomobject]@{ ProcessId = 4000001; ParentProcessId = [int]$env:E2E_ROOT; Name = ''msedge.exe''; CreationDate = ([datetime]$root.CreationDate).AddHours(-3); WorkingSetSize = 300MB; PrivatePageCount = 200MB; PageFileUsage = 0; CommandLine = '''' } }'
+    # A tree process that is gone before its CPU can be read, and a PID that
+    # already names another process (this harness) with a different creation time.
+    gone       = 'function global:Get-CimInstance { $rows = @(CimCmdlets\Get-CimInstance @args); $root = @($rows | Where-Object { [int]$_.ProcessId -eq [int]$env:E2E_ROOT })[0]; $rows; [pscustomobject]@{ ProcessId = 4000003; ParentProcessId = [int]$env:E2E_ROOT; Name = ''msedgewebview2.exe''; CreationDate = ([datetime]$root.CreationDate).AddSeconds(1); WorkingSetSize = 1MB; PrivatePageCount = 1MB; PageFileUsage = 0; CommandLine = '''' } }'
+    reused     = 'function global:Get-CimInstance { $rows = @(CimCmdlets\Get-CimInstance @args); $root = @($rows | Where-Object { [int]$_.ProcessId -eq [int]$env:E2E_ROOT })[0]; $rows; [pscustomobject]@{ ProcessId = [int]$env:E2E_OTHER; ParentProcessId = [int]$env:E2E_ROOT; Name = ''msedgewebview2.exe''; CreationDate = ([datetime]$root.CreationDate).AddSeconds(1); WorkingSetSize = 1MB; PrivatePageCount = 1MB; PageFileUsage = 0; CommandLine = '''' } }'
     unverified = 'function global:Get-CimInstance { $rows = @(CimCmdlets\Get-CimInstance @args); $rows; [pscustomobject]@{ ProcessId = 4000002; ParentProcessId = [int]$env:E2E_ROOT; Name = ''msedgewebview2.exe''; CreationDate = $null; WorkingSetSize = 50MB; PrivatePageCount = 40MB; PageFileUsage = 0; CommandLine = '''' } }'
 }
 
 function Invoke-MonitorCase {
-    param([string]$Name, [string]$Wrapper, [int]$Duration = 5, [int]$UnitTimeout = 30)
-    $target = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\cmd.exe') -ArgumentList '/c', 'ping -n 30 127.0.0.1 > NUL' -PassThru -WindowStyle Hidden
+    param([string]$Name, [string]$Wrapper, [int]$Duration = 5, [int]$UnitTimeout = 30, [string]$TargetCommand = 'ping -n 30 127.0.0.1 > NUL', [string]$ExtraArguments = '')
+    $target = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\cmd.exe') -ArgumentList '/c', $TargetCommand -PassThru -WindowStyle Hidden
     try {
         Start-Sleep -Milliseconds 500
         $out = Join-Path $OutputDirectory "$Name.csv"
         $log = Join-Path $OutputDirectory "$Name.log"
-        $command = "`$ErrorActionPreference = 'Stop'; $Wrapper; try { & '$monitor' -RootPid $($target.Id) -DurationSeconds $Duration -SampleIntervalSeconds 0.5 -OutputPath '$out' -Diagnostics -UnitCheckTimeoutSeconds $UnitTimeout; exit 0 } catch { Write-Host ('MONITOR ERROR: ' + `$_.Exception.Message); exit 1 }"
+        $command = "`$ErrorActionPreference = 'Stop'; $Wrapper; try { & '$monitor' -RootPid $($target.Id) -DurationSeconds $Duration -SampleIntervalSeconds 0.5 -OutputPath '$out' -Diagnostics -UnitCheckTimeoutSeconds $UnitTimeout $ExtraArguments; exit 0 } catch { Write-Host ('MONITOR ERROR: ' + `$_.Exception.Message); exit 1 }"
         $env:E2E_ROOT = [string]$target.Id
+        $env:E2E_OTHER = [string]$PID
         & $PowerShellExe -NoProfile -ExecutionPolicy Bypass -Command $command *> $log
         $exit = $LASTEXITCODE
         [pscustomobject]@{
@@ -61,7 +67,7 @@ function Invoke-MonitorCase {
         }
     }
     finally {
-        Remove-Item Env:\E2E_ROOT -ErrorAction SilentlyContinue
+        Remove-Item Env:\E2E_ROOT, Env:\E2E_OTHER -ErrorAction SilentlyContinue
         if (Get-Process -Id $target.Id -ErrorAction SilentlyContinue) { Stop-Process -Id $target.Id -Force -ErrorAction SilentlyContinue }
     }
 }
@@ -84,6 +90,9 @@ if (Test-Path -LiteralPath $r.Csv) {
     Check 'plain: no msedge in the tree' (@($rows | Where-Object { [string]$_.ProcessTree -match 'msedge' }).Count -eq 0)
     $diagnostics = [System.IO.Path]::ChangeExtension($r.Csv, '.diagnostics.csv')
     Check 'plain: diagnostics carry ProcessKey' ((Test-Path -LiteralPath $diagnostics) -and $null -ne (@(Import-Csv -LiteralPath $diagnostics)[0].PSObject.Properties['ProcessKey']))
+    Check 'plain: every CPU read' (@($rows | Where-Object { [int]$_.CpuUnreadableCount -ne 0 }).Count -eq 0)
+    Check 'plain: CPU reason columns' ($null -ne $rows[0].PSObject.Properties['CpuExitedUnreadCount'] -and $null -ne $rows[0].PSObject.Properties['CpuIdentityChangedCount'] -and $null -ne $rows[0].PSObject.Properties['CpuAccessDeniedCount'] -and $null -ne $rows[0].PSObject.Properties['CpuExitedReadCount'])
+    Check 'plain: diagnostics CpuState Running' ((Test-Path -LiteralPath $diagnostics) -and @(Import-Csv -LiteralPath $diagnostics | Where-Object { $_.CpuState -ne 'Running' }).Count -eq 0)
 }
 
 # 2. Controlled unit mismatch on real, stable processes: fail closed.
@@ -121,6 +130,50 @@ if (Test-Path -LiteralPath $r.Csv) {
     Check 'unverified: reported in every row' (@($rows | Where-Object { [int]$_.UnverifiedProcessCount -ne 1 -or [string]$_.UnverifiedProcessIds -ne '4000002' }).Count -eq 0)
     Check 'unverified: not summed' (@($rows | Where-Object { [string]$_.ProcessIds -match '(^|;)4000002(;|$)' }).Count -eq 0)
 }
+
+# 6. A child exits during the run: its final CPU is read through the held
+# handle and counted; the next child, created later, is counted whole.
+$r = Invoke-MonitorCase -Name 'exits' -Wrapper $wrappers.none -Duration 6 -TargetCommand 'ping -n 3 127.0.0.1 > NUL & ping -n 30 127.0.0.1 > NUL'
+Check 'exits: exit 0' ($r.Exit -eq 0) $r.Log
+if (Test-Path -LiteralPath $r.Csv) {
+    $rows = @(Import-Csv -LiteralPath $r.Csv)
+    Check 'exits: no unreadable CPU' (@($rows | Where-Object { [int]$_.CpuUnreadableCount -ne 0 }).Count -eq 0)
+    Check 'exits: the first ping is read after it exits' (@($rows | Where-Object { [int]$_.CpuExitedReadCount -gt 0 }).Count -ge 1)
+    Check 'exits: the second ping is counted from its start' (@($rows | Where-Object { [int]$_.CpuNewCountedCount -gt 0 }).Count -ge 1)
+    $diagnostics = [System.IO.Path]::ChangeExtension($r.Csv, '.diagnostics.csv')
+    Check 'exits: diagnostics row with the final CPU' (@(Import-Csv -LiteralPath $diagnostics | Where-Object { $_.CpuState -eq 'Exited' -and $_.ProcTotalProcessorSeconds -ne '' }).Count -ge 1)
+}
+
+# 7. A tree process gone before its CPU could be read: missing, not zero.
+$r = Invoke-MonitorCase -Name 'gone' -Wrapper $wrappers.gone
+Check 'gone: exit 0' ($r.Exit -eq 0) $r.Log
+if (Test-Path -LiteralPath $r.Csv) {
+    $rows = @(Import-Csv -LiteralPath $r.Csv)
+    Check 'gone: ExitedUnread in every row' (@($rows | Where-Object { [string]$_.CpuExitedUnreadIds -ne '4000003' -or [int]$_.CpuUnreadableCount -ne 1 }).Count -eq 0)
+    Check 'gone: not reported as another reason' (@($rows | Where-Object { [int]$_.CpuIdentityChangedCount -ne 0 -or [int]$_.CpuAccessDeniedCount -ne 0 }).Count -eq 0)
+}
+
+# 8. A PID that names a process with another creation time: IdentityChanged.
+$r = Invoke-MonitorCase -Name 'reused' -Wrapper $wrappers.reused
+Check 'reused: exit 0' ($r.Exit -eq 0) $r.Log
+if (Test-Path -LiteralPath $r.Csv) {
+    $rows = @(Import-Csv -LiteralPath $r.Csv)
+    Check 'reused: IdentityChanged in every row' (@($rows | Where-Object { [int]$_.CpuIdentityChangedCount -ne 1 -or [int]$_.CpuUnreadableCount -ne 1 -or [int]$_.CpuExitedUnreadCount -ne 0 }).Count -eq 0)
+}
+
+# 9-11. Unit check that requires a stable child (Scenario M mode).
+$r = Invoke-MonitorCase -Name 'child' -Wrapper $wrappers.none -ExtraArguments '-UnitCheckRequireChildName PING.EXE'
+Check 'child: exit 0' ($r.Exit -eq 0) $r.Log
+Check 'child: decided with a stable child' ($r.Log -match '\(([1-9]\d*) stable child processes\)')
+$r = Invoke-MonitorCase -Name 'child-missing' -Wrapper $wrappers.none -Duration 10 -UnitTimeout 3 -ExtraArguments '-UnitCheckRequireChildName msedgewebview2.exe'
+Check 'child-missing: exit 1' ($r.Exit -eq 1) $r.Log
+Check 'child-missing: no measurement CSV' (-not (Test-Path -LiteralPath $r.Csv))
+Check 'child-missing: unit-check CSV kept' (Test-Path -LiteralPath $r.UnitCheck)
+Check 'child-missing: names the missing child' ($r.Log -match 'No child process named msedgewebview2.exe')
+$r = Invoke-MonitorCase -Name 'child-pages' -Wrapper $wrappers.pages -ExtraArguments '-UnitCheckRequireChildName PING.EXE'
+Check 'child-pages: exit 1' ($r.Exit -eq 1) $r.Log
+Check 'child-pages: no measurement CSV' (-not (Test-Path -LiteralPath $r.Csv))
+Check 'child-pages: reports the wrong unit' ($r.Log -match 'does not look like bytes')
 
 if ($failures.Count -gt 0) {
     Write-Host ("{0} passed, {1} failed:" -f $passed, $failures.Count)

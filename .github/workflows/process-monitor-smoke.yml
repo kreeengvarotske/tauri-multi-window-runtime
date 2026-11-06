@@ -31,11 +31,16 @@ jobs:
         shell: powershell
         run: .\benchmarks\windows\Test-ProcessTreeIdentity.ps1
 
-      - name: Test unit validation, process identity and tree walk (PowerShell 7)
+      - name: Test CPU tracker and unit-check child requirement (Windows PowerShell 5.1)
+        shell: powershell
+        run: .\benchmarks\windows\Test-ProcessCpuTracker.ps1
+
+      - name: Test unit validation, process identity, tree walk and CPU tracker (PowerShell 7)
         shell: pwsh
         run: |
           .\benchmarks\windows\Test-PrivateUnitValidation.ps1
           .\benchmarks\windows\Test-ProcessTreeIdentity.ps1
+          .\benchmarks\windows\Test-ProcessCpuTracker.ps1
 
       - name: Monitor end to end on a real process tree (Windows PowerShell 5.1)
         shell: powershell
@@ -69,7 +74,7 @@ jobs:
               throw "Expected at least two samples for the fractional-interval smoke test; got $($rows.Count)."
             }
 
-            $requiredColumns = @('IntervalSeconds', 'WorkingSetMB', 'PrivateBytesMB', 'PrivateMissingCount', 'CpuUnreadableCount', 'ProcessKeys', 'RejectedPidReuseCount', 'UnverifiedProcessCount')
+            $requiredColumns = @('IntervalSeconds', 'WorkingSetMB', 'PrivateBytesMB', 'PrivateMissingCount', 'CpuUnreadableCount', 'ProcessKeys', 'RejectedPidReuseCount', 'UnverifiedProcessCount', 'CpuExitedUnreadCount', 'CpuAccessDeniedCount', 'CpuIdentityChangedCount', 'CpuExitedReadCount')
             foreach ($column in $requiredColumns) {
               if (-not ($rows[0].PSObject.Properties.Name -contains $column)) {
                 throw "Missing expected CSV column: $column"

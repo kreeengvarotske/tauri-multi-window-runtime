@@ -81,4 +81,30 @@ function Get-StablePrivateUnitRatios {
     }
 }
 
-Export-ModuleMember -Function Get-VerifiedPrivateUnitRatio, Get-StablePrivateUnitRatios
+function Select-PrivateUnitRatios {
+    <#
+    The ratios the startup unit check may decide on. Candidates: one object
+    per process with Pid, Name, Stable and Ratio. In the general mode any
+    stable process with a ratio counts. With RequiredChildName (for the
+    catalog Scenario M: msedgewebview2.exe) the check is not ready until at
+    least one stable process of that name other than the root is among
+    them, so it cannot pass on the host process alone; all stable ratios,
+    the root's included, still go to Get-VerifiedPrivateUnitRatio.
+    Returns Ready, Ratios and StableChildCount.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Candidates,
+        [Parameter(Mandatory = $true)][int]$RootPid,
+        [string]$RequiredChildName
+    )
+    $stable = @($Candidates | Where-Object { $_.Stable -and $null -ne $_.Ratio })
+    $children = @($stable | Where-Object { [int]$_.Pid -ne $RootPid -and ([string]::IsNullOrEmpty($RequiredChildName) -or [string]$_.Name -ieq $RequiredChildName) })
+    $ready = if ([string]::IsNullOrEmpty($RequiredChildName)) { $stable.Count -gt 0 } else { $children.Count -gt 0 }
+    [pscustomobject]@{
+        Ready            = $ready
+        Ratios           = [double[]]@($stable | ForEach-Object { [double]$_.Ratio })
+        StableChildCount = $children.Count
+    }
+}
+
+Export-ModuleMember -Function Get-VerifiedPrivateUnitRatio, Get-StablePrivateUnitRatios, Select-PrivateUnitRatios
