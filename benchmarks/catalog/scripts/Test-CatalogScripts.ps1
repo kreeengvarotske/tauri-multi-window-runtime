@@ -308,6 +308,7 @@ try {
     Assert-Near 'identity: a reused PID is a separate CPU process' $byCase['N2D16B'].CpuProcesses 4
     # host 2 + 0.3 * 35 = 12.5, WebView2 1 + 0.2 * 35 = 8.0, first 5100 last 1.5, second 5100 last 0.05 * 16 = 0.8
     Assert-Near 'identity: whole-run CPU keeps both processes that had PID 5100' $byCase['N2D16B'].RunCpuSeconds 22.8 1e-6
+    Assert-True 'identity: results without cpuSource are legacy and use the monitor rule' (@($runs | Where-Object { $_.CpuSource -ne 'legacy-monitor' }).Count -eq 0)
 }
 finally {
     Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
@@ -542,21 +543,23 @@ $f.Rows[150].LimitTerminatedProcesses = 1
 $job = Get-CatalogJobCpu -Rows $f.Rows -Messages $f.Messages -Phases $f.Phases -MonitorKeys $f.Keys
 Assert-True 'job: a process terminated by a job limit is refused' ((@($job.Problems) -join ';') -like '*terminated by a job limit*') (@($job.Problems) -join '; ')
 
-# Summarizer with job files. Four runs:
+# Summarizer with cpuSource = job in configuration.json. Six runs:
 #   N2D0 A  : job complete; the monitor lost a child's CPU (ExitedUnread) -> valid, CPU from the job
 #   N2D0 B  : job complete; private memory missing in a load row          -> invalid for RAM only
 #   N2D16 A : a monitor-tree process has no job membership message         -> invalid (job CPU)
-#   N2D16 B : no job file (results before the job runner), ExitedUnread   -> invalid as before
+#   N2D16 B : valid RAM and monitor CPU, but no job CSV or messages        -> invalid, never the monitor
+#   N2D64 A : job CSV present, messages file missing                       -> invalid
+#   N2D64 B : job complete                                                 -> valid
 $root = Join-Path ([System.IO.Path]::GetTempPath()) ("catalog-test-job-{0}" -f [guid]::NewGuid().ToString('N'))
 try {
     $results = Join-Path $root 'results'
     $runsDir = Join-Path $results 'runs'
     New-Item -ItemType Directory -Force -Path $runsDir | Out-Null
-    $schedule = @(New-CatalogSchedule -Cells N2D0, N2D16 -Arms A, B -Triplets 1 -Seed 0)
+    $schedule = @(New-CatalogSchedule -Cells N2D0, N2D16, N2D64 -Arms A, B -Triplets 1 -Seed 0)
     $schedule | Export-Csv -LiteralPath (Join-Path $results 'schedule.csv') -NoTypeInformation -Encoding UTF8
     [ordered]@{
         scenario = 'M'; phase = 'Smoke'; os = 'Synthetic OS'; machine = 'TEST'; gitHead = 'abc'; gitDirty = $false
-        arms = @('A', 'B'); cells = @('N2D0', 'N2D16'); triplets = 1; scheduleSeed = 0; sampleIntervalSeconds = 1
+        arms = @('A', 'B'); cells = @('N2D0', 'N2D16', 'N2D64'); triplets = 1; scheduleSeed = 0; sampleIntervalSeconds = 1; cpuSource = 'job'
     } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $results 'configuration.json') -Encoding UTF8
     $log = New-Object System.Collections.Generic.List[string]
     $offset = 0
@@ -582,7 +585,7 @@ try {
             $members.Add(@(4242, $keys[0], 'catalog-bench', 100.0, (0.3 * $s)))
             $members.Add(@(5000, $keys[1], 'msedgewebview2', 200.0, (0.1 * $s)))
             if ($case -eq 'N2D16A' -and $s -ge 3 -and $s -le 5) { $members.Add(@(7000, $keys[2], 'msedgewebview2', 10.0, 0.01)) }
-            $cpuMissing = if (($case -eq 'N2D0A' -or $case -eq 'N2D16B') -and $s -eq 12) { @(1, '6000,,,,') } else { @(0, ',,,,') }
+            $cpuMissing = if ($case -eq 'N2D0A' -and $s -eq 12) { @(1, '6000,,,,') } else { @(0, ',,,,') }
             $privateMissing = if ($case -eq 'N2D0B' -and $s -eq 20) { 1 } else { 0 }
             $private = ($members | ForEach-Object { $_[3] } | Measure-Object -Sum).Sum
             $monitor.Add(('{0},{1},4242,{2},{3},{4},{5},{6},0.4,{7},{8},{9},0,0,{10}' -f $time, $s, $members.Count, (($members | ForEach-Object { $_[0] }) -join ';'), (($members | ForEach-Object { $_[1] }) -join ';'), ($private + 50).ToString($culture), $private.ToString($culture), $(if ($s -eq 1) { '' } else { '1' }), $privateMissing, $cpuMissing[0], $cpuMissing[1]))
@@ -590,10 +593,8 @@ try {
         }
         $monitor | Set-Content -LiteralPath (Join-Path $runsDir "$($run.Name).monitor.csv") -Encoding UTF8
         $diagnostics | Set-Content -LiteralPath (Join-Path $runsDir "$($run.Name).monitor.diagnostics.csv") -Encoding UTF8
-        if ($case -ne 'N2D16B') {
-            $f.Rows | Export-Csv -LiteralPath (Join-Path $runsDir "$($run.Name).job.csv") -NoTypeInformation -Encoding UTF8
-            $f.Messages | Export-Csv -LiteralPath (Join-Path $runsDir "$($run.Name).job.messages.csv") -NoTypeInformation -Encoding UTF8
-        }
+        if ($case -ne 'N2D16B') { $f.Rows | Export-Csv -LiteralPath (Join-Path $runsDir "$($run.Name).job.csv") -NoTypeInformation -Encoding UTF8 }
+        if ($case -ne 'N2D16B' -and $case -ne 'N2D64A') { $f.Messages | Export-Csv -LiteralPath (Join-Path $runsDir "$($run.Name).job.messages.csv") -NoTypeInformation -Encoding UTF8 }
         $log.Add((@{ name = $run.Name; exitCode = 0; timedOut = $false; monitorExit = 0; monitorCpuSeconds = 1.0; jobTerminated = $false; jobLeftoverProcesses = 0; jobError = $null } | ConvertTo-Json -Compress))
     }
     $log | Set-Content -LiteralPath (Join-Path $results 'runs.log') -Encoding UTF8
@@ -611,7 +612,16 @@ try {
     Assert-Near 'job summary: processes the monitor never saw' $byCase['N2D0A'].JobProcessesNeverSeenByMonitor 1
     Assert-True 'job summary: RAM checks still apply with a complete job' ($byCase['N2D0B'].Valid -eq 'False' -and $byCase['N2D0B'].InvalidReason -like '*missing or non-finite private memory*' -and $byCase['N2D0B'].InvalidReason -notlike '*whole-run CPU*') $byCase['N2D0B'].InvalidReason
     Assert-True 'job summary: a monitor-tree process outside the job invalidates the run' ($byCase['N2D16A'].Valid -eq 'False' -and $byCase['N2D16A'].InvalidReason -like '*whole-run CPU (job): monitor-tree process(es) without a job membership message: 7000@*' -and $byCase['N2D16A'].RunCpuSeconds -eq '') $byCase['N2D16A'].InvalidReason
-    Assert-True 'job summary: results without a job keep the monitor rule' ($byCase['N2D16B'].Valid -eq 'False' -and $byCase['N2D16B'].CpuSource -eq 'monitor' -and $byCase['N2D16B'].InvalidReason -like '*whole-run CPU: unreadable CPU in a monitor row (ExitedUnread 6000)*') $byCase['N2D16B'].InvalidReason
+    Assert-True 'job summary: cpuSource=job with no job CSV is invalid even with valid RAM and monitor CPU' ($byCase['N2D16B'].Valid -eq 'False' -and $byCase['N2D16B'].CpuSource -eq 'job' -and $byCase['N2D16B'].InvalidReason -eq ("whole-run CPU (job): missing job artifact(s): {0}.job.csv, {0}.job.messages.csv" -f $byCase['N2D16B'].Name) -and $byCase['N2D16B'].RunCpuSeconds -eq '') "$($byCase['N2D16B'].Name): $($byCase['N2D16B'].InvalidReason)"
+    Assert-Near 'job summary: the monitor CPU of that run is still shown as a diagnostic' $byCase['N2D16B'].MonitorRunCpuSeconds 14.0 1e-6
+    Assert-True 'job summary: a missing job messages file is invalid' ($byCase['N2D64A'].Valid -eq 'False' -and $byCase['N2D64A'].InvalidReason -like '*missing job artifact(s): *.job.messages.csv') $byCase['N2D64A'].InvalidReason
+    Assert-True 'job summary: a complete run is valid' ($byCase['N2D64B'].Valid -eq 'True') $byCase['N2D64B'].InvalidReason
+    $config = Get-Content -LiteralPath (Join-Path $results 'configuration.json') -Raw | ConvertFrom-Json
+    $config | Add-Member -NotePropertyName cpuSource -NotePropertyValue 'other' -Force
+    $config | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $results 'configuration.json') -Encoding UTF8
+    $threw = $false
+    try { & (Join-Path $PSScriptRoot 'Summarize-CatalogRuns.ps1') -ResultsDirectory $results -OutputDirectory (Join-Path $root 'analysis-other') | Out-Null } catch { $threw = $_.Exception.Message -like "*unknown cpuSource 'other'*" }
+    Assert-True 'job summary: an unknown cpuSource stops the summarizer' $threw
 }
 finally {
     Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue

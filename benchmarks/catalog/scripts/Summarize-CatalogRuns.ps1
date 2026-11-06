@@ -12,11 +12,12 @@ it is written and reviewed before any confirmatory run.
 Co-primary measures (protocol revision 3, §3, §8c):
 - RAM: LoadPrivateMBAvg, the time average over the load phase of the sum of
   Private Bytes over the process tree (host and every WebView2 process);
-- CPU: RunCpuSeconds. With a job file (runs\<run>.job.csv, runner with
-  CatalogJobCpu.ps1): the CPU time (user + kernel) of the run's Job Object,
+- CPU: RunCpuSeconds. With cpuSource = job in configuration.json (runner
+  with CatalogJobCpu.ps1; every run then needs runs\<run>.job.csv and
+  runs\<run>.job.messages.csv, and a run without them is invalid): the CPU time (user + kernel) of the run's Job Object,
   which holds every process of the tree from the first instruction, read at
   the last job row at or before the end of the idle-after phase (checks in
-  Get-CatalogJobCpu). Without one (older results): for every process of the
+  Get-CatalogJobCpu). Results without cpuSource (legacy, smokes 1 to 3): for every process of the
   tree its last readable cumulative CPU time from the monitor diagnostics at
   or before the end of the idle-after phase, summed; the monitor values are
   kept as MonitorRunCpuSeconds when the job is the source. StartupCpuSeconds is the
@@ -134,6 +135,13 @@ foreach ($file in @($configurationFile, $scheduleFile)) {
 $configuration = Get-Content -LiteralPath $configurationFile -Raw | ConvertFrom-Json
 if ([string]$configuration.scenario -ne 'M') { throw "$configurationFile is not a scenario M run." }
 $nominalInterval = [double]$configuration.sampleIntervalSeconds
+# The CPU source is fixed by the runner in configuration.json, never inferred
+# from which files exist: with cpuSource = job every run needs its job files,
+# and a run without them is invalid. Results without cpuSource (written before
+# the job runner, smokes 1 to 3) are legacy and keep the monitor rule.
+$cpuSource = [string](Get-Property $configuration 'cpuSource')
+if ([string]::IsNullOrEmpty($cpuSource)) { $cpuSource = 'legacy-monitor' }
+elseif ($cpuSource -ne 'job') { throw "$configurationFile has an unknown cpuSource '$cpuSource'." }
 $schedule = @(Import-Csv -LiteralPath $scheduleFile | Sort-Object { [int]$_.Seq })
 $runsDirectory = Join-Path $ResultsDirectory 'runs'
 $logs = @{}
@@ -361,8 +369,7 @@ foreach ($planned in $schedule) {
                 }
             }
             if ($cpuReasons.Count -eq 0 -and $null -eq $row.RunCpuSeconds) { $cpuReasons.Add('no cumulative CPU value') }
-            $jobFile = Join-Path $runsDirectory "$name.job.csv"
-            if (Test-Path -LiteralPath $jobFile) {
+            if ($cpuSource -eq 'job') {
                 # Protocol §7 (revision with job CPU): whole-run CPU from the run's Job Object. The
                 # monitor's CPU values stay as a diagnostic; its reasons for a missing CPU value
                 # (ExitedUnread etc.) no longer decide CPU validity, because the job counts every
@@ -379,17 +386,22 @@ foreach ($planned in $schedule) {
                     if ([bool](Get-Property $log 'jobTerminated')) { $jobProblems.Add("the runner terminated the job ($(Get-Property $log 'jobLeftoverProcesses') process(es) left after the app exited, or a timeout)") }
                 }
                 if (-not $hasIdentity) { $jobProblems.Add('the monitor records no process identities; membership not verified') }
+                # The full set of job artifacts is required; a missing one is never replaced by the monitor.
+                $jobFile = Join-Path $runsDirectory "$name.job.csv"
                 $messagesFile = Join-Path $runsDirectory "$name.job.messages.csv"
-                $jobMessages = if (Test-Path -LiteralPath $messagesFile) { @(Import-Csv -LiteralPath $messagesFile) } else { $jobProblems.Add('no job messages file'); @() }
-                $job = Get-CatalogJobCpu -Rows @(Import-Csv -LiteralPath $jobFile) -Messages $jobMessages -Phases $report.phases -MonitorKeys $monitorKeys
-                foreach ($problem in $job.Problems) { $jobProblems.Add($problem) }
-                $row.JobProcesses = $job.JobProcesses
-                $row.JobProcessesNeverSeenByMonitor = $job.JobProcessesNeverSeenByMonitor
-                $row.MonitorProcessesInJob = $job.MonitorProcessesInJob
-                $row.JobEndGapSeconds = $job.EndGapSeconds
-                $row.JobMaxRowIntervalSeconds = $job.MaxRowIntervalSeconds
-                $row.JobMaxClockDriftSeconds = $job.MaxClockDriftSeconds
-                $row.JobNotes = @($job.Notes) -join '; '
+                $missing = @(@($jobFile, $messagesFile) | Where-Object { -not (Test-Path -LiteralPath $_) } | ForEach-Object { Split-Path -Leaf $_ })
+                if ($missing.Count -gt 0) { $jobProblems.Add("missing job artifact(s): $($missing -join ', ')") }
+                else {
+                    $job = Get-CatalogJobCpu -Rows @(Import-Csv -LiteralPath $jobFile) -Messages @(Import-Csv -LiteralPath $messagesFile) -Phases $report.phases -MonitorKeys $monitorKeys
+                    foreach ($problem in $job.Problems) { $jobProblems.Add($problem) }
+                    $row.JobProcesses = $job.JobProcesses
+                    $row.JobProcessesNeverSeenByMonitor = $job.JobProcessesNeverSeenByMonitor
+                    $row.MonitorProcessesInJob = $job.MonitorProcessesInJob
+                    $row.JobEndGapSeconds = $job.EndGapSeconds
+                    $row.JobMaxRowIntervalSeconds = $job.MaxRowIntervalSeconds
+                    $row.JobMaxClockDriftSeconds = $job.MaxClockDriftSeconds
+                    $row.JobNotes = @($job.Notes) -join '; '
+                }
                 if ($jobProblems.Count -eq 0) {
                     $row.RunCpuSeconds = $job.RunCpuSeconds
                     $row.StartupCpuSeconds = $job.StartupCpuSeconds
@@ -398,8 +410,8 @@ foreach ($planned in $schedule) {
                 foreach ($problem in $jobProblems) { $reasons.Add("whole-run CPU (job): $problem") }
             }
             else {
-                # Results without a job (smokes 1 to 3): the monitor rule, unchanged.
-                $row.CpuSource = 'monitor'
+                # Legacy results without cpuSource (smokes 1 to 3): the monitor rule, unchanged.
+                $row.CpuSource = 'legacy-monitor'
                 foreach ($reason in $cpuReasons) { $reasons.Add("whole-run CPU: $reason") }
             }
         }
