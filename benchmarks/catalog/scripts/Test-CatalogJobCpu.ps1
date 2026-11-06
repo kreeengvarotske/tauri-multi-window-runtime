@@ -17,8 +17,12 @@ Each case uses its own job, as the runner does for each run:
      nothing;
   4. a foreign process: started outside the job; not a member by identity, its
      CPU is not in the job, and terminating the job leaves it running;
-  5. leftovers: a process that outlives the root is ended by terminating the
-     job (or by closing it, kill on close); the job then has no active process.
+  5. kill on close: closing the job ends a process still in it;
+  6. CPU after endedAt: a root that idles, then busy-loops after a boundary
+     set in its idle part, run through Invoke-CatalogJobRun; the busy CPU is in
+     the job but not in the whole-run value;
+  7. leftovers: a root that exits and leaves a child running; after the grace
+     period the runner terminates its own job and marks the run.
 Windows PowerShell 5.1 and PowerShell 7. Exits 1 on a failed check.
 #>
 [CmdletBinding()]
@@ -169,6 +173,40 @@ try {
 finally { $job.Dispose() }
 Check 'leftover: closing the job ended it (kill on close)' ([TmwrCatalogJob]::WaitExit($leftover.Process, 10000))
 [TmwrCatalogJob]::Close($leftover.Process)
+
+# 6. Artificial CPU after endedAt, through Invoke-CatalogJobRun as the runner uses it.
+# The root waits about 2 s (ping, idle), then busy-loops. endedAt is set 1.5 s
+# after the start, inside the idle part: the busy CPU after it must not enter
+# the whole-run value, and the job's final CPU must show it was there.
+$directory = Join-Path ([System.IO.Path]::GetTempPath()) ("catalog-job-{0}" -f [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $directory | Out-Null
+try {
+    $before = [DateTimeOffset]::UtcNow
+    $run = Invoke-CatalogJobRun -Label 'after-end' -CommandLine "`"$cmd`" /d /c ping -n 3 127.0.0.1 > NUL & for /L %i in (1,1,3000000) do @rem" -WorkingDirectory $cwd `
+        -TimeoutSeconds 120 -JobCsv (Join-Path $directory 'after-end.job.csv') -JobMessagesCsv (Join-Path $directory 'after-end.job.messages.csv') `
+        -OnStarted { param($appPid) "{0}@{1}" -f $appPid, (Get-Process -Id $appPid).StartTime.ToUniversalTime().Ticks }
+    $rows = @(Import-Csv -LiteralPath (Join-Path $directory 'after-end.job.csv'))
+    $start = [DateTimeOffset]::Parse($rows[0].Utc, $culture)
+    $phases = [pscustomobject]@{
+        idleBeforeStartedAt = $start.AddSeconds(0.2).ToString('o'); warmupStartedAt = $start.AddSeconds(0.4).ToString('o'); loadStartedAt = $start.AddSeconds(0.6).ToString('o')
+        loadEndedAt = $start.AddSeconds(1.2).ToString('o'); endedAt = $start.AddSeconds(1.5).ToString('o')
+    }
+    $job = Get-CatalogJobCpu -Rows $rows -Messages @(Import-Csv -LiteralPath (Join-Path $directory 'after-end.job.messages.csv')) -Phases $phases -MonitorKeys @($run.OnStartedResult)
+    $final = [double]::Parse($rows[$rows.Count - 1].CpuSeconds, $culture)
+    Check 'after end: the run completed in its job' ($null -eq $run.Error -and -not $run.Terminated -and $run.ExitCode -eq 0 -and $job.Problems.Count -eq 0) ("error '{0}', terminated {1}, exit {2}, problems: {3}" -f $run.Error, $run.Terminated, $run.ExitCode, (@($job.Problems) -join '; '))
+    Check 'after end: CPU after endedAt is not in the whole-run value' ($null -ne $job.RunCpuSeconds -and $job.RunCpuSeconds -le 0.2 -and $final -ge $job.RunCpuSeconds + 0.5) ("whole-run {0} s at endedAt (row {1} s before it), job final {2} s" -f (Format-CatalogNumber $job.RunCpuSeconds 4), (Format-CatalogNumber $job.EndGapSeconds), (Format-CatalogNumber $final 4))
+    $summary.afterEnd = [ordered]@{ runCpuSeconds = $job.RunCpuSeconds; finalJobCpuSeconds = $final; endGapSeconds = $job.EndGapSeconds; rows = $rows.Count }
+
+    # 7. Leftovers: the root exits at once and leaves a ping running; with a 2 s
+    # grace the runner terminates its own job, and the run is marked terminated.
+    $run = Invoke-CatalogJobRun -Label 'leftover' -CommandLine "`"$cmd`" /d /c start `"`" /b `"$ping`" -n 30 127.0.0.1" -WorkingDirectory $cwd -ExitGraceSeconds 2 `
+        -TimeoutSeconds 60 -JobCsv (Join-Path $directory 'leftover.job.csv') -JobMessagesCsv (Join-Path $directory 'leftover.job.messages.csv')
+    $rows = @(Import-Csv -LiteralPath (Join-Path $directory 'leftover.job.csv'))
+    $messages = @(Import-Csv -LiteralPath (Join-Path $directory 'leftover.job.messages.csv'))
+    Check 'leftover: the runner terminated its own job after the grace period' ($run.Terminated -and -not $run.TimedOut -and $run.LeftoverProcesses -ge 1 -and $null -eq $run.Error) ("terminated {0}, leftovers {1}, error '{2}'" -f $run.Terminated, $run.LeftoverProcesses, $run.Error)
+    Check 'leftover: nothing of the job is running afterwards' ([int]$rows[$rows.Count - 1].ActiveProcesses -eq 0 -and @($messages | Where-Object { [int]$_.Message -eq 4 }).Count -ge 1) ("active {0}" -f $rows[$rows.Count - 1].ActiveProcesses)
+}
+finally { Remove-Item -LiteralPath $directory -Recurse -Force -ErrorAction SilentlyContinue }
 
 if ($OutputPath) { $summary | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $OutputPath -Encoding UTF8 }
 if ($failures.Count -gt 0) {

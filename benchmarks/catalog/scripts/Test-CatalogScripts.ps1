@@ -495,6 +495,12 @@ Assert-Near 'job: both monitor processes are members' $job.MonitorProcessesInJob
 Assert-Near 'job: the short process is the one the monitor never saw' $job.JobProcessesNeverSeenByMonitor 1
 Assert-Near 'job: the end boundary falls on a row' $job.EndGapSeconds 0 1e-9
 
+# Artificial CPU after endedAt: 100 s of CPU from 50 ms after the end; the whole-run value stays 14.0.
+$f = New-JobFixture $jobT0
+foreach ($r in $f.Rows) { if ([DateTimeOffset]::Parse($r.Utc, $culture) -gt $jobT0.AddSeconds(35)) { $r.UserTicks = [long]$r.UserTicks + 1000000000 } }
+$job = Get-CatalogJobCpu -Rows $f.Rows -Messages $f.Messages -Phases $f.Phases -MonitorKeys $f.Keys
+Assert-True 'job: artificial CPU after endedAt does not enter the whole-run value' ($job.Problems.Count -eq 0 -and [Math]::Abs($job.RunCpuSeconds - 14.0) -lt 1e-6) ("{0}; {1}" -f $job.RunCpuSeconds, (@($job.Problems) -join '; '))
+
 $f = New-JobFixture $jobT0
 $f.Rows = @($f.Rows | Where-Object { $t = ([DateTimeOffset]::Parse($_.Utc, $culture) - $jobT0).TotalSeconds; $t -le 34 -or $t -ge 36 })
 $job = Get-CatalogJobCpu -Rows $f.Rows -Messages $f.Messages -Phases $f.Phases -MonitorKeys $f.Keys

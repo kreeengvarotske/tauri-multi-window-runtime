@@ -461,7 +461,9 @@ function Invoke-CatalogJobRun {
         [Parameter(Mandatory = $true)][double]$TimeoutSeconds,
         [Parameter(Mandatory = $true)][string]$JobCsv,
         [Parameter(Mandatory = $true)][string]$JobMessagesCsv,
-        [scriptblock]$OnStarted
+        [scriptblock]$OnStarted,
+        # Tests only; the runner uses the protocol value.
+        [double]$ExitGraceSeconds = $script:CatalogJob.ExitGraceSeconds
     )
     $result = [ordered]@{ Pid = $null; ExitCode = $null; TimedOut = $false; LeftoverProcesses = 0; Terminated = $false; LimitFlags = $null; Rows = 0; Error = $null; OnStartedResult = $null }
     $rows = New-Object System.Collections.Generic.List[object]
@@ -493,7 +495,7 @@ function Invoke-CatalogJobRun {
         $rows.Add((Read-CatalogJobRow -Job $job -Stopwatch $stopwatch))
         if (-not $result.TimedOut) {
             # The app has exited; its other processes get ExitGraceSeconds to exit.
-            $graceEnd = $stopwatch.Elapsed.TotalSeconds + $script:CatalogJob.ExitGraceSeconds
+            $graceEnd = $stopwatch.Elapsed.TotalSeconds + $ExitGraceSeconds
             while ([int]$rows[$rows.Count - 1].ActiveProcesses -gt 0 -and $stopwatch.Elapsed.TotalSeconds -lt $graceEnd) {
                 Start-Sleep -Milliseconds $interval
                 $rows.Add((Read-CatalogJobRow -Job $job -Stopwatch $stopwatch))
@@ -501,7 +503,7 @@ function Invoke-CatalogJobRun {
         }
         $result.LeftoverProcesses = [int]$rows[$rows.Count - 1].ActiveProcesses
         if ($result.TimedOut -or $result.LeftoverProcesses -gt 0) {
-            if (-not $result.TimedOut) { Write-Warning "$Label left $($result.LeftoverProcesses) process(es) running $($script:CatalogJob.ExitGraceSeconds) s after it exited; terminating its job." }
+            if (-not $result.TimedOut) { Write-Warning "$Label left $($result.LeftoverProcesses) process(es) running $ExitGraceSeconds s after it exited; terminating its job." }
             # Only this run's job: no process is stopped by name or by PID.
             $job.TerminateAll([uint32]1)
             $result.Terminated = $true
