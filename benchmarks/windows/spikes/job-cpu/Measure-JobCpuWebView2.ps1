@@ -115,12 +115,17 @@ foreach ($exe in $Executable) {
         $treeNotInJob = New-Object System.Collections.Generic.List[string]
         foreach ($m in $monitorRows) {
             $t = [DateTimeOffset]::Parse($m.Timestamp, $culture)
-            $j = @($rows | Where-Object { [DateTimeOffset]::Parse($_.Timestamp, $culture) -le $t } | Select-Object -Last 1)
-            if ($j.Count -eq 0) { continue }
-            $jobIds = @(([string]$j[0].ProcessIds).Split(';') | Where-Object { $_ -ne '' })
+            # Job rows just before and just after the monitor sample: a tree PID
+            # missing from both escaped the job; a job PID in both but not in the
+            # tree was missed by the tree walk.
+            $before = @($rows | Where-Object { [DateTimeOffset]::Parse($_.Timestamp, $culture) -le $t } | Select-Object -Last 1)
+            $after = @($rows | Where-Object { [DateTimeOffset]::Parse($_.Timestamp, $culture) -gt $t } | Select-Object -First 1)
+            if ($before.Count -eq 0 -or $after.Count -eq 0) { continue }
+            $idsBefore = @(([string]$before[0].ProcessIds).Split(';') | Where-Object { $_ -ne '' })
+            $idsAfter = @(([string]$after[0].ProcessIds).Split(';') | Where-Object { $_ -ne '' })
             $treeIds = @(([string]$m.ProcessIds).Split(';') | Where-Object { $_ -ne '' })
-            foreach ($id in $treeIds) { if ($jobIds -notcontains $id) { $treeNotInJob.Add("S$($m.Sample):$id") } }
-            foreach ($id in $jobIds) { if ($treeIds -notcontains $id) { $jobNotInTree.Add("S$($m.Sample):$id") } }
+            foreach ($id in $treeIds) { if ($idsBefore -notcontains $id -and $idsAfter -notcontains $id) { $treeNotInJob.Add("S$($m.Sample):$id") } }
+            foreach ($id in $idsBefore) { if ($idsAfter -contains $id -and $treeIds -notcontains $id) { $jobNotInTree.Add("S$($m.Sample):$id") } }
         }
         $reasons = [ordered]@{}
         foreach ($reason in 'ExitedRead', 'ExitedUnread', 'AccessDenied', 'IdentityChanged', 'LeftTree', 'ReadError', 'NewCounted') {

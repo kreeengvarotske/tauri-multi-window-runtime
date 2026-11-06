@@ -87,14 +87,19 @@ $treeNotInJob = New-Object System.Collections.Generic.List[string]
 $jobNotInTree = New-Object System.Collections.Generic.List[string]
 $samples = 0
 while (-not (Wait-HeldProcess -Handle $root.Handle -TimeoutMilliseconds 0)) {
+    # The job list is read before and after the snapshot: a process created
+    # between the reads is only in the later list, one that exited only in the
+    # earlier one. A tree process missing from both escaped the job.
+    $jobIdsBefore = @(Get-CpuJobProcessIds -Job $job)
     $snapshot = @(Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId, Name, CreationDate)
-    $jobIds = @(Get-CpuJobProcessIds -Job $job)
+    $jobIdsAfter = @(Get-CpuJobProcessIds -Job $job)
+    $jobIds = @($jobIdsBefore + $jobIdsAfter | Sort-Object -Unique)
     $tree = Get-IdentifiedProcessTree -Snapshot $snapshot -RootPid $root.Pid -RootKey $rootKey
     if ($tree.RootFound) {
         $treeIds = @($tree.Processes | ForEach-Object { [int]$_.ProcessId })
         foreach ($p in $tree.Processes) { [void]$seen.Add((Get-ProcessKey -ProcessInfo $p)) }
         foreach ($id in $treeIds) { if ($jobIds -notcontains $id) { $treeNotInJob.Add("S$samples`:$id") } }
-        foreach ($id in $jobIds) { if ($treeIds -notcontains $id) { $jobNotInTree.Add("S$samples`:$id") } }
+        foreach ($id in $jobIdsBefore) { if ($jobIdsAfter -contains $id -and $treeIds -notcontains $id) { $jobNotInTree.Add("S$samples`:$id") } }
     }
     $samples++
     Start-Sleep -Milliseconds 500
@@ -108,7 +113,7 @@ Check 'tree: the job counted the root and every descendant' ($accounting.TotalPr
 Check 'tree: every process the tree walk saw was in the job' ($treeNotInJob.Count -eq 0) ($treeNotInJob -join ' ')
 Check 'tree: the job CPU covers more than the root alone' ($accounting.CpuSeconds -ge $rootCpu.CpuSeconds) ("job {0} s, root {1} s" -f $accounting.CpuSeconds.ToString('F4', $culture), $rootCpu.CpuSeconds.ToString('F4', $culture))
 $neverSeen = $accounting.TotalProcesses - $seen.Count
-Write-Host ("info tree: {0} samples at 0.5 s saw {1} of {2} processes; {3} were never seen by sampling but are in the job CPU. Job PIDs not yet in the tree walk (created between the two reads): {4}" -f $samples, $seen.Count, $accounting.TotalProcesses, $neverSeen, ($jobNotInTree -join ' '))
+Write-Host ("info tree: {0} samples at 0.5 s saw {1} of {2} processes; {3} were never seen by sampling but are in the job CPU. Job PIDs in both job reads but not in the tree walk: {4}" -f $samples, $seen.Count, $accounting.TotalProcesses, $neverSeen, ($jobNotInTree -join ' '))
 Close-JobCpuHandle -Handle $root.Handle
 Close-JobCpuHandle -Handle $job
 $summary.tree = [ordered]@{ samples = $samples; seenBySampling = $seen.Count; jobTotalProcesses = $accounting.TotalProcesses; neverSeen = $neverSeen; jobCpuSeconds = $accounting.CpuSeconds; rootCpuSeconds = $rootCpu.CpuSeconds; treeNotInJob = @($treeNotInJob); jobNotInTree = @($jobNotInTree) }
