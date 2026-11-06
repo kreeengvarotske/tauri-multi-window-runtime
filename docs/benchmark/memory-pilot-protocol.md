@@ -67,7 +67,7 @@ process is shared with another application.
 | Measure | Definition | Role |
 |---|---|---|
 | `LoadPrivateMBAvg` | time average over the load phase of Σ `PrivatePageCount` over the tree | **co-primary (RAM)** |
-| `RunCpuSeconds` | Σ CPU time (user + kernel) over the tree from process start to the end of the idle-after phase: for each process its last observed cumulative CPU time, summed | **co-primary (CPU)** |
+| `RunCpuSeconds` | CPU time (user + kernel) of the whole tree from process start to the end of the idle-after phase, from the run's Job Object (§7, draft #45); results without a job: for each process its last observed cumulative CPU time, summed | **co-primary (CPU)** |
 | `SteadyPrivateMBAvg` | the same over the idle phase after the load | secondary |
 | `LoadPrivateMBMaxSample` | largest sampled Σ Private (not a guaranteed peak) | secondary |
 | `ExePrivateMB*`, `WebViewPrivateMB*` | Private split into host and WebView2 | explains the result |
@@ -87,11 +87,13 @@ in arm A every window receives the whole catalog as JSON, parses it and
 builds its indexes; in B and C that happens once in Rust. A load-phase-only
 CPU measure would leave that duplicated work out and favour A. The run has
 fixed phase lengths, so `RunCpuSeconds` is the CPU cost of the same work in
-every arm. Cumulative CPU time does not depend on the sampling cadence; a
-process that exits before the end contributes its last observed value, so
-up to 1 s of its CPU can be missed (reported as `CpuExitedProcesses`). CPU
-is never "shown" by adding sleeps or idle time: the workload is fixed and
-every step is checked.
+every arm. With the job runner (§7, draft #45) the job's accounting holds
+every process of the tree, including those that start and exit between two
+monitor samples, so the value does not depend on the sampling cadence. The
+spike in #44 (#36 comment 6692204106) found 9–10 such WebView2 children per
+N4D64 run during load, never seen by the 1 s monitor. Results without a job
+keep the monitor sum, with its limits (§7). CPU is never "shown" by adding
+sleeps or idle time: the workload is fixed and every step is checked.
 
 Sampling: **1 s** for every profile. The data set in scenario M is retained
 for the whole load phase, so the RAM outcome is a plateau, not a short
@@ -251,10 +253,57 @@ The expected steady count per `N` (8 for N2 and 10 for N4 in the
 without process identities keep the earlier rule (the same count in every
 load sample).
 
-Whole-run CPU (`RunCpuSeconds`) covers more than the load phase, so it has
-its own checks over the **whole measured interval**, from the first monitor
-sample to the end of the idle-after phase (post-load idle included). A
-load-phase-only check would leave most of the interval unchecked:
+Whole-run CPU from a Job Object (draft for review, #36 decision
+6692721269, implementation draft #45; spike #44). Each run is created
+suspended, assigned to a new Job Object and only then resumed, so the app
+and every process it starts are in the job from the first instruction. The
+job allows no breakaway and ends its processes when the runner closes it.
+The runner reads the job's accounting (user and kernel time of every
+process of the job, running and exited, and the process counts) every
+250 ms and keeps the job's messages (a new-process message with the PID for
+every process added, exit messages, active-zero).
+
+- **Interval.** From the assignment of the suspended app to the empty job
+  (CPU 0 by construction) to the end of the idle-after phase (`endedAt` in
+  the report). `RunCpuSeconds` is the job CPU at the last job row at or
+  before `endedAt`. CPU after `endedAt` (report writing, shutdown) is never
+  counted. `StartupCpuSeconds` (at the warm-up start) and `LoadCpuSeconds`
+  (between the load boundaries) use the same rule and are secondary.
+- **Sampling tolerance.** That row is at most 0.5 s before `endedAt`; no two
+  job rows are more than 1 s apart up to the first row after `endedAt`; the
+  first row is before the idle-before phase; the wall clock (row and phase
+  times) stays within 0.1 s of the runner's monotonic stopwatch over the run.
+- **Counters.** User time, kernel time, the total process count and the
+  timestamps never decrease; no process is terminated by a job limit.
+- **Membership, without PID-list races.** Every process the monitor saw in
+  the tree (identity PID and creation time) has a new-process message from
+  the job for its PID from 0.1 s before to 5 s after its creation time. A
+  message for an earlier or later process with the same PID does not match.
+  No PID list read at one moment is used. The messages count only if they
+  are complete: as many new-process messages as the job's total count, as
+  many exit messages as exited processes, and an active-zero message.
+- **End of the run.** Every process of the job has exited at the last job
+  row. If the app does not exit within the timeout, or processes of the app
+  are still running 30 s after it exited, the runner terminates its own job
+  (never a process by name or PID) and the run is invalid.
+
+Any failed check makes the run's CPU, and so the run, invalid; the reason
+is named. When the job checks pass, a CPU value the monitor could not read
+(exited before its first read, access denied, …) no longer invalidates the
+run; it is reported as a note, and the monitor's own sum stays as a
+diagnostic (`MonitorRunCpuSeconds`). RAM keeps all of its own checks
+unchanged (coverage, intervals, verified tree, no WebView2 process outside
+the tree, private memory complete in every load row), so the RAM result is
+valid independently of the CPU source. `JobProcessesNeverSeenByMonitor` is
+reported per run.
+
+Results without job files (smokes 1 to 3, #36 comments up to 6691413600)
+keep their status and the monitor rule below.
+
+Monitor rule (results without a job). Whole-run CPU covers more than the
+load phase, so it has its own checks over the **whole measured interval**,
+from the first monitor sample to the end of the idle-after phase
+(post-load idle included):
 - the first sample is no later than the start of the idle-before phase, so
   the processes that exist at start-up are observed;
 - no monitor row in the interval has an unreadable CPU value
@@ -268,7 +317,7 @@ load-phase-only check would leave most of the interval unchecked:
 - the samples cover ≥ 80 % of the interval at 1 s and no interval is longer
   than 5 s.
 
-How processes are counted:
+How processes are counted under the monitor rule:
 - Each process contributes its last observed cumulative CPU time.
 - From monitor #43 `167a67d` CPU time is read through a process handle
   opened once per identity and held while the process is in the tree, so a
@@ -277,10 +326,9 @@ How processes are counted:
   process that leaves the tree before the end loses at most one interval of
   CPU. Either way it is counted in `CpuExitedProcesses`, reported per run,
   and does not invalidate the run.
-- A process that starts and exits between two samples is never observed.
-  This limit is stated with every CPU result. The process tree is checked
-  separately (above); CPU is summed per process identity, so two processes
-  that had the same PID are counted separately.
+- A process that starts and exits between two samples is never observed
+  and its CPU is missing without a reason (spike #44: 9–10 per N4D64 run).
+  This is why the job is the source for new runs.
 
 Unit check (#36 decision 6687069270). Scenario M runs the monitor with
 `-UnitCheckRequireChildName msedgewebview2.exe`: the `PrivatePageCount`
