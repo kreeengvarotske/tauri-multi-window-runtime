@@ -1,7 +1,8 @@
 # Memory and CPU benchmark: pilot protocol (draft for review)
 
 Status: **revision 3, Q1–Q8 decided, not yet frozen; two freezes (pilot, then confirmatory) per §10a** (roadmap Phase 4, `docs/ROADMAP.md`
-in #30). Revision 3 (2026-10-26, after #33 comment 6429162749) makes **RAM
+in #30). **Smoke gate open (11/12 valid on 2026-10-28), pilot blocked**
+(#36 decision 6687069270; state in §10). Revision 3 (2026-10-26, after #33 comment 6429162749) makes **RAM
 and CPU co-primary outcomes**: hypotheses, multiplicity family, success
 criteria, the reading of discordant results, triplet counts, thresholds,
 duration and the pilot matrix are recomputed (§1, §3, §8, §10 Q7–Q8). Revision 3 also
@@ -231,7 +232,8 @@ longer than 5 s; the process tree is verified (below); both co-primary
 measures are finite.
 
 Process tree (#24 comment 6466355032, monitor #43, summarizer #36
-`5c05f6c`). The monitor identifies each process by PID and creation time
+`5c05f6c`; CPU reasons and the child unit check from #43 `167a67d` and #36
+`51d5b19`, pending review). The monitor identifies each process by PID and creation time
 and keeps a child only if it was created no earlier than its parent, so a
 reused PID cannot attach an unrelated process. A run is invalid if:
 - a load row has a process whose creation time could not be read
@@ -257,19 +259,35 @@ load-phase-only check would leave most of the interval unchecked:
   the processes that exist at start-up are observed;
 - no monitor row in the interval has an unreadable CPU value
   (`CpuUnreadableCount = 0`), and every in-tree diagnostics row has a
-  cumulative CPU value;
+  cumulative CPU value. A missing CPU value is never counted as zero. From
+  monitor #43 `167a67d` each missing value has one reason: exited before its
+  first read, access denied, PID already reused by another process, still
+  running but no longer reached by the tree walk, or another read error.
+  Any of them inside the measured interval leaves the run invalid, and the
+  summarizer names the reason and the PIDs (#36 decision 6687069270);
 - the samples cover ≥ 80 % of the interval at 1 s and no interval is longer
   than 5 s.
 
 How processes are counted:
 - Each process contributes its last observed cumulative CPU time.
-- A process that leaves the tree before the end loses at most one interval
-  of CPU. It is counted in `CpuExitedProcesses`, reported per run, and does
-  not invalidate the run.
+- From monitor #43 `167a67d` CPU time is read through a process handle
+  opened once per identity and held while the process is in the tree, so a
+  process that exits keeps its final CPU time readable, and the monitor
+  writes it as the process's last diagnostics row. With earlier monitors a
+  process that leaves the tree before the end loses at most one interval of
+  CPU. Either way it is counted in `CpuExitedProcesses`, reported per run,
+  and does not invalidate the run.
 - A process that starts and exits between two samples is never observed.
   This limit is stated with every CPU result. The process tree is checked
   separately (above); CPU is summed per process identity, so two processes
   that had the same PID are counted separately.
+
+Unit check (#36 decision 6687069270). Scenario M runs the monitor with
+`-UnitCheckRequireChildName msedgewebview2.exe`: the `PrivatePageCount`
+unit is verified only once a WebView2 child process, not the host alone,
+has stable private memory. A stable mismatch, or no stable WebView2 child
+within the timeout, stops the monitor with no measurement, and the run is
+invalid. The general mode of the monitor is unchanged.
 
 These checks are implemented in the #36 summarizer (`ff09868`; #36 head
 `fe31123`, hosted CI green on Linux and Windows), with tests
@@ -297,8 +315,8 @@ the outcome matters.
 | | |
 |---|---|
 | Runs | 4 cells × 6 triplets × 3 arms = **72** |
-| Time | 72 × ~4.1 min ≈ **4.9 h** (provisional, replaced by the native smoke duration before the run), plus ~30 min setup (build, hashes, schedule, smoke run) |
-| Blocks | 6 blocks of 4 triplets (one per cell), ~50 min each; a block may be split across sessions only between triplets |
+| Time | 72 × (204–209 s per run + 30 s pause) ≈ **4.7–4.8 h**, plus ~30 min setup (build, hashes, schedule). This is an estimate from the 2026-10-28 native smoke (12 runs, scenario `5c05f6c`, monitor `1d967e0`, default phases), replacing the provisional 72 × ~4.1 min ≈ 4.9 h; it is checked again against the next smoke |
+| Blocks | 6 blocks of 4 triplets (one per cell), 12 runs ≈ 47–48 min each; a block may be split across sessions only between triplets |
 
 Why 6, not 5:
 - **Order balance.** With 6 triplets per cell, each cell can use each of the
@@ -613,13 +631,34 @@ No decision is open in this revision.
 **Pilot gate.** Q7 and Q8 do not open the pilot by themselves. The pilot
 runs only after:
 - written approval to launch the scripts with PowerShell on the measurement
-  machine;
+  machine (given for the smoke, 2026-10-27);
 - a valid native smoke of scenario M with all three arms at the exact #36
   SHA that will run the pilot;
 - the duration from that smoke replaces the estimate in §8a;
-- the pilot freeze below, and a final pre-pilot review by Group 1.
+- the pilot freeze below, and a final pre-pilot review by Group 1 (§10b).
 
 The pilot stays descriptive and is never used for confirmatory conclusions.
+
+**Gate status (2026-11-06).** Not passed; the pilot is blocked.
+- Smoke 1, scenario `0055c78`, monitor `6952886` (2026-10-27): 12/12 runs
+  passed, 8/12 valid (startup unit check, PID reuse, a transient child).
+  Report: #36 comment 6453085356.
+- Smoke 2, scenario `5c05f6c`, monitor `1d967e0` (2026-10-28): 12/12 runs
+  passed, **11/12 valid**. The invalid run, `N4D64-t01-p3-C`, lost the CPU
+  time of a WebView2 child that exited between the monitor's snapshot and
+  its read. Report: #36 comment 6481259913.
+- Decision (#36 comment 6687069270): the smoke stays 11/12 and the gate
+  stays open. The exit explains the gap, but independence from the arm and
+  the load is not shown. Missing CPU is never counted as zero, and the old
+  results are kept.
+- Next: monitor #43 follow-up (separate exit, access-denied and identity
+  reasons; final CPU through a held handle; unit check on a WebView2
+  child), then ONE new full A/B/C smoke on the final scenario/monitor pair.
+  It uses the same four cells and seeds, a new output directory, and a
+  schedule written before the run (#36 `plans/smoke-abc-3`). The plan and
+  the #43 evidence are reviewed before it runs. A C-only repeat or a
+  recount of old data does not replace it.
+- Duration: the §8a estimate now comes from smoke 2.
 
 ### 10a. Two freezes (#33 comment 6452488540)
 
@@ -648,6 +687,10 @@ in the PR and in the run's `configuration.json`.
    The confirmatory run also needs separate written approval after this
    freeze.
 
+The two freezes are separate commits, reviewed separately; neither implies
+the other. The pilot freeze holds no thresholds: `thresholds.csv` exists
+only from the confirmatory freeze, computed from the pilot's valid runs.
+
 Checks tied to the freezes:
 - `thresholds.csv` is built only from pilot runs marked valid by §7.
   `New-CatalogThresholds` refuses any phase but Pilot, and
@@ -655,14 +698,66 @@ Checks tied to the freezes:
 - After the confirmatory freeze, `thresholds.csv` is not changed. The
   confirmatory analysis reads it only from the freeze commit and records
   its SHA-256 next to the results. A hash mismatch stops the analysis.
-  This hash check is not in the #36 scripts yet; it is added there before
-  the confirmatory freeze.
+  The check is prepared in #36 `51d5b19` (`Import-CatalogThresholds`,
+  pending review). It hashes the file before parsing it. It stops on a
+  mismatch, a missing file, a malformed frozen hash, a missing, unexpected
+  or duplicated cell/kind/outcome row, or a non-numeric threshold, and it
+  returns the verified hash for the results. Synthetic tests in
+  `Test-CatalogScripts.ps1` cover each case. The confirmatory analysis
+  script that calls it is written and reviewed before the confirmatory
+  freeze.
 - Pilot and confirmatory data are never pooled. They are kept in separate
   results directories with their own `phase` in `configuration.json`, and
   each analysis reads one phase only.
 
 After each freeze, §10 status, the PR description and the ROADMAP evidence
 are updated with the exact SHAs and the CI and native results they rest on.
+
+### 10b. Pre-pilot review package (draft, 72 runs)
+
+What Group 1 receives before deciding on the pilot (§10, pilot gate). It is
+assembled only after a passed smoke; nothing here opens the pilot.
+
+1. **SHAs.** This protocol at the pilot-freeze commit; the #36 scenario
+   SHA; the #43 monitor SHA. All the same as in the passed smoke, or the
+   difference stated and re-smoked.
+2. **CI.** Hosted runs at each exact SHA: Rust, frontend and Windows release
+   for #36; PowerShell 5.1 and 7 for #43. Links and conclusions.
+3. **Native evidence (Windows 10 22H2, 19045).** The #43 targeted tests at
+   the monitor SHA. The passed smoke: `configuration.json`, `schedule.csv`,
+   `runs.csv`, every invalid reason, retained sizes, process counts per
+   `N`, CPU reason columns, run durations. Earlier smokes listed with their
+   results, unchanged.
+4. **Pilot plan.**
+   - 4 cells × 6 triplets × 3 arms = 72 runs;
+   - `schedule.csv` written and checked before the run (each permutation
+     once per cell, each arm in each position twice per cell);
+   - the exact runner command with `-ExpectedSchedule`, the phases and
+     seeds, and a new output directory;
+   - the time from §8a (≈ 4.7–4.8 h + setup) and how blocks may be split.
+5. **Measures and validity.**
+   - RAM (`LoadPrivateMBAvg`) and CPU (`RunCpuSeconds`) co-primary, with
+     the same weight (§3);
+   - the guardrails (§8d);
+   - the §7 filters as implemented at the scenario SHA. That includes
+     missing CPU never counted as zero and the unit check on a WebView2
+     child.
+6. **What the pilot report will contain** (§8a), marked descriptive with no
+   conclusion, and the statement that pilot and confirmatory data are
+   never pooled.
+7. **Freeze plan.**
+   - the pilot freeze contents (§10a.1);
+   - what can change only at the confirmatory freeze (§10a.2,
+     *(from pilot)* items);
+   - the `thresholds.csv` SHA-256 check (§10a).
+8. **Risks and limits.**
+   - one machine;
+   - processes that start and exit between two samples are not seen;
+   - WebView2 version drift;
+   - background load;
+   - what is not verified.
+9. **The ask.** Approve the pilot freeze SHA and the start of the 72 runs.
+   The confirmatory stage needs a separate decision after the pilot report.
 
 ## 11. Acceptance criteria for this phase
 
