@@ -12,9 +12,14 @@ it is written and reviewed before any confirmatory run.
 Co-primary measures (protocol revision 3, §3, §8c):
 - RAM: LoadPrivateMBAvg, the time average over the load phase of the sum of
   Private Bytes over the process tree (host and every WebView2 process);
-- CPU: RunCpuSeconds, for every process of the tree its last readable
-  cumulative CPU time (user + kernel, from the monitor diagnostics) at or
-  before the end of the idle-after phase, summed. StartupCpuSeconds is the
+- CPU: RunCpuSeconds. With a job file (runs\<run>.job.csv, runner with
+  CatalogJobCpu.ps1): the CPU time (user + kernel) of the run's Job Object,
+  which holds every process of the tree from the first instruction, read at
+  the last job row at or before the end of the idle-after phase (checks in
+  Get-CatalogJobCpu). Without one (older results): for every process of the
+  tree its last readable cumulative CPU time from the monitor diagnostics at
+  or before the end of the idle-after phase, summed; the monitor values are
+  kept as MonitorRunCpuSeconds when the job is the source. StartupCpuSeconds is the
   same at the start of the warm-up; LoadCpuSeconds the sum of the monitor's
   per-sample deltas in the load phase.
 Working Set is shown only as a diagnostic upper bound (shared pages counted
@@ -59,6 +64,7 @@ param(
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'CatalogJobCpu.ps1')
 $culture = [System.Globalization.CultureInfo]::InvariantCulture
 
 $minLoadCoverage = 0.8
@@ -161,6 +167,9 @@ foreach ($planned in $schedule) {
         ExePrivateMBLoadAvg = $null; WebViewPrivateMBLoadAvg = $null; LoadCpuSeconds = $null; LoadWorkingSetMBUpperBound = $null
         RunCpuSeconds = $null; StartupCpuSeconds = $null; CpuExitedProcesses = $null; CpuProcesses = $null
         RunRows = $null; RunCoverage = $null; RunIntervalMaxSeconds = $null
+        CpuSource = $null; MonitorRunCpuSeconds = $null; MonitorStartupCpuSeconds = $null; MonitorLoadCpuSeconds = $null; MonitorCpuNotes = ''
+        JobProcesses = $null; JobProcessesNeverSeenByMonitor = $null; MonitorProcessesInJob = $null; JobEndGapSeconds = $null
+        JobMaxRowIntervalSeconds = $null; JobMaxClockDriftSeconds = $null; JobNotes = ''
         MonitorCpuSeconds = $null
     }
 
@@ -274,6 +283,7 @@ foreach ($planned in $schedule) {
 
             # Host vs WebView2 split, per-process detail and whole-run CPU, from the monitor's diagnostics.
             $diagnosticsFile = Join-Path $runsDirectory "$name.monitor.diagnostics.csv"
+            $monitorKeys = @()
             $runEnd = Get-Time $report.phases.endedAt
             $runSamples = @($samples | Where-Object { $_.Time -le $runEnd })
             $row.RunRows = $runSamples.Count
@@ -311,6 +321,7 @@ foreach ($planned in $schedule) {
                         if ([string]::IsNullOrEmpty([string]$identity)) { $identity = [string]$_.Pid }
                         [pscustomobject]@{ Row = $_; Time = Get-Time $_.Timestamp; Pid = [int]$_.Pid; Identity = $identity; Cpu = ConvertTo-Number (Get-Property $_ 'ProcTotalProcessorSeconds') }
                     })
+                if ($hasIdentity) { $monitorKeys = @($diagnosticRows | ForEach-Object { [string]$_.Identity } | Sort-Object -Unique) }
                 $runDiagnostics = @($diagnosticRows | Where-Object { $_.Time -le $runEnd })
                 if (@($runDiagnostics | Where-Object { $null -eq $_.Cpu }).Count -gt 0) { $cpuReasons.Add('missing cumulative CPU in a diagnostics row') }
                 elseif ($runDiagnostics.Count -gt 0 -and $runSamples.Count -gt 0) {
@@ -350,7 +361,47 @@ foreach ($planned in $schedule) {
                 }
             }
             if ($cpuReasons.Count -eq 0 -and $null -eq $row.RunCpuSeconds) { $cpuReasons.Add('no cumulative CPU value') }
-            foreach ($reason in $cpuReasons) { $reasons.Add("whole-run CPU: $reason") }
+            $jobFile = Join-Path $runsDirectory "$name.job.csv"
+            if (Test-Path -LiteralPath $jobFile) {
+                # Protocol §7 (revision with job CPU): whole-run CPU from the run's Job Object. The
+                # monitor's CPU values stay as a diagnostic; its reasons for a missing CPU value
+                # (ExitedUnread etc.) no longer decide CPU validity, because the job counts every
+                # process of the tree. RAM keeps its own checks above, unchanged.
+                $row.CpuSource = 'job'
+                $row.MonitorRunCpuSeconds = $row.RunCpuSeconds
+                $row.MonitorStartupCpuSeconds = $row.StartupCpuSeconds
+                $row.MonitorLoadCpuSeconds = $row.LoadCpuSeconds
+                $row.MonitorCpuNotes = $cpuReasons -join '; '
+                $row.RunCpuSeconds = $null; $row.StartupCpuSeconds = $null; $row.LoadCpuSeconds = $null
+                $jobProblems = New-Object System.Collections.Generic.List[string]
+                if ($null -ne $log) {
+                    if ($null -ne (Get-Property $log 'jobError')) { $jobProblems.Add("runner: $($log.jobError)") }
+                    if ([bool](Get-Property $log 'jobTerminated')) { $jobProblems.Add("the runner terminated the job ($(Get-Property $log 'jobLeftoverProcesses') process(es) left after the app exited, or a timeout)") }
+                }
+                if (-not $hasIdentity) { $jobProblems.Add('the monitor records no process identities; membership not verified') }
+                $messagesFile = Join-Path $runsDirectory "$name.job.messages.csv"
+                $jobMessages = if (Test-Path -LiteralPath $messagesFile) { @(Import-Csv -LiteralPath $messagesFile) } else { $jobProblems.Add('no job messages file'); @() }
+                $job = Get-CatalogJobCpu -Rows @(Import-Csv -LiteralPath $jobFile) -Messages $jobMessages -Phases $report.phases -MonitorKeys $monitorKeys
+                foreach ($problem in $job.Problems) { $jobProblems.Add($problem) }
+                $row.JobProcesses = $job.JobProcesses
+                $row.JobProcessesNeverSeenByMonitor = $job.JobProcessesNeverSeenByMonitor
+                $row.MonitorProcessesInJob = $job.MonitorProcessesInJob
+                $row.JobEndGapSeconds = $job.EndGapSeconds
+                $row.JobMaxRowIntervalSeconds = $job.MaxRowIntervalSeconds
+                $row.JobMaxClockDriftSeconds = $job.MaxClockDriftSeconds
+                $row.JobNotes = @($job.Notes) -join '; '
+                if ($jobProblems.Count -eq 0) {
+                    $row.RunCpuSeconds = $job.RunCpuSeconds
+                    $row.StartupCpuSeconds = $job.StartupCpuSeconds
+                    $row.LoadCpuSeconds = $job.LoadCpuSeconds
+                }
+                foreach ($problem in $jobProblems) { $reasons.Add("whole-run CPU (job): $problem") }
+            }
+            else {
+                # Results without a job (smokes 1 to 3): the monitor rule, unchanged.
+                $row.CpuSource = 'monitor'
+                foreach ($reason in $cpuReasons) { $reasons.Add("whole-run CPU: $reason") }
+            }
         }
     }
     $row.Valid = $reasons.Count -eq 0
@@ -442,7 +493,7 @@ $lines.Add("**$($configuration.phase): descriptive, no conclusion.** Platform: $
 $lines.Add('')
 $lines.Add("Git $($configuration.gitHead)$(if ($configuration.gitDirty) { ' (dirty)' }); arms $(@($configuration.arms) -join ', '); cells $(@($configuration.cells) -join ', '); $($configuration.triplets) triplets; schedule seed $($configuration.scheduleSeed).")
 $lines.Add('')
-$lines.Add('Co-primary measures: LoadPrivateMBAvg (RAM) = time average over the load phase of the sum of Private Bytes over the host and every WebView2 process; RunCpuSeconds (CPU) = CPU time of the whole tree from process start to the end of the idle-after phase. Working Set is a diagnostic upper bound only.')
+$lines.Add('Co-primary measures: LoadPrivateMBAvg (RAM) = time average over the load phase of the sum of Private Bytes over the host and every WebView2 process; RunCpuSeconds (CPU) = CPU time of the whole tree from process start to the end of the idle-after phase, from the run''s Job Object where the runner recorded one (runs.csv CpuSource), else from the monitor. Working Set is a diagnostic upper bound only.')
 $lines.Add('')
 $lines.Add("Runs: $($runs.Count), valid: $(@($runs | Where-Object { $_.Valid }).Count).")
 $lines.Add('')

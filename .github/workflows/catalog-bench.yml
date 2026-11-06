@@ -43,6 +43,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Test-CatalogScripts.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Job CPU checks on real processes, PowerShell 7 and Windows PowerShell 5.1
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File scripts/Test-CatalogJobCpu.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Test-CatalogJobCpu.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - run: cargo fmt --all -- --check
       - name: Clippy, arms A, B and C
         run: |
@@ -87,6 +94,11 @@ jobs:
               if ($app.ExitCode -ne 0) { throw "arm $arm D$data exited with $($app.ExitCode)" }
             }
           }
+      - name: Arms A, B and C in a job, as the runner starts them (Windows PowerShell 5.1)
+        shell: pwsh
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -Command "& .\scripts\Test-CatalogJobApp.ps1 -Executable bin\arm-A.exe,bin\arm-B.exe,bin\arm-C.exe -OutputDirectory reports\job; exit `$LASTEXITCODE"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Upload reports and binaries
         if: always()
         uses: actions/upload-artifact@v4
@@ -94,5 +106,7 @@ jobs:
           name: catalog-bench-ci-${{ github.sha }}
           path: |
             benchmarks/catalog/reports/*.json
+            benchmarks/catalog/reports/job/*.json
+            benchmarks/catalog/reports/job/*.csv
             benchmarks/catalog/bin/
           if-no-files-found: warn
