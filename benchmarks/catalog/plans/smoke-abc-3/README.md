@@ -14,8 +14,8 @@ old data does not replace it, and the old results stay as they are.
 
 | | |
 |---|---|
-| Scenario (#36) | final head after review, **to be filled in before the run** |
-| Monitor (#43) | final head after its native check, **to be filled in before the run** (`167a67d` or later) |
+| Scenario (#36) | the reviewed #36 head that contains this file (proposed: the commit that added these stop conditions), checked out clean; `configuration.json` records it as `gitHead`, with `gitDirty` false |
+| Monitor (#43) | `c5a4f16b54fb4c14dc79c21a2d52d227fc0dfff9` (hosted CI PS 5.1/7 green, run 42235662112; native Win10 targeted tests passed, #43 comment 6687547929), checked out clean; recorded as `monitorGitHead` and `monitorSha256` |
 | Phase | `Smoke` |
 | Cells | `N2D0`, `N2D16`, `N2D64`, `N4D64` (as the 2026-10-28 smoke) |
 | Arms | `A`, `B`, `C` |
@@ -41,6 +41,43 @@ Command (Windows PowerShell 5.1, from `benchmarks\catalog`):
 differs from this file. `configuration.json` records the scenario and
 monitor SHAs, the hashes of every script and executable, and this file's
 hash.
+
+## Pre-run checks (before the command, written into the run log)
+
+1. `git rev-parse HEAD` and `git status --porcelain` of both worktrees:
+   exactly the two SHAs above, nothing modified.
+2. A new output directory; the earlier smoke directories are not touched.
+3. No pilot or confirmatory phase: `-Phase Smoke` only (the runner still
+   refuses `-Phase Pilot`).
+4. The machine on AC power, sleep and screen lock off for the run, no
+   Windows Update or other heavy process visibly running, the same user
+   session as the earlier smokes.
+
+## Stop conditions
+
+The runner stops by itself, before any run, if:
+- the output directory already has `configuration.json`, `schedule.csv`,
+  `runs.log` or files in `runs\`;
+- the schedule differs from `schedule.csv` here (`-ExpectedSchedule`);
+- the monitor has no `-UnitCheckRequireChildName` (older than #43 `167a67d`);
+- `npm ci` or a build fails, or an executable is missing;
+- the written `schedule.csv` does not read back as a complete schedule.
+
+During the 12 runs:
+- An app failure, a monitor exit 1 (unit check) or any other invalid run
+  does **not** stop the sequence and is **not** repeated. It stays in the
+  results with its reason; that is what the gate counts.
+- The operator stops the sequence (Ctrl+C after the current run, or at
+  once if the machine is unusable) only if the machine sleeps, locks,
+  reboots or loses power, a heavy unrelated process starts (Windows Update,
+  a full antivirus scan), or a run exceeds the runner's timeout. The
+  partial directory is kept and reported as an incomplete smoke. It is not
+  resumed or topped up; another attempt needs a new review.
+
+After the runs: `Summarize-CatalogRuns.ps1` at the same scenario SHA, into
+its own `analysis-<time>` directory. The report gives every run's validity
+and reason, the CPU reason columns, durations, process counts per `N`, the
+old smokes alongside, and the gate verdict for review. Nothing else runs.
 
 ## Gate (unchanged rules, #36 6474468768 and 6687069270)
 
