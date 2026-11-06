@@ -50,6 +50,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Test-CatalogJobCpu.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Pilot dry run (72 runs, no app started), manifest freeze and refusals, PowerShell 7 and Windows PowerShell 5.1
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File scripts/Test-CatalogPilotDryRun.ps1 -OutputDirectory reports/pilot-dry-run-pwsh
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Test-CatalogPilotDryRun.ps1 -OutputDirectory reports/pilot-dry-run-powershell
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - run: cargo fmt --all -- --check
       - name: Clippy, arms A, B and C
         run: |
@@ -108,5 +115,8 @@ jobs:
             benchmarks/catalog/reports/*.json
             benchmarks/catalog/reports/job/*.json
             benchmarks/catalog/reports/job/*.csv
+            benchmarks/catalog/reports/pilot-dry-run-*/pilot-dry-run/*.json
+            benchmarks/catalog/reports/pilot-dry-run-*/pilot-dry-run/*.csv
+            benchmarks/catalog/reports/pilot-dry-run-*/frozen/*.json
             benchmarks/catalog/bin/
           if-no-files-found: warn

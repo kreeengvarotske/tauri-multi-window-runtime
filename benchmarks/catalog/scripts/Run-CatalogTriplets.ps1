@@ -7,7 +7,7 @@ the process monitor (protocol: docs/benchmark/memory-pilot-protocol.md).
 Arms: A = per-window JS copy (no feature), B = hand-written shared Rust
 service (--features shared), C = the same catalog through shared-runtime
 (--features framework; #35 at b65177d, merged in for arm C). -Phase Pilot
-still refuses to start: the pilot runs only after a native smoke of all
+still refuses to start (except with -DryRun, which starts no app): the pilot runs only after a native smoke of all
 three arms and the final check of the frozen protocol (#33 §10).
 
 The whole order is written to schedule.csv before the first run
@@ -81,22 +81,39 @@ param(
     # A schedule.csv written and reviewed before the run (plans\). The
     # runner stops before building if the schedule it would follow differs
     # from this file in any field or order.
-    [string]$ExpectedSchedule
+    [string]$ExpectedSchedule,
+
+    # Writes configuration.json, schedule.csv and manifest.json, checks them,
+    # and stops before the first run: no app is started. Needs
+    # -ExecutablesFrom or -SkipBuild (nothing is built). Allowed for -Phase
+    # Pilot, which otherwise still refuses to start.
+    [switch]$DryRun,
+
+    # A manifest.json frozen from a dry run (protocol §10a) and its SHA-256.
+    # The runner refuses to start if the file's hash differs or if anything in
+    # the manifest of this invocation differs from it.
+    [string]$Manifest,
+    [string]$ManifestSha256
 )
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'CatalogSchedule.ps1')
 . (Join-Path $PSScriptRoot 'CatalogJobCpu.ps1')
+. (Join-Path $PSScriptRoot 'CatalogManifest.ps1')
 
 $benchRoot = Split-Path -Parent $PSScriptRoot
 $repoRoot = Split-Path -Parent (Split-Path -Parent $benchRoot)
 $protocolFile = Join-Path $repoRoot 'docs\benchmark\memory-pilot-protocol.md'
 $sampleIntervalSeconds = 1
 
-if ($Phase -eq 'Pilot') {
+if ($Phase -eq 'Pilot' -and -not $DryRun) {
     throw 'The pilot runs only after a native smoke of arms A, B and C and the final check of the frozen protocol (docs/benchmark/memory-pilot-protocol.md §10, pilot gate).'
 }
+if ($DryRun -and -not ($ExecutablesFrom -or $SkipBuild)) { throw '-DryRun builds nothing: give -ExecutablesFrom or -SkipBuild.' }
+if ([bool]$Manifest -ne [bool]$ManifestSha256) { throw '-Manifest and -ManifestSha256 go together.' }
+$directoryProblems = @(Test-CatalogResultsDirectory -Path $OutputDirectory)
+if ($directoryProblems.Count -gt 0) { throw "Use a new -OutputDirectory: $($directoryProblems -join '; ')" }
 
 $MonitorScript = (Resolve-Path -LiteralPath $MonitorScript).Path
 # Scenario M verifies the PrivatePageCount unit on a stable WebView2 child,
@@ -111,14 +128,6 @@ $OutputDirectory = (Resolve-Path -LiteralPath $OutputDirectory).Path
 $binDirectory = Join-Path $OutputDirectory 'bin'
 $runsDirectory = Join-Path $OutputDirectory 'runs'
 $profilesDirectory = Join-Path $OutputDirectory 'profiles'
-foreach ($existing in @('configuration.json', 'schedule.csv', 'runs.log')) {
-    if (Test-Path -LiteralPath (Join-Path $OutputDirectory $existing)) {
-        throw "$OutputDirectory already has $existing; use a new -OutputDirectory."
-    }
-}
-if ((Test-Path -LiteralPath $runsDirectory) -and @(Get-ChildItem -LiteralPath $runsDirectory).Count -gt 0) {
-    throw "$runsDirectory is not empty; use a new -OutputDirectory."
-}
 New-Item -ItemType Directory -Force -Path $binDirectory, $runsDirectory, $profilesDirectory | Out-Null
 
 $schedule = New-CatalogSchedule -Cells $Cells -Arms $Arms -Triplets $Triplets -Seed $ScheduleSeed -DataSeed $DataSeed
@@ -236,10 +245,22 @@ $configuration = [ordered]@{
     runScriptSha256       = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash
     scheduleScriptSha256  = (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'CatalogSchedule.ps1') -Algorithm SHA256).Hash
     summarizeScriptSha256 = (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'Summarize-CatalogRuns.ps1') -Algorithm SHA256).Hash
+    manifestScriptSha256  = (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'CatalogManifest.ps1') -Algorithm SHA256).Hash
+    dryRun                = [bool]$DryRun
     readmeSha256          = (Get-FileHash -LiteralPath (Join-Path $benchRoot 'README.md') -Algorithm SHA256).Hash
     protocolSha256        = if (Test-Path -LiteralPath $protocolFile) { (Get-FileHash -LiteralPath $protocolFile -Algorithm SHA256).Hash } else { $null }
 }
+# The manifest of this invocation; with -Manifest, nothing is written or run
+# unless it equals the frozen one.
+$runManifest = New-CatalogManifest -Configuration $configuration -Schedule $schedule
+$frozenManifestSha256 = $null
+if ($Manifest) {
+    $frozenManifestSha256 = Assert-CatalogManifest -FrozenPath $Manifest -FrozenSha256 $ManifestSha256 -Current $runManifest
+    $configuration['frozenManifest'] = (Resolve-Path -LiteralPath $Manifest).Path
+    $configuration['frozenManifestSha256'] = $frozenManifestSha256
+}
 $configuration | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'configuration.json') -Encoding UTF8
+$runManifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'manifest.json') -Encoding UTF8
 Copy-Item -LiteralPath (Join-Path $benchRoot 'README.md') -Destination (Join-Path $OutputDirectory 'README.md')
 if (Test-Path -LiteralPath $protocolFile) { Copy-Item -LiteralPath $protocolFile -Destination (Join-Path $OutputDirectory 'protocol.md') }
 
@@ -251,6 +272,13 @@ $written = @(Import-Csv -LiteralPath (Join-Path $OutputDirectory 'schedule.csv')
 $scheduleProblems = @(Test-CatalogSchedule -Schedule $written -Cells $Cells -Arms $Arms -Triplets $Triplets)
 if ((@($written | ForEach-Object { $_.Name }) -join ',') -ne (@($schedule | ForEach-Object { $_.Name }) -join ',')) { $scheduleProblems += 'schedule.csv differs from the run order' }
 if ($scheduleProblems.Count -gt 0) { throw "schedule.csv is not a complete schedule: $($scheduleProblems -join '; ')" }
+
+if ($DryRun) {
+    $manifestHash = (Get-FileHash -LiteralPath (Join-Path $OutputDirectory 'manifest.json') -Algorithm SHA256).Hash.ToLowerInvariant()
+    Write-Host ("Dry run: {0} runs scheduled, schedule content SHA-256 {1}; manifest.json SHA-256 {2}. No app was started." -f $schedule.Count, $runManifest.scheduleContentSha256, $manifestHash)
+    Write-Host "To freeze: commit manifest.json and schedule.csv, then run with -Manifest <manifest.json> -ManifestSha256 $manifestHash."
+    return
+}
 
 $runLog = Join-Path $OutputDirectory 'runs.log'
 $maxDataMib = ($cellRows | Measure-Object -Property DataMib -Maximum).Maximum

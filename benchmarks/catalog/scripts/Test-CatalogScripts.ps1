@@ -2,7 +2,9 @@
 .SYNOPSIS
 Tests CatalogSchedule.ps1 (balance of the pilot order),
 CatalogThresholds.ps1 (threshold forms, pilot reference, sign counts at the
-threshold, cut-offs) and Summarize-CatalogRuns.ps1 (validity, triplet differences, retained size) on
+threshold, cut-offs) and Summarize-CatalogRuns.ps1 (validity, triplet differences, retained size),
+CatalogJobCpu.ps1 (job CPU rules), CatalogManifest.ps1 (manifest freeze,
+results directories) and CatalogConfirmatory.ps1 (confirmatory inputs) on
 synthetic data.
 
 .DESCRIPTION
@@ -18,6 +20,8 @@ $culture = [System.Globalization.CultureInfo]::InvariantCulture
 . (Join-Path $PSScriptRoot 'CatalogSchedule.ps1')
 . (Join-Path $PSScriptRoot 'CatalogThresholds.ps1')
 . (Join-Path $PSScriptRoot 'CatalogJobCpu.ps1')
+. (Join-Path $PSScriptRoot 'CatalogManifest.ps1')
+. (Join-Path $PSScriptRoot 'CatalogConfirmatory.ps1')
 $failures = New-Object System.Collections.Generic.List[string]
 
 function Assert-True {
@@ -453,6 +457,233 @@ $test = Test-SignMargin -Differences $diffs -Shift 10.0 -Alpha (0.05 / 6)
 Assert-True 'test: one moved onto the threshold no longer rejects' (-not $test.Reject -and $test.Below -eq 9 -and $test.AtZero -eq 1 -and $test.N -eq 11)
 $test = Test-SignMargin -Differences @() -Shift 10.0 -Alpha (0.05 / 6)
 Assert-True 'test: no triplets never rejects' (-not $test.Reject)
+
+# --- Pilot freeze manifest (CatalogManifest.ps1, protocol §10a).
+$pilotSchedule = @(New-CatalogSchedule -Cells $cells -Arms A, B, C -Triplets 6 -Seed 1 -DataSeed 1)
+Assert-True 'manifest: the pilot schedule has 72 runs' ($pilotSchedule.Count -eq 72)
+$roundTrip = Join-Path ([System.IO.Path]::GetTempPath()) ("catalog-schedule-{0}.csv" -f [guid]::NewGuid().ToString('N'))
+try {
+    $pilotSchedule | Export-Csv -LiteralPath $roundTrip -NoTypeInformation -Encoding UTF8
+    $read = @(Import-Csv -LiteralPath $roundTrip)
+    Assert-True 'manifest: schedule content hash survives a CSV round trip' ((Get-CatalogScheduleSha256 $pilotSchedule) -eq (Get-CatalogScheduleSha256 $read))
+    (Get-Content -LiteralPath $roundTrip) -join "`r`n" | Set-Content -LiteralPath $roundTrip -Encoding UTF8 -NoNewline
+    Assert-True 'manifest: schedule content hash does not depend on line endings' ((Get-CatalogScheduleSha256 $pilotSchedule) -eq (Get-CatalogScheduleSha256 @(Import-Csv -LiteralPath $roundTrip)))
+}
+finally { Remove-Item -LiteralPath $roundTrip -Force -ErrorAction SilentlyContinue }
+$otherSchedule = @(New-CatalogSchedule -Cells $cells -Arms A, B, C -Triplets 6 -Seed 2 -DataSeed 1)
+Assert-True 'manifest: another seed gives another schedule hash' ((Get-CatalogScheduleSha256 $pilotSchedule) -ne (Get-CatalogScheduleSha256 $otherSchedule))
+function New-TestConfiguration {
+    [ordered]@{
+        phase = 'Pilot'; machine = 'PC'; os = 'Windows 10 (build 19045)'; webView2 = '130.0'; gitHead = ('a' * 40); gitDirty = $false
+        monitorGitHead = ('c' * 40); monitorSha256 = ('D' * 64); monitorUnitCheckRequireChildName = 'msedgewebview2.exe'; cpuSource = 'job'
+        jobLimits = [ordered]@{ SampleIntervalMs = 250; MaxBoundaryGapSeconds = 0.5 }; jobScriptSha256 = ('E' * 64)
+        executables = [ordered]@{ A = [ordered]@{ sha256 = ('1' * 64); bytes = 100 }; B = [ordered]@{ sha256 = ('2' * 64); bytes = 100 }; C = [ordered]@{ sha256 = ('3' * 64); bytes = 100 } }
+        sampleIntervalSeconds = 1; cells = $cells; arms = @('A', 'B', 'C'); triplets = 6; scheduleSeed = 1; dataSeed = 1
+        idleBeforeSeconds = 20; warmupSeconds = 30; loadSeconds = 120; idleAfterSeconds = 30; pauseSeconds = 30; stepIntervalMs = 500
+        runScriptSha256 = ('F' * 64); scheduleScriptSha256 = ('F' * 64); summarizeScriptSha256 = ('F' * 64); manifestScriptSha256 = ('F' * 64); readmeSha256 = ('F' * 64); protocolSha256 = ('F' * 64)
+        createdAt = '2026-11-06T20:00:00Z'; dryRun = $true
+    }
+}
+$manifestRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("catalog-manifest-{0}" -f [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $manifestRoot | Out-Null
+try {
+    $frozen = New-CatalogManifest -Configuration (New-TestConfiguration) -Schedule $pilotSchedule
+    Assert-True 'manifest: createdAt and dryRun are not frozen' (-not $frozen.Contains('createdAt') -and -not $frozen.Contains('dryRun'))
+    Assert-Near 'manifest: 72 runs' $frozen.runs 72
+    $frozenPath = Join-Path $manifestRoot 'manifest.json'
+    $frozen | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $frozenPath -Encoding UTF8
+    $frozenHash = (Get-FileHash -LiteralPath $frozenPath -Algorithm SHA256).Hash
+    $same = New-TestConfiguration; $same.createdAt = '2026-11-07T08:00:00Z'; $same.dryRun = $false
+    $ok = $null
+    try { $ok = Assert-CatalogManifest -FrozenPath $frozenPath -FrozenSha256 $frozenHash -Current (New-CatalogManifest -Configuration $same -Schedule $pilotSchedule) } catch { $ok = $_.Exception.Message }
+    Assert-True 'manifest: the same configuration and schedule pass (time and dry-run flag aside)' ($ok -eq $frozenHash.ToLowerInvariant()) $ok
+    $cases = @(
+        @('scenario SHA', { param($c) $c.gitHead = ('b' * 40) }, 'gitHead'),
+        @('dirty checkout', { param($c) $c.gitDirty = $true }, 'gitDirty'),
+        @('monitor SHA', { param($c) $c.monitorGitHead = ('0' * 40) }, 'monitorGitHead'),
+        @('executable hash', { param($c) $c.executables.C.sha256 = ('9' * 64) }, 'executables.C.sha256'),
+        @('load phase length', { param($c) $c.loadSeconds = 60 }, 'loadSeconds'),
+        @('job limit', { param($c) $c.jobLimits.MaxBoundaryGapSeconds = 1.0 }, 'jobLimits.MaxBoundaryGapSeconds'),
+        @('WebView2 version', { param($c) $c.webView2 = '131.0' }, 'webView2'),
+        @('phase', { param($c) $c.phase = 'Smoke' }, 'phase')
+    )
+    foreach ($case in $cases) {
+        $changed = New-TestConfiguration
+        & $case[1] $changed
+        $message = ''
+        try { [void](Assert-CatalogManifest -FrozenPath $frozenPath -FrozenSha256 $frozenHash -Current (New-CatalogManifest -Configuration $changed -Schedule $pilotSchedule)) } catch { $message = $_.Exception.Message }
+        Assert-True "manifest: a different $($case[0]) is refused and named" ($message -like "*differs from the frozen manifest*$($case[2]): frozen*") $message
+    }
+    $message = ''
+    try { [void](Assert-CatalogManifest -FrozenPath $frozenPath -FrozenSha256 $frozenHash -Current (New-CatalogManifest -Configuration (New-TestConfiguration) -Schedule $otherSchedule)) } catch { $message = $_.Exception.Message }
+    Assert-True 'manifest: a different schedule is refused' ($message -like '*scheduleContentSha256: frozen*') $message
+    $message = ''
+    try { [void](Assert-CatalogManifest -FrozenPath $frozenPath -FrozenSha256 ('0' * 64) -Current $frozen) } catch { $message = $_.Exception.Message }
+    Assert-True 'manifest: a manifest file with another hash is refused' ($message -like '*does not match*nothing was run*') $message
+    $message = ''
+    try { [void](Assert-CatalogManifest -FrozenPath $frozenPath -FrozenSha256 'abc' -Current $frozen) } catch { $message = $_.Exception.Message }
+    Assert-True 'manifest: a malformed frozen hash is refused' ($message -like '*not a 64-digit hex value*') $message
+    $message = ''
+    try { [void](Assert-CatalogManifest -FrozenPath (Join-Path $manifestRoot 'missing.json') -FrozenSha256 $frozenHash -Current $frozen) } catch { $message = $_.Exception.Message }
+    Assert-True 'manifest: a missing manifest is refused' ($message -like '*not found*') $message
+    # Separate results directories: never reused, never nested.
+    $results = Join-Path $manifestRoot 'pilot'
+    New-Item -ItemType Directory -Path $results | Out-Null
+    Assert-True 'directories: a new directory is accepted' (@(Test-CatalogResultsDirectory -Path (Join-Path $manifestRoot 'new')).Count -eq 0)
+    '{}' | Set-Content -LiteralPath (Join-Path $results 'configuration.json')
+    Assert-True 'directories: a used directory is refused' ((@(Test-CatalogResultsDirectory -Path $results) -join ';') -like '*already has configuration.json*')
+    Assert-True 'directories: a directory inside another results directory is refused' ((@(Test-CatalogResultsDirectory -Path (Join-Path $results 'confirmatory')) -join ';') -like '*inside another results directory*')
+}
+finally { Remove-Item -LiteralPath $manifestRoot -Recurse -Force -ErrorAction SilentlyContinue }
+
+# --- Confirmatory analysis inputs (CatalogConfirmatory.ps1, protocol §10a, confirmatory freeze).
+# Fixture: a confirmatory freeze of cells N2D16 and N4D64, 2 triplets (12 runs), with the
+# thresholds.csv of the pilot fixture above; the run in two sessions split between blocks.
+$confirmRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("catalog-confirm-{0}" -f [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $confirmRoot | Out-Null
+try {
+    $confirmCells = @('N2D16', 'N4D64')
+    function New-ConfirmConfiguration {
+        $c = New-TestConfiguration
+        $c.phase = 'Confirmatory'; $c.cells = $confirmCells; $c.triplets = 2; $c.scheduleSeed = 3; $c.dryRun = $false
+        $c
+    }
+    function New-Freeze {
+        param([string]$Name, [System.Collections.IDictionary]$Configuration, [object[]]$Schedule)
+        $directory = Join-Path $confirmRoot "freeze-$Name"
+        New-Item -ItemType Directory -Path $directory | Out-Null
+        $path = Join-Path $directory 'manifest.json'
+        New-CatalogManifest -Configuration $Configuration -Schedule $Schedule | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $path -Encoding UTF8
+        [pscustomobject]@{ Path = $path; Sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() }
+    }
+    function New-Session {
+        # A results directory as the runner leaves it, with runs.log entries for the given runs.
+        param([string]$Name, [object]$Freeze, [object[]]$Schedule, [string[]]$Runs, [hashtable]$Configuration = @{}, [string]$ManifestPath, [string[]]$Skip = @())
+        $directory = Join-Path $confirmRoot $Name
+        New-Item -ItemType Directory -Force -Path $directory | Out-Null
+        $config = [ordered]@{ phase = 'Confirmatory'; dryRun = $false; frozenManifestSha256 = $Freeze.Sha256 }
+        foreach ($key in $Configuration.Keys) { $config[$key] = $Configuration[$key] }
+        if ($Skip -notcontains 'configuration.json') { $config | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $directory 'configuration.json') -Encoding UTF8 }
+        if ($Skip -notcontains 'manifest.json') { Copy-Item -LiteralPath $(if ($ManifestPath) { $ManifestPath } else { $Freeze.Path }) -Destination (Join-Path $directory 'manifest.json') }
+        if ($Skip -notcontains 'schedule.csv') { $Schedule | Export-Csv -LiteralPath (Join-Path $directory 'schedule.csv') -NoTypeInformation -Encoding UTF8 }
+        if ($Skip -notcontains 'runs.log') { @($Runs | ForEach-Object { (@{ name = $_; exitCode = 0 } | ConvertTo-Json -Compress) }) | Set-Content -LiteralPath (Join-Path $directory 'runs.log') -Encoding UTF8 }
+        $directory
+    }
+    $confirmSchedule = @(New-CatalogSchedule -Cells $confirmCells -Arms A, B, C -Triplets 2 -Seed 3 -DataSeed 1)
+    $block1 = @($confirmSchedule | Where-Object { [int]$_.Block -eq 1 } | ForEach-Object { $_.Name })
+    $block2 = @($confirmSchedule | Where-Object { [int]$_.Block -eq 2 } | ForEach-Object { $_.Name })
+    $freeze = New-Freeze 'ok' (New-ConfirmConfiguration) $confirmSchedule
+    $thresholdsFile = Join-Path $confirmRoot 'freeze-ok\thresholds.csv'
+    $table | Export-Csv -LiteralPath $thresholdsFile -NoTypeInformation -Encoding UTF8
+    $thresholdsSha = (Get-FileHash -LiteralPath $thresholdsFile -Algorithm SHA256).Hash.ToLowerInvariant()
+    $session1 = New-Session 'session-1' $freeze $confirmSchedule $block1
+    $session2 = New-Session 'session-2' $freeze $confirmSchedule $block2
+
+    function Test-Confirm {
+        param([string[]]$Directories, [object]$Freeze = $freeze, [string]$Thresholds = $thresholdsFile, [string]$ThresholdsHash = $thresholdsSha)
+        Test-CatalogConfirmatoryInputs -ResultsDirectories $Directories -FrozenManifestPath $Freeze.Path -FrozenManifestSha256 $Freeze.Sha256 -ThresholdsPath $Thresholds -ThresholdsSha256 $ThresholdsHash
+    }
+    function Assert-ConfirmRefused {
+        param([string]$Name, [object]$Checked, [string]$Pattern)
+        $text = @($Checked.Problems) -join ' | '
+        Assert-True "confirmatory inputs: $Name stops the analysis" ($Checked.Problems.Count -gt 0 -and $text -like "*$Pattern*") "expected '$Pattern', got '$text'"
+    }
+
+    Assert-True 'confirmatory fixture: 12 runs in two blocks of 6' ($confirmSchedule.Count -eq 12 -and $block1.Count -eq 6 -and $block2.Count -eq 6)
+    $checked = Test-Confirm @($session1, $session2)
+    Assert-True 'confirmatory inputs: two sessions split between blocks pass' ($checked.Problems.Count -eq 0) (@($checked.Problems) -join ' | ')
+    Assert-True 'confirmatory inputs: every scheduled run is found once, in its session' (@($checked.Runs).Count -eq 12 -and @($checked.Runs | Where-Object { $block2 -contains $_.Name -and $_.Directory -eq $session2 }).Count -eq 6)
+    Assert-True 'confirmatory inputs: the verified hashes are returned' ($checked.ThresholdsSha256 -eq $thresholdsSha -and $checked.ManifestSha256 -eq $freeze.Sha256 -and @($checked.Thresholds).Count -eq 12)
+    $whole = New-Session 'single' $freeze $confirmSchedule ($block1 + $block2)
+    Assert-True 'confirmatory inputs: one complete session passes' ((Test-Confirm @($whole)).Problems.Count -eq 0)
+    $ok = Assert-CatalogConfirmatoryInputs -ResultsDirectories @($session1, $session2) -FrozenManifestPath $freeze.Path -FrozenManifestSha256 $freeze.Sha256.ToUpperInvariant() -ThresholdsPath $thresholdsFile -ThresholdsSha256 $thresholdsSha
+    Assert-True 'confirmatory inputs: Assert returns the checked inputs, any letter case of the hash' ($ok.ManifestSha256 -eq $freeze.Sha256)
+
+    # Thresholds SHA-256 (Import-CatalogThresholds inside the input check).
+    $editedThresholds = Join-Path $confirmRoot 'thresholds-edited.csv'
+    [System.IO.File]::WriteAllText($editedThresholds, ([System.IO.File]::ReadAllText($thresholdsFile)).Replace('15.25', '15.26'))
+    Assert-ConfirmRefused 'thresholds edited after the freeze' (Test-Confirm @($session1, $session2) -Thresholds $editedThresholds) 'thresholds: thresholds.csv SHA-256'
+    Assert-ConfirmRefused 'a wrong thresholds hash' (Test-Confirm @($session1, $session2) -ThresholdsHash ('0' * 64)) 'does not match the frozen'
+    Assert-ConfirmRefused 'a malformed thresholds hash' (Test-Confirm @($session1, $session2) -ThresholdsHash 'abc') 'not a 64-digit'
+    Assert-ConfirmRefused 'missing thresholds' (Test-Confirm @($session1, $session2) -Thresholds (Join-Path $confirmRoot 'none.csv')) 'thresholds.csv not found'
+    Assert-ConfirmRefused 'a frozen manifest edited after the freeze' (Test-Confirm @($session1, $session2) -Freeze ([pscustomobject]@{ Path = $freeze.Path; Sha256 = ('0' * 64) })) 'frozen manifest SHA-256'
+    Assert-ConfirmRefused 'a malformed frozen manifest hash' (Test-Confirm @($session1, $session2) -Freeze ([pscustomobject]@{ Path = $freeze.Path; Sha256 = 'abc' })) 'not a 64-digit hex value'
+
+    # Mixed phases.
+    $pilotDir = New-Session 'pilot-as-session' $freeze $confirmSchedule $block2 -Configuration @{ phase = 'Pilot' }
+    Assert-ConfirmRefused 'a pilot directory among the sessions (mixed phases)' (Test-Confirm @($session1, $pilotDir)) "mixed phases: $pilotDir is phase 'Pilot'"
+    $smokeDir = New-Session 'smoke-as-session' $freeze $confirmSchedule $block2 -Configuration @{ phase = 'Smoke' }
+    Assert-ConfirmRefused 'a smoke directory among the sessions (mixed phases)' (Test-Confirm @($session1, $smokeDir)) "is phase 'Smoke'"
+    $pilotConfiguration = New-ConfirmConfiguration; $pilotConfiguration.phase = 'Pilot'
+    $pilotFreeze = New-Freeze 'pilot' $pilotConfiguration $confirmSchedule
+    $pilotSessions = @((New-Session 'pilot-freeze-1' $pilotFreeze $confirmSchedule ($block1 + $block2) -Configuration @{ phase = 'Pilot' }))
+    Assert-ConfirmRefused 'a pilot freeze given as the confirmatory one' (Test-Confirm $pilotSessions -Freeze $pilotFreeze) "the frozen manifest is phase 'Pilot'"
+    $dryDir = New-Session 'dry-run-session' $freeze $confirmSchedule $block2 -Configuration @{ dryRun = $true }
+    Assert-ConfirmRefused 'a dry run among the sessions' (Test-Confirm @($session1, $dryDir)) 'is a dry run'
+    $otherHead = New-ConfirmConfiguration; $otherHead.gitHead = ('b' * 40)
+    $otherHeadFreeze = New-Freeze 'other-head' $otherHead $confirmSchedule
+    $otherHeadDir = New-Session 'other-head-session' $freeze $confirmSchedule $block2 -ManifestPath $otherHeadFreeze.Path
+    Assert-ConfirmRefused 'a session at another scenario revision' (Test-Confirm @($session1, $otherHeadDir)) 'differs from the frozen manifest: gitHead: frozen'
+    $otherExe = New-ConfirmConfiguration; $otherExe.executables.C.sha256 = ('9' * 64)
+    $otherExeDir = New-Session 'other-exe-session' $freeze $confirmSchedule $block2 -ManifestPath (New-Freeze 'other-exe' $otherExe $confirmSchedule).Path
+    Assert-ConfirmRefused 'a session with another arm C executable' (Test-Confirm @($session1, $otherExeDir)) 'executables.C.sha256: frozen'
+    $otherFrozenDir = New-Session 'other-frozen-sha-session' $freeze $confirmSchedule $block2 -Configuration @{ frozenManifestSha256 = ('1' * 64) }
+    Assert-ConfirmRefused 'a session run against another frozen manifest' (Test-Confirm @($session1, $otherFrozenDir)) 'was run against manifest SHA-256'
+
+    # Missing data.
+    Assert-ConfirmRefused 'a block never run' (Test-Confirm @($session1)) "missing data: run $($block2[0]) was never run"
+    $partial = New-Session 'partial-session' $freeze $confirmSchedule ($block2 | Select-Object -Skip 1)
+    Assert-ConfirmRefused 'one scheduled run never run' (Test-Confirm @($session1, $partial)) "missing data: run $($block2[0]) was never run"
+    foreach ($file in @('configuration.json', 'manifest.json', 'schedule.csv', 'runs.log')) {
+        $without = New-Session "no-$file" $freeze $confirmSchedule $block2 -Skip $file
+        Assert-ConfirmRefused "a session without $file" (Test-Confirm @($session1, $without)) "missing data: $without has no $file"
+    }
+    Assert-ConfirmRefused 'a session directory that does not exist' (Test-Confirm @($session1, (Join-Path $confirmRoot 'absent'))) 'not found'
+    Assert-ConfirmRefused 'no session at all' (Test-Confirm @()) 'missing data: no results directory'
+    Assert-ConfirmRefused 'a missing frozen manifest' (Test-Confirm @($session1, $session2) -Freeze ([pscustomobject]@{ Path = (Join-Path $confirmRoot 'none.json'); Sha256 = $freeze.Sha256 })) 'missing data: frozen manifest'
+
+    # Cell composition.
+    $short = @($confirmSchedule | Select-Object -SkipLast 1)
+    $shortDir = New-Session 'short-schedule' $freeze $short $block2
+    Assert-ConfirmRefused 'a session schedule.csv without one run' (Test-Confirm @($session1, $shortDir)) 'has a schedule.csv other than the frozen schedule'
+    $shortFreeze = New-Freeze 'short' (New-ConfirmConfiguration) $short
+    $shortSessions = @((New-Session 'short-freeze-session' $shortFreeze $short @($short | ForEach-Object { $_.Name })))
+    Assert-ConfirmRefused 'a frozen schedule with an incomplete triplet' (Test-Confirm $shortSessions -Freeze $shortFreeze) 'cell composition: the frozen manifest has 11 runs, not 2 cells x 3 arms x 2 triplets = 12'
+    $oneCell = New-ConfirmConfiguration; $oneCell.cells = @('N2D16')
+    $oneCellSchedule = @(New-CatalogSchedule -Cells N2D16 -Arms A, B, C -Triplets 2 -Seed 3 -DataSeed 1)
+    $oneCellFreeze = New-Freeze 'one-cell' $oneCell $oneCellSchedule
+    $oneCellSessions = @((New-Session 'one-cell-session' $oneCellFreeze $oneCellSchedule @($oneCellSchedule | ForEach-Object { $_.Name })))
+    Assert-ConfirmRefused 'thresholds for a cell the freeze does not have' (Test-Confirm $oneCellSessions -Freeze $oneCellFreeze) 'unexpected: N4D64/'
+    $threeCells = New-ConfirmConfiguration; $threeCells.cells = @('N2D0', 'N2D16', 'N4D64')
+    $threeSchedule = @(New-CatalogSchedule -Cells N2D0, N2D16, N4D64 -Arms A, B, C -Triplets 2 -Seed 3 -DataSeed 1)
+    $threeFreeze = New-Freeze 'three-cells' $threeCells $threeSchedule
+    $threeSessions = @((New-Session 'three-cells-session' $threeFreeze $threeSchedule @($threeSchedule | ForEach-Object { $_.Name })))
+    Assert-ConfirmRefused 'a frozen cell without thresholds' (Test-Confirm $threeSessions -Freeze $threeFreeze) 'missing: N2D0/'
+    $twoArms = New-ConfirmConfiguration; $twoArms.arms = @('A', 'B')
+    $twoArmSchedule = @(New-CatalogSchedule -Cells $confirmCells -Arms A, B -Triplets 2 -Seed 3 -DataSeed 1)
+    $twoArmFreeze = New-Freeze 'two-arms' $twoArms $twoArmSchedule
+    $twoArmSessions = @((New-Session 'two-arms-session' $twoArmFreeze $twoArmSchedule @($twoArmSchedule | ForEach-Object { $_.Name })))
+    Assert-ConfirmRefused 'two arms only' (Test-Confirm $twoArmSessions -Freeze $twoArmFreeze) "arms are 'A,B'"
+    $badCell = New-ConfirmConfiguration; $badCell.cells = @('N2D16', 'N4D64', 'X9')
+    Assert-ConfirmRefused 'a malformed cell name' (Test-Confirm @($session1, $session2) -Freeze (New-Freeze 'bad-cell' $badCell $confirmSchedule)) "'X9' is not a cell name"
+    $doubleCell = New-ConfirmConfiguration; $doubleCell.cells = @('N2D16', 'N4D64', 'N4D64')
+    Assert-ConfirmRefused 'a duplicated cell' (Test-Confirm @($session1, $session2) -Freeze (New-Freeze 'double-cell' $doubleCell $confirmSchedule)) 'duplicated cells N4D64'
+    $moreTriplets = New-ConfirmConfiguration; $moreTriplets.triplets = 3
+    Assert-ConfirmRefused 'a triplet count other than the schedule' (Test-Confirm @($session1, $session2) -Freeze (New-Freeze 'three-triplets' $moreTriplets $confirmSchedule)) 'cell composition: the frozen manifest has 12 runs, not 2 cells x 3 arms x 3 triplets = 18'
+
+    # Runs counted twice or not scheduled; nested sessions.
+    $again = New-Session 'again-session' $freeze $confirmSchedule ($block2 + $block1[0])
+    Assert-ConfirmRefused 'a run in two sessions' (Test-Confirm @($session1, $again)) "run $($block1[0]) has 2 runs.log entries"
+    $extra = New-Session 'extra-session' $freeze $confirmSchedule ($block2 + 'r999-N8D256-A')
+    Assert-ConfirmRefused 'a run that is not scheduled' (Test-Confirm @($session1, $extra)) 'run r999-N8D256-A is in runs.log but not in the frozen schedule'
+    Assert-ConfirmRefused 'the same session twice' (Test-Confirm @($session1, $session1, $session2)) 'given more than once'
+    $nestedSession = New-Session 'session-1\nested' $freeze $confirmSchedule $block2
+    Assert-ConfirmRefused 'a session inside another' (Test-Confirm @($session1, $nestedSession)) 'inside another results directory'
+    $message = ''
+    try { [void](Assert-CatalogConfirmatoryInputs -ResultsDirectories @($session1) -FrozenManifestPath $freeze.Path -FrozenManifestSha256 $freeze.Sha256 -ThresholdsPath $thresholdsFile -ThresholdsSha256 $thresholdsSha) } catch { $message = $_.Exception.Message }
+    Assert-True 'confirmatory inputs: Assert stops with every problem named' ($message -like '*the confirmatory analysis stops:*was never run*') $message
+}
+finally { Remove-Item -LiteralPath $confirmRoot -Recurse -Force -ErrorAction SilentlyContinue }
 
 # --- Whole-run CPU from the job (CatalogJobCpu.ps1, protocol §7 with job CPU).
 # Fixture: app started at t0 in an empty job; phases idle-before t0+1, warm-up
