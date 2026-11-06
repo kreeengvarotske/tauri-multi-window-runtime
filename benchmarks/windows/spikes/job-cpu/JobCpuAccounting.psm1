@@ -135,14 +135,14 @@ public static class TmwrJobCpu
         }
     }
 
-    // Exit state (1 exited, 0 running) and user + kernel ticks of a held handle.
+    // Exit state (1 exited, 0 running), kernel ticks and user ticks of a held handle.
     public static long[] ProcessCpu(IntPtr process)
     {
         uint wait = WaitForSingleObject(process, 0);
         long creation, exit, kernel, user;
         if (!GetProcessTimes(process, out creation, out exit, out kernel, out user))
             throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-        return new long[] { wait == 0 ? 1 : 0, kernel + user };
+        return new long[] { wait == 0 ? 1 : 0, kernel, user };
     }
 
     public static bool WaitExit(IntPtr process, uint milliseconds) { return WaitForSingleObject(process, milliseconds) == 0; }
@@ -187,7 +187,9 @@ function Get-CpuJobAccounting {
         KernelSeconds       = [double]$a[1] / [TimeSpan]::TicksPerSecond
         TotalProcesses      = [int]$a[2]
         ActiveProcesses     = [int]$a[3]
-        TerminatedProcesses = [int]$a[4]
+        # TotalTerminatedProcesses counts only processes the job terminated for a
+        # limit violation, not processes that exited; this job sets no limits.
+        LimitTerminatedProcesses = [int]$a[4]
     }
 }
 
@@ -200,7 +202,12 @@ function Get-HeldProcessCpu {
     # The reference: CPU time through a handle held since the process was created.
     param([Parameter(Mandatory = $true)][IntPtr]$Handle)
     $r = [TmwrJobCpu]::ProcessCpu($Handle)
-    [pscustomobject]@{ Exited = ($r[0] -eq 1); CpuSeconds = [double]$r[1] / [TimeSpan]::TicksPerSecond }
+    [pscustomobject]@{
+        Exited        = ($r[0] -eq 1)
+        CpuSeconds    = ([double]$r[1] + [double]$r[2]) / [TimeSpan]::TicksPerSecond
+        KernelSeconds = [double]$r[1] / [TimeSpan]::TicksPerSecond
+        UserSeconds   = [double]$r[2] / [TimeSpan]::TicksPerSecond
+    }
 }
 
 function Wait-HeldProcess {

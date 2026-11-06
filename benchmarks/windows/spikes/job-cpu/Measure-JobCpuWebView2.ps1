@@ -80,7 +80,7 @@ foreach ($exe in $Executable) {
         $ids = @(Get-CpuJobProcessIds -Job $job)
         $rows.Add([pscustomobject]@{
                 Timestamp = (Get-Date).ToString('o'); CpuSeconds = $a.CpuSeconds.ToString('F7', $culture)
-                TotalProcesses = $a.TotalProcesses; ActiveProcesses = $a.ActiveProcesses; TerminatedProcesses = $a.TerminatedProcesses
+                TotalProcesses = $a.TotalProcesses; ActiveProcesses = $a.ActiveProcesses; LimitTerminatedProcesses = $a.LimitTerminatedProcesses
                 ProcessIds = ($ids -join ';')
             })
         $appDone = Wait-HeldProcess -Handle $app.Handle -TimeoutMilliseconds 0

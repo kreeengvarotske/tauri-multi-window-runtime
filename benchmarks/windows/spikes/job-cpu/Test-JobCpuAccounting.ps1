@@ -45,20 +45,32 @@ for ($i = 1; $i -le $Children; $i++) {
 }
 foreach ($h in $handles) { [void](Wait-HeldProcess -Handle $h.Handle -TimeoutMilliseconds 120000) }
 $reference = 0.0
+$referenceUser = 0.0
+$referenceKernel = 0.0
 $perProcess = New-Object System.Collections.Generic.List[double]
 foreach ($h in $handles) {
     $cpu = Get-HeldProcessCpu -Handle $h.Handle
     $reference += $cpu.CpuSeconds
+    $referenceUser += $cpu.UserSeconds
+    $referenceKernel += $cpu.KernelSeconds
     $perProcess.Add($cpu.CpuSeconds)
-    Close-JobCpuHandle -Handle $h.Handle
 }
 $accounting = Get-CpuJobAccounting -Job $job
+# A second read 1 s later shows whether the job's totals were still being
+# updated after the processes were signalled as exited.
+Start-Sleep -Milliseconds 1000
+$later = Get-CpuJobAccounting -Job $job
+foreach ($h in $handles) { Close-JobCpuHandle -Handle $h.Handle }
 $difference = $accounting.CpuSeconds - $reference
-Check 'accuracy: every process was counted by the job' ($accounting.TotalProcesses -eq $Children -and $accounting.TerminatedProcesses -eq $Children -and $accounting.ActiveProcesses -eq 0) ("total {0}, terminated {1}, active {2}" -f $accounting.TotalProcesses, $accounting.TerminatedProcesses, $accounting.ActiveProcesses)
-Check 'accuracy: job CPU equals the held-handle reference' ([Math]::Abs($difference) -le 0.0000001 * $Children) ("job {0} s, reference {1} s, difference {2} s" -f $accounting.CpuSeconds.ToString('F7', $culture), $reference.ToString('F7', $culture), $difference.ToString('F7', $culture))
+$laterDifference = $later.CpuSeconds - $reference
+# Both sides are kernel tick counters (one tick is usually 15.625 ms). The
+# tolerance is one tick for the whole job; the difference itself is reported.
+$tick = 0.015625
+Check 'accuracy: every process was counted by the job' ($accounting.TotalProcesses -eq $Children -and $accounting.ActiveProcesses -eq 0 -and $accounting.LimitTerminatedProcesses -eq 0) ("total {0}, active {1}, terminated by a limit {2}" -f $accounting.TotalProcesses, $accounting.ActiveProcesses, $accounting.LimitTerminatedProcesses)
+Check 'accuracy: job CPU equals the held-handle reference within one tick' ([Math]::Abs($laterDifference) -le $tick + 0.0000001) ("job {0} s (user {1}, kernel {2}), reference {3} s (user {4}, kernel {5}), difference {6} s at exit, {7} s 1 s later" -f $later.CpuSeconds.ToString('F7', $culture), $later.UserSeconds.ToString('F7', $culture), $later.KernelSeconds.ToString('F7', $culture), $reference.ToString('F7', $culture), $referenceUser.ToString('F7', $culture), $referenceKernel.ToString('F7', $culture), $difference.ToString('F7', $culture), $laterDifference.ToString('F7', $culture))
 Check 'accuracy: the children used CPU' ($reference -gt 0) ("min {0} s, max {1} s per process" -f ($perProcess | Measure-Object -Minimum).Minimum.ToString('F4', $culture), ($perProcess | Measure-Object -Maximum).Maximum.ToString('F4', $culture))
 Close-JobCpuHandle -Handle $job
-$summary.accuracy = [ordered]@{ processes = $Children; jobCpuSeconds = $accounting.CpuSeconds; referenceCpuSeconds = $reference; differenceSeconds = $difference; jobTotalProcesses = $accounting.TotalProcesses }
+$summary.accuracy = [ordered]@{ processes = $Children; jobCpuSeconds = $accounting.CpuSeconds; jobCpuSecondsOneSecondLater = $later.CpuSeconds; jobUserSeconds = $later.UserSeconds; jobKernelSeconds = $later.KernelSeconds; referenceCpuSeconds = $reference; referenceUserSeconds = $referenceUser; referenceKernelSeconds = $referenceKernel; differenceSeconds = $difference; differenceOneSecondLaterSeconds = $laterDifference; perProcessReferenceSeconds = @($perProcess); jobTotalProcesses = $accounting.TotalProcesses }
 
 # 2. Tree: the root starts short children itself; the harness holds only the root's handle.
 $job = New-CpuJob

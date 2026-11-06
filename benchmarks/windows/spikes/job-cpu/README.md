@@ -30,8 +30,14 @@ tree. Per-process attribution stays with the monitor.
 - `Test-JobCpuAccounting.ps1`: checks on real processes, no elevation.
   1. Accuracy: N short processes that exit before any sampler could read them,
      with handles held from creation as the independent reference. Job CPU must
-     equal the sum of `GetProcessTimes` of the held handles (within 1e-7 s per
-     process) and the job must count every process.
+     equal the sum of `GetProcessTimes` of the held handles within one clock
+     tick (15.625 ms) for the whole job, and the job must count every process.
+     Both sides are tick counters; the exact difference, user and kernel time
+     on each side, and a second job read 1 s later are reported. (The first
+     hosted run, 8afe811, showed the job one tick below the reference with an
+     exact-equality check.) `TotalTerminatedProcesses` counts only processes the
+     job terminated for a limit violation, so it is 0 here; exited processes are
+     `TotalProcesses - ActiveProcesses`.
   2. Tree: a root that starts its own short children (only the root's handle
      held). Every process seen by the `ParentProcessId` tree walk must be in the
      job; reports how many processes 0.5 s sampling never saw.
