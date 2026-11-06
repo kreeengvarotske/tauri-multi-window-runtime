@@ -263,29 +263,45 @@ process of the job, running and exited, and the process counts) every
 250 ms and keeps the job's messages (a new-process message with the PID for
 every process added, exit messages, active-zero).
 
-- **Interval.** From the assignment of the suspended app to the empty job
-  (CPU 0 by construction) to the end of the idle-after phase (`endedAt` in
-  the report). `RunCpuSeconds` is the job CPU at the last job row at or
-  before `endedAt`. CPU after `endedAt` (report writing, shutdown) is never
-  counted. `StartupCpuSeconds` (at the warm-up start) and `LoadCpuSeconds`
-  (between the load boundaries) use the same rule and are secondary.
+- **Interval.** From the creation of the app's process to the end of the
+  idle-after phase (`endedAt`, the app's own UTC timestamp in the report).
+  The process is created suspended and runs no instruction before it is
+  assigned to the empty job (CPU 0 by construction), so the job counts it
+  from creation; in the spike (#44) the job equalled a reference read from
+  a handle held from creation (difference 0 in 3 native runs, at most one
+  100 ns tick per process). `RunCpuSeconds` is the job CPU at the last job
+  row at or before `endedAt`. CPU after `endedAt` (report writing,
+  shutdown) is never counted. `StartupCpuSeconds` (at the warm-up start)
+  and `LoadCpuSeconds` (between the load boundaries) use the same rule and
+  are secondary: a gap at one of their boundaries leaves that value empty
+  with a note and does not by itself make the run invalid.
 - **Sampling tolerance.** That row is at most 0.5 s before `endedAt`; no two
   job rows are more than 1 s apart up to the first row after `endedAt`; the
   first row is before the idle-before phase; the wall clock (row and phase
   times) stays within 0.1 s of the runner's monotonic stopwatch over the run.
 - **Counters.** User time, kernel time, the total process count and the
-  timestamps never decrease; no process is terminated by a job limit.
+  timestamps never decrease; the active count is between 0 and the total;
+  no process is terminated by a job limit.
 - **Membership, without PID-list races.** Every process the monitor saw in
   the tree (identity PID and creation time) has a new-process message from
   the job for its PID from 0.1 s before to 5 s after its creation time. A
   message for an earlier or later process with the same PID does not match.
   No PID list read at one moment is used. The messages count only if they
   are complete: as many new-process messages as the job's total count, as
-  many exit messages as exited processes, and an active-zero message.
+  many exit messages as exited processes, and an active-zero message. A
+  monitor file without process identities leaves membership unverified.
 - **End of the run.** Every process of the job has exited at the last job
   row. If the app does not exit within the timeout, or processes of the app
   are still running 30 s after it exited, the runner terminates its own job
   (never a process by name or PID) and the run is invalid.
+- **Failed assignment.** If the suspended app cannot be assigned to its
+  job, the runner terminates it before it runs, records the error in
+  `runs.log` (`jobError`) and the run is invalid.
+- **Gaps and missing data.** No job rows, a row gap over 1 s, a last row
+  more than 0.5 s before `endedAt`, incomplete messages, or a missing job
+  CSV or messages file each make the run's CPU, and so the run, invalid.
+  There is no fallback: the monitor's CPU sum never replaces a missing or
+  invalid job value.
 
 Any failed check makes the run's CPU, and so the run, invalid; the reason
 is named. When the job checks pass, a CPU value the monitor could not read
@@ -302,7 +318,9 @@ The CPU source is recorded by the runner in `configuration.json`
 `job`, a run without its job CSV or job messages file is invalid, whatever
 its monitor data. Results without `cpuSource` (smokes 1 to 3, #36 comments
 up to 6691413600) are legacy: they keep their status and the monitor rule
-below.
+below, and every row of their summary is marked `CpuSource` =
+`legacy-monitor` (job runs: `job`). Any other `cpuSource` value stops the
+summarizer.
 
 Before any smoke on the job runner, a short native check (one N4D64
 triplet with short phases, plan `benchmarks/catalog/plans/job-cpu-check` in
