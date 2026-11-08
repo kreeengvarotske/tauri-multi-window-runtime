@@ -2,6 +2,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$OutputDirectory,
+    [string]$TargetDirectory,
     [switch]$Offline
 )
 
@@ -29,9 +30,8 @@ if (Test-Path -LiteralPath $OutputDirectory) { throw 'Choose a new output direct
 $null = New-Item -ItemType Directory -Path (Join-Path $OutputDirectory 'bin')
 $output = (Resolve-Path -LiteralPath $OutputDirectory).Path
 Assert-CleanScenario
-$target = Join-Path $output 'target'
-$networkArgs = if ($Offline) { @('--offline') } else { @() }
-$npmArgs = if ($Offline) { @('--offline') } else { @() }
+$target = if ($TargetDirectory) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($TargetDirectory) } else { Join-Path $output 'target' }
+$networkArgs = @(if ($Offline) { '--offline' })
 $features = [ordered]@{
     A = 'tauri/custom-protocol'
     B = 'tauri/custom-protocol,shared'
@@ -40,7 +40,7 @@ $features = [ordered]@{
 
 Push-Location $benchRoot
 try {
-    & npm ci @npmArgs
+    & npm ci @networkArgs
     if ($LASTEXITCODE -ne 0) { throw 'npm ci failed.' }
     & npm run build
     if ($LASTEXITCODE -ne 0) { throw 'The catalog frontend build failed.' }
