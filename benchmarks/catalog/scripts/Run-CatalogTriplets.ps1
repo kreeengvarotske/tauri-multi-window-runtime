@@ -115,6 +115,9 @@ if ($Phase -eq 'Pilot' -and -not $DryRun) {
 }
 if ($DryRun -and -not ($ExecutablesFrom -or $SkipBuild)) { throw '-DryRun builds nothing: give -ExecutablesFrom or -SkipBuild.' }
 if ([bool]$Manifest -ne [bool]$ManifestSha256) { throw '-Manifest and -ManifestSha256 go together.' }
+if ($ExecutablesFrom -and $SkipBuild) { throw 'Choose either -ExecutablesFrom or -SkipBuild.' }
+if ($Manifest -and -not ($ExecutablesFrom -or $SkipBuild)) { throw 'A frozen manifest requires prebuilt executables. Give -ExecutablesFrom or -SkipBuild.' }
+$OutputDirectory = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputDirectory)
 $directoryProblems = @(Test-CatalogResultsDirectory -Path $OutputDirectory)
 if ($directoryProblems.Count -gt 0) { throw "Use a new -OutputDirectory: $($directoryProblems -join '; ')" }
 $cargoLock = Join-Path $repoRoot 'Cargo.lock'
@@ -150,12 +153,9 @@ if (-not (Get-Command -Name $MonitorScript).Parameters.ContainsKey('UnitCheckReq
     throw "$MonitorScript has no -UnitCheckRequireChildName; scenario M needs the monitor from #43 (167a67d or later)."
 }
 $cellRows = @($Cells | ForEach-Object { ConvertFrom-CellName $_ })
-New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
-$OutputDirectory = (Resolve-Path -LiteralPath $OutputDirectory).Path
 $binDirectory = Join-Path $OutputDirectory 'bin'
 $runsDirectory = Join-Path $OutputDirectory 'runs'
 $profilesDirectory = Join-Path $OutputDirectory 'profiles'
-New-Item -ItemType Directory -Force -Path $binDirectory, $runsDirectory, $profilesDirectory | Out-Null
 
 $schedule = New-CatalogSchedule -Cells $Cells -Arms $Arms -Triplets $Triplets -Seed $ScheduleSeed -DataSeed $DataSeed
 $expectedScheduleSha256 = $null
@@ -199,10 +199,8 @@ $exe = [ordered]@{}
 foreach ($arm in $Arms) { $exe[$arm] = Join-Path $binDirectory "arm-$arm.exe" }
 $features = @{ A = @(); B = @('--features', 'shared'); C = @('--features', 'framework') }
 
-if ($ExecutablesFrom) {
-    foreach ($arm in $Arms) { Copy-Item -LiteralPath (Join-Path $ExecutablesFrom "bin\arm-$arm.exe") -Destination $exe[$arm] -Force }
-}
-elseif (-not $SkipBuild) {
+if (-not $reusingExecutables) {
+    New-Item -ItemType Directory -Force -Path $binDirectory | Out-Null
     Push-Location $benchRoot
     try {
         Invoke-Checked 'npm ci' { npm ci }
@@ -214,22 +212,18 @@ elseif (-not $SkipBuild) {
     }
     finally { Pop-Location }
 }
-foreach ($arm in $Arms) {
-    if (-not (Test-Path -LiteralPath $exe[$arm])) { throw "Missing $($exe[$arm]); run without -SkipBuild." }
-}
-if ($BuildRecord) {
-    $copiedRecordSha256 = Assert-CatalogBuildRecord -RecordPath $BuildRecord -BinaryDirectory $binDirectory -Arms $Arms -ScenarioRevision $scenarioRevision -FrameworkRevision $frameworkGitRevision -CargoLockSha256 $cargoLockSha256
-    if ($copiedRecordSha256 -ne $buildRecordSha256) { throw 'The build record changed while preparing the run.' }
-}
-
 $os = Get-CimInstance -ClassName Win32_OperatingSystem
 $cpu = @(Get-CimInstance -ClassName Win32_Processor)[0]
 $gitStatus = (& git -C $repoRoot status --porcelain) | Out-String
 $executables = [ordered]@{}
+$sourceExe = [ordered]@{}
 foreach ($arm in $Arms) {
+    $sourceExe[$arm] = if ($ExecutablesFrom) { Join-Path $ExecutablesFrom "bin\arm-$arm.exe" } else { $exe[$arm] }
+    $file = $sourceExe[$arm]
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Missing executable $file." }
     $executables[$arm] = [ordered]@{
-        sha256 = (Get-FileHash -LiteralPath $exe[$arm] -Algorithm SHA256).Hash
-        bytes  = (Get-Item -LiteralPath $exe[$arm]).Length
+        sha256 = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+        bytes  = (Get-Item -LiteralPath $file).Length
     }
 }
 $configuration = [ordered]@{
@@ -292,6 +286,19 @@ if ($Manifest) {
     $frozenManifestSha256 = Assert-CatalogManifest -FrozenPath $Manifest -FrozenSha256 $ManifestSha256 -Current $runManifest
     $configuration['frozenManifest'] = (Resolve-Path -LiteralPath $Manifest).Path
     $configuration['frozenManifestSha256'] = $frozenManifestSha256
+}
+New-Item -ItemType Directory -Force -Path $binDirectory, $runsDirectory, $profilesDirectory | Out-Null
+if ($ExecutablesFrom) {
+    foreach ($arm in $Arms) {
+        Copy-Item -LiteralPath $sourceExe[$arm] -Destination $exe[$arm] -ErrorAction Stop
+        if ((Get-FileHash -LiteralPath $exe[$arm] -Algorithm SHA256).Hash -ne $executables[$arm].sha256) {
+            throw "Arm $arm changed while preparing the run."
+        }
+    }
+}
+if ($BuildRecord) {
+    $copiedRecordSha256 = Assert-CatalogBuildRecord -RecordPath $BuildRecord -BinaryDirectory $binDirectory -Arms $Arms -ScenarioRevision $scenarioRevision -FrameworkRevision $frameworkGitRevision -CargoLockSha256 $cargoLockSha256
+    if ($copiedRecordSha256 -ne $buildRecordSha256) { throw 'The build record changed while preparing the run.' }
 }
 $configuration | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'configuration.json') -Encoding UTF8
 $runManifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'manifest.json') -Encoding UTF8

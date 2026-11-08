@@ -20,6 +20,8 @@ The runner records the resolved framework SHA for arm C and the SHA-256 of `Carg
 
 Use `scripts/Build-CatalogArms.ps1 -OutputDirectory <new build directory>` from a clean checkout to generate the record and `bin/arm-*.exe` without running the workload. Keep the build directory outside the checkout or under an ignored path. `-Offline` uses cached npm and Cargo dependencies.
 
+When replaying a frozen manifest, supply prebuilt executables with either `-ExecutablesFrom` or `-SkipBuild`. The runner checks the source executable hashes and the frozen manifest before creating the output directories or copying binaries.
+
 At startup, arm C loads the catalog into the runtime's cache before the windows open, as arms A and B generate it at startup. The runner still refuses `-Phase Pilot` (except a `-DryRun`, which starts no app; see Running) until there is a native smoke of all three arms and the frozen protocol has had its final check (#33 §10).
 
 Everything else is the same in all arms: the frontend (`src/window.ts` runs one window; only `setupSource` picks the source), the table, the windows (`main`, `w1`…), the workload, the timing, the release profile, `Cargo.lock` (the crate is a member of the root workspace) and `--locked`. Runtime Lab and its public IPC contract are not touched; the `catalog_*` commands exist only in this app.

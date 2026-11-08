@@ -77,6 +77,7 @@ function Test-Refused {
     param([string]$Name, [object]$Result, [string]$Directory, [string]$Expected)
     Assert-True "${Name}: refused (non-zero exit)" ($Result.ExitCode -ne 0) "exit $($Result.ExitCode)"
     Assert-True "${Name}: says why" (Test-Says $Result $Expected) "expected '$Expected' in: $($Result.Output.Trim())"
+    Assert-True "${Name}: output directory was not created" (-not (Test-Path -LiteralPath $Directory))
     foreach ($file in @('configuration.json', 'schedule.csv', 'manifest.json')) {
         Assert-True "${Name}: no $file written" (-not (Test-Path -LiteralPath (Join-Path $Directory $file)))
     }
@@ -185,6 +186,14 @@ try {
     $frozenSha = (Get-FileHash -LiteralPath $frozen -Algorithm SHA256).Hash.ToLowerInvariant()
     Assert-True 'freeze: the dry run printed the manifest SHA-256' (Test-Says $result $frozenSha)
     $freeze = @('-Manifest', $frozen, '-ManifestSha256', $frozenSha)
+
+    $noPrebuilt = Join-Path $root 'frozen-without-prebuilt'
+    $result = Invoke-Native -File $hostExe -Arguments (@(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $runner,
+        '-Phase', 'Smoke', '-MonitorScript', $monitor, '-OutputDirectory', $noPrebuilt
+    ) + $freeze)
+    $result | Add-Member -NotePropertyName Flat -NotePropertyValue ($result.Output -replace '\s', '')
+    Test-Refused -Name 'frozen manifest without prebuilt inputs' -Result $result -Directory $noPrebuilt -Expected 'requires prebuilt executables'
 
     # --- 3. The same invocation against the frozen manifest passes, in a new directory.
     $same = Join-Path $root 'pilot-same'
