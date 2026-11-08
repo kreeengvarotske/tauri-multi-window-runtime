@@ -142,6 +142,35 @@ try {
         $pinRejected = $_.Exception.Message -like '*does not match Cargo.lock*'
     }
     Assert-True 'a lockfile pinned to a different revision is rejected' $pinRejected
+
+    $buildRecord = Join-Path $root 'build-record.json'
+    $record = [ordered]@{
+        kind = 'build-only'
+        scenarioRevision = $manifest.gitHead
+        frameworkRevision = $manifest.frameworkGitRevision
+        cargoLockSha256 = $manifest.cargoLockSha256
+        artifacts = @(foreach ($arm in 'A', 'B', 'C') {
+            $name = "arm-$arm.exe"
+            @{ name = $name; sha256 = (Get-FileHash -LiteralPath (Join-Path $from "bin\$name") -Algorithm SHA256).Hash }
+        })
+    }
+    $record | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $buildRecord -Encoding UTF8
+    $withRecord = Join-Path $root 'with-build-record'
+    $recordResult = Invoke-DryRun -Output $withRecord -From $from -Extra @('-BuildRecord', $buildRecord)
+    Assert-True 'matching build record is accepted' ($recordResult.ExitCode -eq 0) $recordResult.Output
+    if ($recordResult.ExitCode -eq 0) {
+        $recordManifest = Get-Content -LiteralPath (Join-Path $withRecord 'manifest.json') -Raw | ConvertFrom-Json
+        Assert-True 'the manifest freezes the build record hash' ($recordManifest.buildRecordSha256 -eq (Get-FileHash -LiteralPath $buildRecord -Algorithm SHA256).Hash)
+    }
+    Test-NothingStarted -Name 'with build record' -Directory $withRecord
+    $record.artifacts[2].sha256 = '0' * 64
+    $record | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $buildRecord -Encoding UTF8
+    $wrong = Join-Path $root 'wrong-build-record'
+    $recordResult = Invoke-DryRun -Output $wrong -From $from -Extra @('-BuildRecord', $buildRecord)
+    Test-Refused -Name 'build record with wrong binary hash' -Result $recordResult -Directory $wrong -Expected 'arm-C.exe does not match'
+    $missing = Join-Path $root 'missing-build-record'
+    $recordResult = Invoke-DryRun -Output $missing -From $from -Settings @{ Phase = 'Smoke' } -NoDryRun
+    Test-Refused -Name 'reused binaries without build record' -Result $recordResult -Directory $missing -Expected 'require -BuildRecord'
     Assert-True 'dry run: manifest has 72 runs and the schedule content hash' ($manifest.runs -eq 72 -and $manifest.scheduleContentSha256 -eq (Get-CatalogScheduleSha256 -Schedule $schedule))
     Assert-True 'dry run: manifest has the phase, cells and triplets' ($manifest.phase -eq 'Pilot' -and (@($manifest.cells) -join ',') -eq ($pilotCells -join ',') -and $manifest.triplets -eq 6)
     Assert-True 'dry run: manifest has the monitor SHA and its git head' ($manifest.monitorSha256 -eq (Get-FileHash -LiteralPath $monitor -Algorithm SHA256).Hash -and $manifest.monitorGitHead -match '^[0-9a-f]{40}$')

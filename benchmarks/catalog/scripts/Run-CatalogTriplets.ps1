@@ -6,7 +6,7 @@ the process monitor (protocol: docs/benchmark/memory-pilot-protocol.md).
 .DESCRIPTION
 Arms: A = per-window JS copy (no feature), B = hand-written shared Rust
 service (--features shared), C = the same catalog through shared-runtime
-(--features framework; #35 at b65177d, merged in for arm C). -Phase Pilot
+(--features framework; Git revision pinned in Cargo.toml). -Phase Pilot
 still refuses to start (except with -DryRun, which starts no app): the pilot runs only after a native smoke of all
 three arms and the final check of the frozen protocol (#33 §10).
 
@@ -78,6 +78,9 @@ param(
     # Copy bin\arm-*.exe from an earlier results directory instead of building.
     [string]$ExecutablesFrom,
 
+    # Required when reusing executables for a real run. Optional for dry runs.
+    [string]$BuildRecord,
+
     # A schedule.csv written and reviewed before the run (plans\). The
     # runner stops before building if the schedule it would follow differs
     # from this file in any field or order.
@@ -117,6 +120,26 @@ if ($directoryProblems.Count -gt 0) { throw "Use a new -OutputDirectory: $($dire
 $cargoLock = Join-Path $repoRoot 'Cargo.lock'
 $frameworkGitRevision = if ($Arms -contains 'C') {
     Get-CatalogFrameworkRevision -ManifestPath (Join-Path $benchRoot 'src-tauri\Cargo.toml') -LockPath $cargoLock
+} else { $null }
+$scenarioRevision = ((& git -C $repoRoot rev-parse HEAD) | Out-String).Trim()
+if ($LASTEXITCODE -ne 0) { throw 'Could not resolve the scenario Git revision.' }
+$cargoLockSha256 = (Get-FileHash -LiteralPath $cargoLock -Algorithm SHA256).Hash
+$reusingExecutables = $ExecutablesFrom -or $SkipBuild
+if ($reusingExecutables -and -not $DryRun -and -not $BuildRecord) {
+    throw 'Reused executables require -BuildRecord before any app can start.'
+}
+if ($BuildRecord -and -not $reusingExecutables) {
+    throw '-BuildRecord requires -ExecutablesFrom or -SkipBuild.'
+}
+if ($BuildRecord -and -not $DryRun) {
+    $statusBeforeRun = & git -C $repoRoot status --porcelain
+    if ($LASTEXITCODE -ne 0 -or $statusBeforeRun) {
+        throw 'Reusing executables in a real run requires a clean scenario checkout.'
+    }
+}
+$buildRecordSha256 = if ($BuildRecord) {
+    $binaryRoot = if ($ExecutablesFrom) { $ExecutablesFrom } else { $OutputDirectory }
+    Assert-CatalogBuildRecord -RecordPath $BuildRecord -BinaryDirectory (Join-Path $binaryRoot 'bin') -Arms $Arms -ScenarioRevision $scenarioRevision -FrameworkRevision $frameworkGitRevision -CargoLockSha256 $cargoLockSha256
 } else { $null }
 
 $MonitorScript = (Resolve-Path -LiteralPath $MonitorScript).Path
@@ -194,6 +217,10 @@ elseif (-not $SkipBuild) {
 foreach ($arm in $Arms) {
     if (-not (Test-Path -LiteralPath $exe[$arm])) { throw "Missing $($exe[$arm]); run without -SkipBuild." }
 }
+if ($BuildRecord) {
+    $copiedRecordSha256 = Assert-CatalogBuildRecord -RecordPath $BuildRecord -BinaryDirectory $binDirectory -Arms $Arms -ScenarioRevision $scenarioRevision -FrameworkRevision $frameworkGitRevision -CargoLockSha256 $cargoLockSha256
+    if ($copiedRecordSha256 -ne $buildRecordSha256) { throw 'The build record changed while preparing the run.' }
+}
 
 $os = Get-CimInstance -ClassName Win32_OperatingSystem
 $cpu = @(Get-CimInstance -ClassName Win32_Processor)[0]
@@ -219,10 +246,11 @@ $configuration = [ordered]@{
     npm                   = Get-CommandVersion 'npm' @('--version')
     rustc                 = Get-CommandVersion 'rustc' @('--version')
     cargo                 = Get-CommandVersion 'cargo' @('--version')
-    gitHead               = ((& git -C $repoRoot rev-parse HEAD) | Out-String).Trim()
+    gitHead               = $scenarioRevision
     gitDirty              = -not [string]::IsNullOrWhiteSpace($gitStatus)
     frameworkGitRevision  = $frameworkGitRevision
-    cargoLockSha256       = (Get-FileHash -LiteralPath $cargoLock -Algorithm SHA256).Hash
+    cargoLockSha256       = $cargoLockSha256
+    buildRecordSha256     = $buildRecordSha256
     gitStatus             = $gitStatus.Trim()
     monitorScript         = $MonitorScript
     monitorSha256         = (Get-FileHash -LiteralPath $MonitorScript -Algorithm SHA256).Hash

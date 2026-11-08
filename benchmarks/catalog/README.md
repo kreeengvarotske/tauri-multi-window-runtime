@@ -16,7 +16,9 @@ This preparation branch pins arm C to the local Windows Preview candidate `2dac9
 - a 10 s deadline and a 2 s shutdown grace;
 - a cache budget of 2 × `D` + 16 MiB.
 
-The runner records the resolved framework SHA for arm C and the SHA-256 of `Cargo.lock` in the manifest. Rebuild any supplied executables from the pinned source and retain their build record before freezing a run. The runner hashes supplied files, which identifies the files without establishing how they were built.
+The runner records the resolved framework SHA for arm C and the SHA-256 of `Cargo.lock` in the manifest. To reuse executables in a real run, provide `-BuildRecord <build-record.json>` with `-ExecutablesFrom` or `-SkipBuild`. The record must contain `kind: "build-only"`, the exact `scenarioRevision`, `frameworkRevision`, `cargoLockSha256`, and one `artifacts` entry with `name` and `sha256` for each reused arm. The runner checks those inputs and hashes the record into the freeze. These checks catch stale or changed artifacts. Retain the original build log as evidence of how the executables were produced.
+
+Use `scripts/Build-CatalogArms.ps1 -OutputDirectory <new build directory>` from a clean checkout to generate the record and `bin/arm-*.exe` without running the workload. Keep the build directory outside the checkout or under an ignored path. `-Offline` uses cached npm and Cargo dependencies.
 
 At startup, arm C loads the catalog into the runtime's cache before the windows open, as arms A and B generate it at startup. The runner still refuses `-Phase Pilot` (except a `-DryRun`, which starts no app; see Running) until there is a native smoke of all three arms and the frozen protocol has had its final check (#33 §10).
 
@@ -81,7 +83,8 @@ One run by hand: `catalog-bench.exe --data-mib 16 --windows 2 --report out.json`
 ```powershell
 # Pilot dry run (6 triplets x 4 cells x 3 arms = 72 runs), no app started:
 .\scripts\Run-CatalogTriplets.ps1 -Phase Pilot -DryRun -Triplets 6 -ScheduleSeed 1 -DataSeed 1 `
-  -ExecutablesFrom <smoke results> -MonitorScript <tmwr-pr43>\benchmarks\windows\Measure-ProcessTree.ps1 -OutputDirectory <new dir>
+  -ExecutablesFrom <build directory> -BuildRecord <build directory>\build-record.json `
+  -MonitorScript <tmwr-pr43>\benchmarks\windows\Measure-ProcessTree.ps1 -OutputDirectory <new dir>
 ```
 
 `Test-CatalogPilotDryRun.ps1` (Windows, CI in both PowerShell versions) runs that dry run with stand-in executables and a stub monitor that leaves a marker if started, checks the 72-run schedule and the manifest, freezes it, passes an unchanged invocation in a new directory (byte-identical manifest), and checks the refusals: another schedule seed, data seed, phase length, pause, step interval, triplet count or phase, an arm executable one byte longer, another monitor git head, a manifest edited after the freeze, a wrong, malformed or missing hash or file, a used or nested results directory, and `-Phase Pilot` without `-DryRun`.

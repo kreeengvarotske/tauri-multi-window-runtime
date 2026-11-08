@@ -11,7 +11,7 @@
 
 $script:CatalogManifestFields = @(
     'phase', 'machine', 'os', 'webView2', 'gitHead', 'gitDirty', 'monitorGitHead', 'monitorSha256', 'monitorUnitCheckRequireChildName',
-    'frameworkGitRevision', 'cargoLockSha256',
+    'frameworkGitRevision', 'cargoLockSha256', 'buildRecordSha256',
     'cpuSource', 'jobLimits', 'jobScriptSha256', 'executables', 'sampleIntervalSeconds', 'cells', 'arms', 'triplets', 'scheduleSeed', 'dataSeed',
     'idleBeforeSeconds', 'warmupSeconds', 'loadSeconds', 'idleAfterSeconds', 'pauseSeconds', 'stepIntervalMs',
     'runScriptSha256', 'scheduleScriptSha256', 'summarizeScriptSha256', 'manifestScriptSha256', 'readmeSha256', 'protocolSha256'
@@ -31,6 +31,32 @@ function Get-CatalogFrameworkRevision {
         throw "Arm C's shared-runtime Git pin $revision does not match Cargo.lock."
     }
     return $revision
+}
+
+function Assert-CatalogBuildRecord {
+    param(
+        [string]$RecordPath, [string]$BinaryDirectory, [string[]]$Arms,
+        [string]$ScenarioRevision, [string]$FrameworkRevision, [string]$CargoLockSha256
+    )
+    $record = Get-Content -LiteralPath $RecordPath -Raw | ConvertFrom-Json
+    if ($record.kind -ne 'build-only' -or $record.scenarioRevision -ne $ScenarioRevision -or
+        $record.cargoLockSha256 -ne $CargoLockSha256) {
+        throw 'The build record does not match the scenario revision and Cargo.lock.'
+    }
+    if ($Arms -contains 'C' -and $record.frameworkRevision -ne $FrameworkRevision) {
+        throw 'The build record does not match the framework Git revision for arm C.'
+    }
+    foreach ($arm in $Arms) {
+        $name = "arm-$arm.exe"
+        $entries = @($record.artifacts | Where-Object { $_.name -ceq $name })
+        if ($entries.Count -ne 1) { throw "Expected one build record entry for $name." }
+        $file = Join-Path $BinaryDirectory $name
+        if (-not (Test-Path -LiteralPath $file -PathType Leaf) -or
+            (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ne $entries[0].sha256) {
+            throw "The executable $name does not match the build record."
+        }
+    }
+    return (Get-FileHash -LiteralPath $RecordPath -Algorithm SHA256).Hash
 }
 
 function Get-CatalogScheduleSha256 {
