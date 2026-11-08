@@ -11,10 +11,27 @@
 
 $script:CatalogManifestFields = @(
     'phase', 'machine', 'os', 'webView2', 'gitHead', 'gitDirty', 'monitorGitHead', 'monitorSha256', 'monitorUnitCheckRequireChildName',
+    'frameworkGitRevision', 'cargoLockSha256',
     'cpuSource', 'jobLimits', 'jobScriptSha256', 'executables', 'sampleIntervalSeconds', 'cells', 'arms', 'triplets', 'scheduleSeed', 'dataSeed',
     'idleBeforeSeconds', 'warmupSeconds', 'loadSeconds', 'idleAfterSeconds', 'pauseSeconds', 'stepIntervalMs',
     'runScriptSha256', 'scheduleScriptSha256', 'summarizeScriptSha256', 'manifestScriptSha256', 'readmeSha256', 'protocolSha256'
 )
+
+function Get-CatalogFrameworkRevision {
+    param([string]$ManifestPath, [string]$LockPath)
+    $source = 'https://github.com/kreeengvarotske/tauri-multi-window-runtime.git'
+    $manifest = Get-Content -LiteralPath $ManifestPath -Raw
+    $pin = [regex]::Match($manifest, '(?m)^shared-runtime = \{ git = "' + [regex]::Escape($source) + '", rev = "(?<sha>[0-9a-f]{40})", optional = true \}\r?$')
+    if (-not $pin.Success) { throw 'Arm C requires an optional shared-runtime Git dependency pinned to a full SHA.' }
+    $revision = $pin.Groups['sha'].Value
+    $gitSource = [regex]::Escape(('git+{0}?rev={1}#{1}' -f $source, $revision))
+    $lock = Get-Content -LiteralPath $LockPath -Raw
+    $package = '(?m)^\[\[package\]\]\r?\nname = "shared-runtime"\r?\nversion = "[^"]+"\r?\nsource = "' + $gitSource + '"\r?$'
+    if ([regex]::Matches($lock, $package).Count -ne 1) {
+        throw "Arm C's shared-runtime Git pin $revision does not match Cargo.lock."
+    }
+    return $revision
+}
 
 function Get-CatalogScheduleSha256 {
     # Hash of the schedule's content (fields in a fixed order, one line per

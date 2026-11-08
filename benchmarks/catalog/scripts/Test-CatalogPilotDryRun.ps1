@@ -128,6 +128,20 @@ try {
     $configuration = Get-Content -LiteralPath (Join-Path $dry 'configuration.json') -Raw | ConvertFrom-Json
     Assert-True 'dry run: configuration says Pilot, dry run, job CPU' ($configuration.phase -eq 'Pilot' -and $configuration.dryRun -eq $true -and $configuration.cpuSource -eq 'job')
     $manifest = Get-Content -LiteralPath (Join-Path $dry 'manifest.json') -Raw | ConvertFrom-Json
+    $repoRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
+    $cargoLock = Join-Path $repoRoot 'Cargo.lock'
+    Assert-True 'dry run records the preview framework SHA' ($manifest.frameworkGitRevision -eq '2dac921fcccde1bbadd86da16dbb3136d00341da')
+    Assert-True 'dry run freezes the Cargo lockfile hash' ($manifest.cargoLockSha256 -eq (Get-FileHash -LiteralPath $cargoLock -Algorithm SHA256).Hash)
+    $invalidLock = Join-Path $root 'wrong-pin.lock'
+    (Get-Content -LiteralPath $cargoLock -Raw).Replace($manifest.frameworkGitRevision, ('0' * 40)) |
+        Set-Content -LiteralPath $invalidLock -Encoding UTF8
+    $pinRejected = $false
+    try {
+        $null = Get-CatalogFrameworkRevision -ManifestPath (Join-Path $PSScriptRoot '..\src-tauri\Cargo.toml') -LockPath $invalidLock
+    } catch {
+        $pinRejected = $_.Exception.Message -like '*does not match Cargo.lock*'
+    }
+    Assert-True 'a lockfile pinned to a different revision is rejected' $pinRejected
     Assert-True 'dry run: manifest has 72 runs and the schedule content hash' ($manifest.runs -eq 72 -and $manifest.scheduleContentSha256 -eq (Get-CatalogScheduleSha256 -Schedule $schedule))
     Assert-True 'dry run: manifest has the phase, cells and triplets' ($manifest.phase -eq 'Pilot' -and (@($manifest.cells) -join ',') -eq ($pilotCells -join ',') -and $manifest.triplets -eq 6)
     Assert-True 'dry run: manifest has the monitor SHA and its git head' ($manifest.monitorSha256 -eq (Get-FileHash -LiteralPath $monitor -Algorithm SHA256).Hash -and $manifest.monitorGitHead -match '^[0-9a-f]{40}$')

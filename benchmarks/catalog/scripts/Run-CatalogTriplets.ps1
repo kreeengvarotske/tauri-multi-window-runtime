@@ -114,6 +114,10 @@ if ($DryRun -and -not ($ExecutablesFrom -or $SkipBuild)) { throw '-DryRun builds
 if ([bool]$Manifest -ne [bool]$ManifestSha256) { throw '-Manifest and -ManifestSha256 go together.' }
 $directoryProblems = @(Test-CatalogResultsDirectory -Path $OutputDirectory)
 if ($directoryProblems.Count -gt 0) { throw "Use a new -OutputDirectory: $($directoryProblems -join '; ')" }
+$cargoLock = Join-Path $repoRoot 'Cargo.lock'
+$frameworkGitRevision = if ($Arms -contains 'C') {
+    Get-CatalogFrameworkRevision -ManifestPath (Join-Path $benchRoot 'src-tauri\Cargo.toml') -LockPath $cargoLock
+} else { $null }
 
 $MonitorScript = (Resolve-Path -LiteralPath $MonitorScript).Path
 # Scenario M verifies the PrivatePageCount unit on a stable WebView2 child,
@@ -217,6 +221,8 @@ $configuration = [ordered]@{
     cargo                 = Get-CommandVersion 'cargo' @('--version')
     gitHead               = ((& git -C $repoRoot rev-parse HEAD) | Out-String).Trim()
     gitDirty              = -not [string]::IsNullOrWhiteSpace($gitStatus)
+    frameworkGitRevision  = $frameworkGitRevision
+    cargoLockSha256       = (Get-FileHash -LiteralPath $cargoLock -Algorithm SHA256).Hash
     gitStatus             = $gitStatus.Trim()
     monitorScript         = $MonitorScript
     monitorSha256         = (Get-FileHash -LiteralPath $MonitorScript -Algorithm SHA256).Hash

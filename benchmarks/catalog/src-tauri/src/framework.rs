@@ -1,4 +1,4 @@
-//! Arm C: the catalog served through `shared-runtime` (#35 at b65177d).
+//! Arm C: the catalog served through the preview revision pinned in Cargo.toml.
 //!
 //! The catalog with its indexes is the output of one `Shared` operation,
 //! cached until the app exits; pages, totals and records are `View`s of it.

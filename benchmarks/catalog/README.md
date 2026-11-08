@@ -10,11 +10,13 @@ One source, one executable per arm. Only the data source differs:
 | **B** shared, hand-written | `shared` | one `Catalog` with its indexes, managed Tauri state; `catalog_page`, `catalog_aggregate`, `catalog_get` | one page (≤ 100 rows), the 32 totals or ≤ 20 records |
 | **C** framework | `framework` | the same `Catalog` and indexes as the cached output of one `Shared` operation (`catalog.load`, `CachePolicy::Forever`) in `shared-runtime`; pages, totals and records are `View`s that charge a `ResponseBudget` per item; the same three commands with the same request checks | as B |
 
-Arm C uses `shared-runtime` from #35 at `b65177d76fbea799e3afe6504ff255cec7c0da88`. That is the head Group 1 reviewed and accepted for arm C (#35 comment 6446126629). It is merged into this branch by merge commit `29aece3`, on top of `5be3846`. Nothing else in #35 is changed here. The runtime limits are set in `framework::runtime_config`:
+This preparation branch pins arm C to the local Windows Preview candidate `2dac921fcccde1bbadd86da16dbb3136d00341da`. The earlier #35 arm remains part of the historical benchmark evidence. A fresh build needs access to the pinned Git commit. A and B continue to build without the framework feature. The runtime limits are set in `framework::runtime_config`:
 - one execution slot and a queue of 4;
 - `N` concurrent projections;
 - a 10 s deadline and a 2 s shutdown grace;
 - a cache budget of 2 × `D` + 16 MiB.
+
+The runner records the resolved framework SHA for arm C and the SHA-256 of `Cargo.lock` in the manifest. Rebuild any supplied executables from the pinned source and retain their build record before freezing a run. The runner hashes supplied files, which identifies the files without establishing how they were built.
 
 At startup, arm C loads the catalog into the runtime's cache before the windows open, as arms A and B generate it at startup. The runner still refuses `-Phase Pilot` (except a `-DryRun`, which starts no app; see Running) until there is a native smoke of all three arms and the frozen protocol has had its final check (#33 §10).
 

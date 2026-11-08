@@ -14,7 +14,7 @@ crate-type = ["rlib"]
 # and keeps its own copy of the catalog in JS. With `shared`: arm B, a
 # hand-written Rust service keeps one copy and windows request bounded views.
 shared = []
-# Arm C: the same catalog as an `Operation` of `shared-runtime` (#35), with
+# Arm C: the same catalog as an `Operation` of the pinned preview runtime, with
 # pages, totals and records as `View`s behind the same three commands.
 framework = ["dep:shared-runtime"]
 
@@ -24,5 +24,5 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-shared-runtime = { path = "../../../crates/shared-runtime", optional = true }
+shared-runtime = { git = "https://github.com/kreeengvarotske/tauri-multi-window-runtime.git", rev = "2dac921fcccde1bbadd86da16dbb3136d00341da", optional = true }
 tauri = { version = "2", features = [] }
