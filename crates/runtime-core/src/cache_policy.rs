@@ -1,31 +1,30 @@
 use std::time::{Duration, Instant};
 
-/// Определяет, как долго результат может храниться в кэше.
+/// Controls how long a result can stay in the cache.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CachePolicy {
-    /// Не сохранять результат после завершения операции.
+    /// Do not retain the result after the operation finishes.
     NoStore,
 
-    /// Хранить результат в течение указанного времени.
+    /// Retain the result for this duration. Zero disables storage.
     Ttl(Duration),
 
-    /// Хранить результат до явной инвалидации.
+    /// Retain the result until invalidation or eviction.
     Forever,
 }
 
 impl CachePolicy {
-    /// Можно ли сохранять результат при такой политике.
+    /// Whether this policy permits storing a result.
     pub const fn should_store(self) -> bool {
-        !matches!(self, Self::NoStore)
+        match self {
+            Self::NoStore => false,
+            Self::Ttl(ttl) => !ttl.is_zero(),
+            Self::Forever => true,
+        }
     }
 
-    /// Нужно ли считать запись устаревшей.
-    ///
-    /// `inserted_at` — момент сохранения результата в кэш.
-    /// `now` — момент проверки.
-    ///
-    /// При TTL запись истекает точно на границе времени:
-    /// elapsed >= ttl.
+    /// Whether the entry has expired at `now`. A TTL expires at the exact
+    /// boundary, when the time since `inserted_at` reaches the TTL.
     pub fn is_expired(self, inserted_at: Instant, now: Instant) -> bool {
         match self {
             Self::NoStore => true,
@@ -74,7 +73,7 @@ mod tests {
         let policy = CachePolicy::Ttl(Duration::ZERO);
         let now = Instant::now();
 
-        assert!(policy.should_store());
+        assert!(!policy.should_store());
         assert!(policy.is_expired(now, now));
     }
 

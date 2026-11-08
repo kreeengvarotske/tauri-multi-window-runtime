@@ -2,7 +2,11 @@
 name = "runtime-core"
 version = "0.1.0"
 edition = "2024"
+description = "Cache and concurrent request coalescing primitives for the Tauri shared runtime"
+repository = "https://github.com/kreeengvarotske/tauri-multi-window-runtime"
 
 [dependencies]
 tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
-    
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread"] }
