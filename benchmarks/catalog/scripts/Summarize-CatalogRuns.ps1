@@ -111,8 +111,8 @@ function Format-Raw {
 }
 
 function Get-Time {
-    param([string]$Text)
-    return [DateTimeOffset]::Parse($Text, $culture)
+    param([object]$Value)
+    ConvertTo-CatalogTimestamp $Value
 }
 
 function Select-Phase {
@@ -246,9 +246,9 @@ foreach ($planned in $schedule) {
             $row.MonitorRows = $samples.Count
             $loadFrom = Get-Time $report.phases.loadStartedAt
             $loadTo = Get-Time $report.phases.loadEndedAt
-            $load = Select-Phase $samples $loadFrom $loadTo
-            $idleBefore = Select-Phase $samples (Get-Time $report.phases.idleBeforeStartedAt) (Get-Time $report.phases.warmupStartedAt)
-            $idleAfter = Select-Phase $samples $loadTo (Get-Time $report.phases.endedAt)
+            $load = @(Select-Phase $samples $loadFrom $loadTo)
+            $idleBefore = @(Select-Phase $samples (Get-Time $report.phases.idleBeforeStartedAt) (Get-Time $report.phases.warmupStartedAt))
+            $idleAfter = @(Select-Phase $samples $loadTo (Get-Time $report.phases.endedAt))
             $row.LoadRows = $load.Count
             $row.LoadRowsExpected = [Math]::Floor(($loadTo - $loadFrom).TotalSeconds / $nominalInterval)
             $row.LoadCoverage = if ($row.LoadRowsExpected -gt 0) { $load.Count / $row.LoadRowsExpected } else { $null }

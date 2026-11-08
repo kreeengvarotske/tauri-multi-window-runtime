@@ -440,6 +440,16 @@ function ConvertTo-CatalogJobMessageRows {
         })
 }
 
+function ConvertTo-CatalogTimestamp {
+    param([object]$Value)
+    # PowerShell 7 can deserialize ISO JSON timestamps directly to DateTime.
+    # Keep its UTC kind and precision rather than converting through a string.
+    if ($Value -is [DateTime] -or $Value -is [DateTimeOffset]) {
+        return [DateTimeOffset]$Value
+    }
+    return [DateTimeOffset]::Parse([string]$Value, [Globalization.CultureInfo]::InvariantCulture)
+}
+
 function Wait-CatalogMonitorExit {
     param([AllowNull()]$Process)
     if ($null -eq $Process) { return $null }
@@ -625,8 +635,8 @@ function Get-CatalogJobCpu {
     }
     $parsed = @(ConvertFrom-CatalogJobRows $Rows)
     if ($parsed.Count -eq 0) { $problems.Add('no job rows'); return [pscustomobject]$result }
-    $idleBefore = [DateTimeOffset]::Parse([string]$Phases.idleBeforeStartedAt, $culture)
-    $end = [DateTimeOffset]::Parse([string]$Phases.endedAt, $culture)
+    $idleBefore = ConvertTo-CatalogTimestamp $Phases.idleBeforeStartedAt
+    $end = ConvertTo-CatalogTimestamp $Phases.endedAt
 
     # Counters never decrease; nothing was terminated by a job limit.
     for ($i = 1; $i -lt $parsed.Count; $i++) {
@@ -657,10 +667,10 @@ function Get-CatalogJobCpu {
     $atEnd = Get-CatalogJobValueAt -Rows $parsed -Time $end -MaxGapSeconds $Limits.MaxBoundaryGapSeconds
     if ($null -ne $atEnd.Problem) { $problems.Add("end of the interval: $($atEnd.Problem)") }
     elseif ($null -ne $atEnd.Row) { $result.RunCpuSeconds = $atEnd.Row.Cpu; $result.EndGapSeconds = $atEnd.GapSeconds }
-    $atWarmup = Get-CatalogJobValueAt -Rows $parsed -Time ([DateTimeOffset]::Parse([string]$Phases.warmupStartedAt, $culture)) -MaxGapSeconds $Limits.MaxBoundaryGapSeconds
+    $atWarmup = Get-CatalogJobValueAt -Rows $parsed -Time (ConvertTo-CatalogTimestamp $Phases.warmupStartedAt) -MaxGapSeconds $Limits.MaxBoundaryGapSeconds
     if ($null -eq $atWarmup.Problem) { $result.StartupCpuSeconds = $atWarmup.Row.Cpu } else { $notes.Add("startup CPU: $($atWarmup.Problem)") }
-    $atLoadStart = Get-CatalogJobValueAt -Rows $parsed -Time ([DateTimeOffset]::Parse([string]$Phases.loadStartedAt, $culture)) -MaxGapSeconds $Limits.MaxBoundaryGapSeconds
-    $atLoadEnd = Get-CatalogJobValueAt -Rows $parsed -Time ([DateTimeOffset]::Parse([string]$Phases.loadEndedAt, $culture)) -MaxGapSeconds $Limits.MaxBoundaryGapSeconds
+    $atLoadStart = Get-CatalogJobValueAt -Rows $parsed -Time (ConvertTo-CatalogTimestamp $Phases.loadStartedAt) -MaxGapSeconds $Limits.MaxBoundaryGapSeconds
+    $atLoadEnd = Get-CatalogJobValueAt -Rows $parsed -Time (ConvertTo-CatalogTimestamp $Phases.loadEndedAt) -MaxGapSeconds $Limits.MaxBoundaryGapSeconds
     if ($null -eq $atLoadStart.Problem -and $null -eq $atLoadEnd.Problem) { $result.LoadCpuSeconds = $atLoadEnd.Row.Cpu - $atLoadStart.Row.Cpu }
     else { $notes.Add("load CPU: $(@($atLoadStart.Problem, $atLoadEnd.Problem) | Where-Object { $_ })") }
 

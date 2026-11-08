@@ -48,6 +48,11 @@ $monitorStub = [pscustomobject]@{ ExitCode = 7; Waited = $false }
 $monitorStub | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { $this.Waited = $true }
 Assert-True 'monitor exit is captured after waiting' ((Wait-CatalogMonitorExit -Process $monitorStub) -eq 7 -and $monitorStub.Waited)
 Assert-True 'missing monitor exit remains null' ($null -eq (Wait-CatalogMonitorExit -Process $null))
+$utcText = '2026-11-08T22:48:18.176Z'
+$utcValue = [DateTime]::SpecifyKind([DateTime]::new(2026, 11, 8, 22, 48, 18, 176), [DateTimeKind]::Utc)
+$typedTime = ConvertTo-CatalogTimestamp $utcValue
+$textTime = ConvertTo-CatalogTimestamp $utcText
+Assert-True 'typed and text timestamps preserve UTC and milliseconds' ($typedTime.UtcTicks -eq $textTime.UtcTicks -and $typedTime.Millisecond -eq 176 -and $typedTime.Offset -eq [TimeSpan]::Zero)
 
 function Invoke-DryRun {
     # The runner in its own process, as on the PC; a refusal is a non-zero exit.
