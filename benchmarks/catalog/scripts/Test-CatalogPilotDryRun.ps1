@@ -24,6 +24,7 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'CatalogSchedule.ps1')
 . (Join-Path $PSScriptRoot 'CatalogManifest.ps1')
+. (Join-Path $PSScriptRoot 'CatalogJobCpu.ps1')
 $failures = New-Object System.Collections.Generic.List[string]
 $runner = Join-Path $PSScriptRoot 'Run-CatalogTriplets.ps1'
 $hostExe = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
@@ -42,6 +43,11 @@ function Invoke-Native {
     try { $text = (& $File @Arguments 2>&1 | Out-String) } finally { $ErrorActionPreference = $saved }
     [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $text }
 }
+
+$monitorStub = [pscustomobject]@{ ExitCode = 7; Waited = $false }
+$monitorStub | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { $this.Waited = $true }
+Assert-True 'monitor exit is captured after waiting' ((Wait-CatalogMonitorExit -Process $monitorStub) -eq 7 -and $monitorStub.Waited)
+Assert-True 'missing monitor exit remains null' ($null -eq (Wait-CatalogMonitorExit -Process $null))
 
 function Invoke-DryRun {
     # The runner in its own process, as on the PC; a refusal is a non-zero exit.

@@ -440,6 +440,13 @@ function ConvertTo-CatalogJobMessageRows {
         })
 }
 
+function Wait-CatalogMonitorExit {
+    param([AllowNull()]$Process)
+    if ($null -eq $Process) { return $null }
+    $Process.WaitForExit()
+    return $Process.ExitCode
+}
+
 function Invoke-CatalogJobRun {
     <#
     One run in its own job: the command is created suspended in a new job

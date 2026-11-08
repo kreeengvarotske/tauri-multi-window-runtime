@@ -359,14 +359,13 @@ foreach ($planned in $schedule) {
         -OnStarted {
             param($appPid)
             $arguments = @($monitorArguments | ForEach-Object { if ($_ -eq '{PID}') { $appPid } else { $_ } })
-            $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -PassThru -NoNewWindow -RedirectStandardOutput $monitorLog -RedirectStandardError "$monitorLog.err"
+            $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -PassThru -WindowStyle Hidden -RedirectStandardOutput $monitorLog -RedirectStandardError "$monitorLog.err"
             $null = $process.Handle
             $process
         }.GetNewClosure()
-    $monitor = $run.OnStartedResult
+    $monitorExit = Wait-CatalogMonitorExit -Process $run.OnStartedResult
     $exitCode = $run.ExitCode
     $timedOut = $run.TimedOut
-    if ($null -ne $monitor) { $monitor.WaitForExit() }
     $entry = [ordered]@{
         name              = $name
         seq               = $planned.Seq
@@ -385,7 +384,6 @@ foreach ($planned in $schedule) {
         jobTerminated     = $run.Terminated
         jobError          = $run.Error
         monitorExit       = $monitorExit
-        monitorCpuSeconds = $monitorCpuSeconds
         reportExists      = Test-Path -LiteralPath $report
         webView2Profile   = $webViewProfile
         profileCreated    = Test-Path -LiteralPath $webViewProfile
