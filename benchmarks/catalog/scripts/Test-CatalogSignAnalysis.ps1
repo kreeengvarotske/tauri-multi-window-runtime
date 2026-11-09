@@ -79,6 +79,17 @@ $control = @(Get-CatalogFixedCostControl -PairRows $controlPairs -Triplets 6)
 Assert-True 'fixed-cost report marks an unbounded interval without a band decision' (
     $control[0].Interval.N -eq 5 -and $null -eq $control[0].WithinReferenceBand -and $control[0].Excluded[0].Triplet -eq 6)
 
+$correlationPairs = @(
+    [pscustomobject]@{ LoadPrivateMBDiff = -3.0; RunCpuSecondsDiff = 4.0 }
+    [pscustomobject]@{ LoadPrivateMBDiff = -2.0; RunCpuSecondsDiff = 2.0 }
+    [pscustomobject]@{ LoadPrivateMBDiff = -1.0; RunCpuSecondsDiff = 0.0 }
+)
+Assert-True 'paired RAM and CPU correlation preserves negative direction' (
+    [Math]::Abs((Get-CatalogPairCorrelation -ValidPairs $correlationPairs) + 1) -lt 1e-12)
+Assert-True 'one pair has undefined correlation' ($null -eq (Get-CatalogPairCorrelation -ValidPairs @($correlationPairs[0])))
+foreach ($pair in $correlationPairs) { $pair.RunCpuSecondsDiff = 2.0 }
+Assert-True 'constant CPU has undefined correlation' ($null -eq (Get-CatalogPairCorrelation -ValidPairs $correlationPairs))
+
 $pairRows[1].LoadPrivateMBDiff = '-12.5'
 $thresholds = @(
     [pscustomobject]@{ Cell = 'N4D64'; Kind = 'Delta'; Outcome = 'RAM'; Threshold = '10' }

@@ -1,6 +1,24 @@
-# Pure helpers for the sign tests in the draft confirmatory protocol.
+# Pure helpers for paired summaries and the draft confirmatory sign tests.
 # The caller supplies the frozen family membership and validated paired data.
 . (Join-Path $PSScriptRoot 'CatalogThresholds.ps1')
+
+function Get-CatalogPairCorrelation {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$ValidPairs)
+    if ($ValidPairs.Count -lt 2) { return $null }
+    $ramMean = ($ValidPairs | Measure-Object -Property LoadPrivateMBDiff -Average).Average
+    $cpuMean = ($ValidPairs | Measure-Object -Property RunCpuSecondsDiff -Average).Average
+    $cross = 0.0; $ramSquares = 0.0; $cpuSquares = 0.0
+    foreach ($pair in $ValidPairs) {
+        $ram = $pair.LoadPrivateMBDiff - $ramMean
+        $cpu = $pair.RunCpuSecondsDiff - $cpuMean
+        $cross += $ram * $cpu
+        $ramSquares += $ram * $ram
+        $cpuSquares += $cpu * $cpu
+    }
+    if ($ramSquares -eq 0 -or $cpuSquares -eq 0) { return $null }
+    $coefficient = $cross / ([Math]::Sqrt($ramSquares) * [Math]::Sqrt($cpuSquares))
+    [Math]::Max(-1.0, [Math]::Min(1.0, $coefficient))
+}
 
 function Get-CatalogPairedDifferences {
     # Reads one comparison from the summarizer's triplets.csv rows. Missing

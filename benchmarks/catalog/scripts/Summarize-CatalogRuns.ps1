@@ -78,6 +78,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'CatalogJobCpu.ps1')
+. (Join-Path $PSScriptRoot 'CatalogSignAnalysis.ps1')
 $culture = [System.Globalization.CultureInfo]::InvariantCulture
 
 $minLoadCoverage = 0.8
@@ -180,7 +181,6 @@ $runDirectories = @{}
 $logs = @{}
 if ($PSCmdlet.ParameterSetName -eq 'Confirmatory') {
     . (Join-Path $PSScriptRoot 'CatalogSchedule.ps1')
-    . (Join-Path $PSScriptRoot 'CatalogSignAnalysis.ps1')
     . (Join-Path $PSScriptRoot 'CatalogManifest.ps1')
     . (Join-Path $PSScriptRoot 'CatalogConfirmatory.ps1')
     $checked = Assert-CatalogConfirmatoryInputs -ResultsDirectories $ConfirmatoryDirectories -FrozenManifestPath $FrozenManifestPath -FrozenManifestSha256 $FrozenManifestSha256 -ThresholdsPath $ThresholdsPath -ThresholdsSha256 $ThresholdsSha256
@@ -623,6 +623,19 @@ foreach ($group in ($triplets | Group-Object Cell, Comparison)) {
     $lines.Add(("| {0} | {1} | {2}/{3} | {4} | {5} | {6} | {7} | {8} |" -f $cell, $comparison, @($group.Group | Where-Object { $_.Valid }).Count, $group.Count,
             (Format-Range $cell $comparison 'LoadPrivateMBDiff'), (Format-Range $cell $comparison 'RunCpuSecondsDiff' 2), (Format-Range $cell $comparison 'ExePrivateMBDiff'), (Format-Range $cell $comparison 'WebViewPrivateMBDiff'),
             (Format-Range $cell $comparison 'LoadCpuSecondsDiff' 2)))
+}
+$lines.Add('')
+$lines.Add('## RAM and CPU correlation within triplets')
+$lines.Add('')
+$lines.Add('Pearson correlation of the paired RAM and CPU differences, by cell and comparison. Undefined with fewer than two valid pairs or a constant outcome.')
+$lines.Add('')
+$lines.Add('| Cell | Comparison | Valid pairs | Pearson r |')
+$lines.Add('|---|---|---|---|')
+foreach ($group in ($triplets | Group-Object Cell, Comparison)) {
+    $valid = @($group.Group | Where-Object Valid)
+    $correlation = Get-CatalogPairCorrelation -ValidPairs $valid
+    $display = if ($null -eq $correlation) { 'n/a' } else { Format-Number $correlation 3 }
+    $lines.Add(("| {0} | {1} | {2} | {3} |" -f $group.Group[0].Cell, $group.Group[0].Comparison, $valid.Count, $display))
 }
 $lines.Add('')
 $lines.Add('## Position effect (differences by the arm that ran first)')
