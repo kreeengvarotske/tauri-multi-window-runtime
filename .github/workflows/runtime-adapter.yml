@@ -1,6 +1,11 @@
 name: Runtime adapter
 
 on:
+  # The release revision is a commit on main or a preview tag, so both are
+  # tested at their exact SHA, not only the pull request that produced them.
+  push:
+    branches: [main]
+    tags: ["v*"]
   pull_request:
     paths:
       - "crates/**"

@@ -1,12 +1,14 @@
 [package]
 name = "shared-runtime"
-version = "0.1.0"
+version = "0.1.0-preview.1"
 edition = "2024"
 description = "In-process runtime for Tauri applications: typed operations whose data, cache and work are shared by every window"
 repository = "https://github.com/kreeengvarotske/tauri-multi-window-runtime"
+license = "MIT OR Apache-2.0"
+publish = false
 
 [dependencies]
-runtime-core = { version = "0.1.0", path = "../runtime-core" }
+runtime-core = { version = "=0.1.0-preview.1", path = "../runtime-core" }
 tokio = { version = "1", features = ["sync", "time", "macros", "rt"] }
 
 [dev-dependencies]

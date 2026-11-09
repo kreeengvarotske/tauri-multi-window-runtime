@@ -34,22 +34,24 @@ See the [adapter guide](../../crates/shared-runtime-tauri/README.md), the [Rust 
 
 ### Use the preview from another project
 
-Add both crates to the Cargo manifest that builds your Tauri backend. Pin them to the same reviewed source revision.
+Add both crates to the Cargo manifest that builds your Tauri backend. Pin both to the same release tag. Cargo records the tag's commit SHA in your `Cargo.lock`. Check it against the SHA in the [release notes](../../docs/windows-preview-release-notes.md).
 
 ```toml
 [dependencies]
-shared-runtime = { git = "https://github.com/kreeengvarotske/tauri-multi-window-runtime.git", rev = "eabf33639ead8544dbd78fc0fd8fa0b7342ece9f" }
-shared-runtime-tauri = { git = "https://github.com/kreeengvarotske/tauri-multi-window-runtime.git", rev = "eabf33639ead8544dbd78fc0fd8fa0b7342ece9f" }
+shared-runtime = { git = "https://github.com/kreeengvarotske/tauri-multi-window-runtime.git", tag = "v0.1.0-preview.1" }
+shared-runtime-tauri = { git = "https://github.com/kreeengvarotske/tauri-multi-window-runtime.git", tag = "v0.1.0-preview.1" }
 ```
+
+Both crates require Rust 1.88 or later. With the dependency versions in this repository's `Cargo.lock`, Tauri 2.12 needs Rust 1.90 or later. These minimums were found by building, not set as a supported MSRV.
 
 Keep your application's Tauri v2 dependency and build configuration. Commit the application's `Cargo.lock` and use `cargo build --locked` for subsequent builds. Cargo fetches the Git revision on first use, so the build environment needs read access to the repository. This is a Git-based preview dependency.
 
 To reproduce the external consumer check from the repository root, run the script below in a Windows desktop session. It extracts the tracked demo from the current Git HEAD, generates an independent lockfile, builds in a fresh directory, and leaves the native self-test report there. If your temporary directory is deeply nested, pass an existing short path via `-OutputParent` to avoid MSVC path length limits.
 
 ```powershell
-& ./examples/runtime-adapter-demo/Test-GitConsumer.ps1 -Revision eabf33639ead8544dbd78fc0fd8fa0b7342ece9f
+& ./examples/runtime-adapter-demo/Test-GitConsumer.ps1 -Revision (git rev-parse HEAD)
 ```
 
-For release verification, check out the intended release commit, pass its full SHA as `-Revision` and add `-RequireMatchingRevision`. The script checks the Git sources of all three runtime packages in the lockfile and requires the native catalog and shutdown evidence in this mode.
+For release verification, check out the release tag, pass its full commit SHA as `-Revision` and add `-RequireMatchingRevision`. The script checks the Git sources of all three runtime packages in the lockfile and requires the native catalog and shutdown evidence in this mode.
 
 The self-test checks integration behavior, including IPC and window lifecycle. Use a workload benchmark to measure memory savings. Sharing resources across separate applications is outside this example's scope.
