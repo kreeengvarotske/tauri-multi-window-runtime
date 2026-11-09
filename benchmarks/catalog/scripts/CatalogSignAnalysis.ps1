@@ -202,3 +202,26 @@ function Get-CatalogConfirmatorySignFamily {
         Adjustments = @(Resolve-CatalogHolmFamily -FrozenIds $FrozenIds -Evidence $evidence)
     }
 }
+
+function Get-CatalogSavingStatement {
+    # Protocol §8b, per cell. Guardrails can block a statement. A
+    # non-inferiority result alone never establishes a saving.
+    param(
+        [Parameter(Mandatory = $true)][bool]$GuardrailsPassed,
+        [Parameter(Mandatory = $true)][bool]$RamSaving,
+        [Parameter(Mandatory = $true)][bool]$CpuSaving,
+        [Parameter(Mandatory = $true)][bool]$RamNotWorse,
+        [Parameter(Mandatory = $true)][bool]$CpuNotWorse
+    )
+    if (-not $GuardrailsPassed) { return 'BlockedByGuardrails' }
+    if ($RamSaving -and $CpuSaving) { return 'SavesRamAndCpu' }
+    if ($RamSaving) {
+        if ($CpuNotWorse) { return 'SavesRamCpuNotWorse' }
+        return 'SavesRamPossibleCpuCost'
+    }
+    if ($CpuSaving) {
+        if ($RamNotWorse) { return 'SavesCpuRamNotWorse' }
+        return 'SavesCpuPossibleRamCost'
+    }
+    return 'NoSavingShown'
+}

@@ -79,4 +79,20 @@ Assert-Refused 'non-inferiority cannot mix outcomes' { Get-CatalogConfirmatorySi
 Assert-Refused 'fixed-cost control stays descriptive' { Get-CatalogConfirmatorySignFamily -Family P -FrozenIds @('N2D0/RAM') -ThresholdRows $thresholds -PairRows $pairRows -Triplets 2 } 'does not belong'
 Assert-Refused 'missing frozen threshold has no fallback' { Get-CatalogConfirmatorySignFamily -Family P -FrozenIds @('N4D64/RAM') -ThresholdRows @() -PairRows $pairRows -Triplets 2 } 'Missing or invalid frozen'
 
+$statements = @(
+    @{ GuardrailsPassed = $false; RamSaving = $true; CpuSaving = $true; RamNotWorse = $true; CpuNotWorse = $true; Expected = 'BlockedByGuardrails' }
+    @{ GuardrailsPassed = $true; RamSaving = $true; CpuSaving = $true; RamNotWorse = $false; CpuNotWorse = $false; Expected = 'SavesRamAndCpu' }
+    @{ GuardrailsPassed = $true; RamSaving = $true; CpuSaving = $false; RamNotWorse = $false; CpuNotWorse = $true; Expected = 'SavesRamCpuNotWorse' }
+    @{ GuardrailsPassed = $true; RamSaving = $true; CpuSaving = $false; RamNotWorse = $false; CpuNotWorse = $false; Expected = 'SavesRamPossibleCpuCost' }
+    @{ GuardrailsPassed = $true; RamSaving = $false; CpuSaving = $true; RamNotWorse = $true; CpuNotWorse = $false; Expected = 'SavesCpuRamNotWorse' }
+    @{ GuardrailsPassed = $true; RamSaving = $false; CpuSaving = $true; RamNotWorse = $false; CpuNotWorse = $false; Expected = 'SavesCpuPossibleRamCost' }
+    @{ GuardrailsPassed = $true; RamSaving = $false; CpuSaving = $false; RamNotWorse = $true; CpuNotWorse = $true; Expected = 'NoSavingShown' }
+)
+foreach ($case in $statements) {
+    $expected = $case.Expected
+    $inputFlags = $case.Clone()
+    $inputFlags.Remove('Expected')
+    Assert-True "statement $expected" ((Get-CatalogSavingStatement @inputFlags) -ceq $expected)
+}
+
 Write-Host 'All synthetic sign, Holm and median interval checks passed.'
