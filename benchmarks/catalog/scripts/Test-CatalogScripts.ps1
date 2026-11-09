@@ -670,6 +670,9 @@ try {
     Assert-ConfirmRefused 'a malformed thresholds hash' (Test-Confirm @($session1, $session2) -ThresholdsHash 'abc') 'not a 64-digit'
     Assert-ConfirmRefused 'missing thresholds' (Test-Confirm @($session1, $session2) -Thresholds (Join-Path $confirmRoot 'none.csv')) 'thresholds.csv not found'
     Assert-ConfirmRefused 'a frozen manifest edited after the freeze' (Test-Confirm @($session1, $session2) -Freeze ([pscustomobject]@{ Path = $freeze.Path; Sha256 = ('0' * 64) })) 'frozen manifest SHA-256'
+    $editedManifest = Join-Path $confirmRoot 'manifest-edited.json'
+    [IO.File]::WriteAllText($editedManifest, [IO.File]::ReadAllText($freeze.Path).Replace('N2D16/RAM', 'N4D64/RAM'))
+    Assert-ConfirmRefused 'a change to frozen sign membership' (Test-Confirm @($session1, $session2) -Freeze ([pscustomobject]@{ Path = $editedManifest; Sha256 = $freeze.Sha256 })) 'frozen manifest SHA-256'
     Assert-ConfirmRefused 'a malformed frozen manifest hash' (Test-Confirm @($session1, $session2) -Freeze ([pscustomobject]@{ Path = $freeze.Path; Sha256 = 'abc' })) 'not a 64-digit hex value'
 
     # Mixed phases.

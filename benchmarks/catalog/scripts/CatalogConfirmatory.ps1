@@ -34,9 +34,23 @@ function Get-CatalogJsonProperty {
 }
 
 function Read-CatalogConfirmatoryJson {
-    param([string]$Path, [System.Collections.Generic.List[string]]$Problems)
+    param([string]$Path, [System.Collections.Generic.List[string]]$Problems, [string]$FrozenSha256)
     try {
-        $json = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop
+        if ($FrozenSha256) {
+            $resolved = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).ProviderPath
+            $stream = [IO.MemoryStream]::new([IO.File]::ReadAllBytes($resolved))
+            try {
+                $actual = (Get-FileHash -InputStream $stream -Algorithm SHA256).Hash.ToLowerInvariant()
+                if ($actual -ne $FrozenSha256) {
+                    $Problems.Add("frozen manifest SHA-256 $actual does not match $($FrozenSha256.ToLowerInvariant())")
+                    return
+                }
+                $stream.Position = 0
+                $reader = [IO.StreamReader]::new($stream)
+                try { $json = $reader.ReadToEnd() } finally { $reader.Dispose() }
+            } finally { $stream.Dispose() }
+        }
+        else { $json = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop }
         if ($json -notmatch '^\s*\{') { throw 'Expected a JSON object.' }
         $value = ConvertFrom-Json -InputObject $json -ErrorAction Stop
         if ($value -isnot [pscustomobject]) { throw 'Expected a JSON object.' }
@@ -61,11 +75,9 @@ function Test-CatalogConfirmatoryInputs {
     if ($FrozenManifestSha256 -notmatch '^[0-9a-fA-F]{64}$') { $problems.Add("the frozen manifest SHA-256 is not a 64-digit hex value ('$FrozenManifestSha256')") }
     elseif (-not (Test-Path -LiteralPath $FrozenManifestPath -PathType Leaf)) { $problems.Add("missing data: frozen manifest '$FrozenManifestPath' not found") }
     else {
-        $actual = (Get-FileHash -LiteralPath $FrozenManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($actual -ne $FrozenManifestSha256.ToLowerInvariant()) { $problems.Add("frozen manifest SHA-256 $actual does not match $($FrozenManifestSha256.ToLowerInvariant())") }
-        else {
-            $result.ManifestSha256 = $actual
-            $frozen = Read-CatalogConfirmatoryJson -Path $FrozenManifestPath -Problems $problems
+        $frozen = Read-CatalogConfirmatoryJson -Path $FrozenManifestPath -Problems $problems -FrozenSha256 $FrozenManifestSha256
+        if ($null -ne $frozen) {
+            $result.ManifestSha256 = $FrozenManifestSha256.ToLowerInvariant()
             $result.Manifest = $frozen
         }
     }
