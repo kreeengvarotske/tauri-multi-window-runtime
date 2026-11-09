@@ -22,6 +22,7 @@ $culture = [System.Globalization.CultureInfo]::InvariantCulture
 . (Join-Path $PSScriptRoot 'CatalogJobCpu.ps1')
 . (Join-Path $PSScriptRoot 'CatalogManifest.ps1')
 . (Join-Path $PSScriptRoot 'CatalogConfirmatory.ps1')
+. (Join-Path $PSScriptRoot 'CatalogSignAnalysis.ps1')
 $failures = New-Object System.Collections.Generic.List[string]
 
 function Assert-True {
@@ -604,6 +605,30 @@ try {
     Assert-True 'confirmatory inputs: one complete session passes' ((Test-Confirm @($whole)).Problems.Count -eq 0)
     $ok = Assert-CatalogConfirmatoryInputs -ResultsDirectories @($session1, $session2) -FrozenManifestPath $freeze.Path -FrozenManifestSha256 $freeze.Sha256.ToUpperInvariant() -ThresholdsPath $thresholdsFile -ThresholdsSha256 $thresholdsSha
     Assert-True 'confirmatory inputs: Assert returns the checked inputs, any letter case of the hash' ($ok.ManifestSha256 -eq $freeze.Sha256)
+    $pairs = @(foreach ($triplet in ($ok.Schedule | Group-Object Cell, Triplet)) {
+        foreach ($comparison in 'C-A', 'C-B', 'B-A') {
+            [pscustomobject]@{
+                Cell = $triplet.Group[0].Cell; Triplet = $triplet.Group[0].Triplet; Comparison = $comparison
+                Valid = $true; LoadPrivateMBDiff = '-40'; RunCpuSecondsDiff = '-2'
+            }
+        }
+    })
+    $signArgs = @{ PrimaryIds = @('N2D16/RAM'); NiRamIds = @(); NiCpuIds = @('N2D16/CPU') }
+    $sign = Get-CatalogCheckedSignResults @signArgs -CheckedInputs $ok -PairRows $pairs
+    Assert-True 'sign analysis: keeps both verified hashes and the frozen triplet count' (
+        $sign.ManifestSha256 -eq $freeze.Sha256 -and $sign.ThresholdsSha256 -eq $thresholdsSha -and
+        $sign.Primary.Evidence[0].N -eq 2 -and $sign.NiRam.Adjustments.Count -eq 0 -and
+        $sign.NiCpu.Evidence[0].Below -eq 2)
+    foreach ($fixture in @(
+        @{ Rows = @($pairs | Select-Object -SkipLast 1); Checked = $ok; Message = 'do not cover the full frozen schedule' }
+        @{ Rows = $pairs + $pairs[0]; Checked = $ok; Message = 'Duplicate pair row' }
+        @{ Rows = $pairs; Checked = (Test-Confirm @($session1)); Message = 'validation must pass' }
+    )) {
+        $errorText = ''
+        try { Get-CatalogCheckedSignResults @signArgs -CheckedInputs $fixture.Checked -PairRows $fixture.Rows | Out-Null }
+        catch { $errorText = $_.Exception.Message }
+        Assert-True "sign analysis refuses inputs: $($fixture.Message)" ($errorText -like "*$($fixture.Message)*") $errorText
+    }
 
     # Thresholds SHA-256 (Import-CatalogThresholds inside the input check).
     $editedThresholds = Join-Path $confirmRoot 'thresholds-edited.csv'
