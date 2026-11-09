@@ -71,6 +71,30 @@ function Get-CatalogScheduleSha256 {
     finally { $sha.Dispose() }
 }
 
+function Assert-CatalogPilotApproval {
+    param([string]$Path, [string]$ExpectedSha256, [string]$ManifestSha256, [string]$ScenarioRevision)
+    $resolved = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).ProviderPath
+    $stream = [IO.MemoryStream]::new([IO.File]::ReadAllBytes($resolved))
+    try {
+        $hash = (Get-FileHash -InputStream $stream -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($hash -ne $ExpectedSha256) { throw 'The pilot approval file does not match -PilotApprovalSha256.' }
+        $stream.Position = 0
+        $reader = [IO.StreamReader]::new($stream)
+        try { $json = $reader.ReadToEnd() } finally { $reader.Dispose() }
+    } finally { $stream.Dispose() }
+    if ($json -notmatch '^\s*\{') { throw 'The pilot approval must be a JSON object.' }
+    $approval = ConvertFrom-Json -InputObject $json -ErrorAction Stop
+    foreach ($field in 'kind', 'pilotManifestSha256', 'smokeScenarioRevision', 'nativeSmokeReportSha256') {
+        $property = $approval.PSObject.Properties[$field]
+        if ($null -eq $property -or $property.Value -isnot [string]) { throw "The pilot approval requires a string '$field'." }
+    }
+    if ($approval.kind -cne 'pilot-launch-approval' -or $approval.pilotManifestSha256 -ne $ManifestSha256 -or
+        $approval.smokeScenarioRevision -ne $ScenarioRevision -or $approval.nativeSmokeReportSha256 -notmatch '^[0-9a-fA-F]{64}$') {
+        throw 'The pilot approval must identify this manifest and native smoke report for this scenario revision.'
+    }
+    $hash
+}
+
 function New-CatalogManifest {
     param(
         [Parameter(Mandatory = $true)][System.Collections.IDictionary]$Configuration,

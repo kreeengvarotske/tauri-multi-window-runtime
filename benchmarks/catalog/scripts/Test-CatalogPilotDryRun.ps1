@@ -345,10 +345,33 @@ try {
     Test-Refused -Name 'directories: a directory inside another results directory' -Result $result -Directory $nested -Expected 'inside another results directory'
     Assert-True 'directories: the first dry run is unchanged' ((Get-FileHash -LiteralPath (Join-Path $dry 'manifest.json') -Algorithm SHA256).Hash.ToLowerInvariant() -eq $frozenSha)
 
-    # --- 6. The pilot itself still refuses to start.
+    # --- 6. No actual pilot without a separate matching approval.
     $directory = Join-Path $root 'refused-pilot'
     $result = Invoke-DryRun -Output $directory -From $from -NoDryRun -Extra $freeze
     Test-Refused -Name 'pilot without -DryRun, even with a matching manifest' -Result $result -Directory $directory -Expected 'The pilot runs only after'
+    $approvalPath = Join-Path $root 'approval.json'
+    @{
+        kind = 'pilot-launch-approval'; pilotManifestSha256 = $candidateHash
+        smokeScenarioRevision = $candidateManifest.gitHead; nativeSmokeReportSha256 = ('a' * 64)
+    } | ConvertTo-Json | Set-Content -LiteralPath $approvalPath -Encoding UTF8
+    $approvalHash = (Get-FileHash -LiteralPath $approvalPath -Algorithm SHA256).Hash
+    $approvalInputs = @{ Path = $approvalPath; ExpectedSha256 = $approvalHash; ManifestSha256 = $candidateHash; ScenarioRevision = $candidateManifest.gitHead }
+    Assert-True 'approval helper: matching manifest and smoke revision accepted' ((Assert-CatalogPilotApproval @approvalInputs) -eq $approvalHash)
+    foreach ($field in 'ExpectedSha256', 'ManifestSha256', 'ScenarioRevision') {
+        $badApproval = $approvalInputs.Clone()
+        $badApproval[$field] = '0' * $badApproval[$field].Length
+        $rejected = $false
+        try { Assert-CatalogPilotApproval @badApproval | Out-Null } catch { $rejected = $_.Exception.Message -like '*pilot approval*' }
+        Assert-True "approval helper: changed $field refused" $rejected
+    }
+    if (-not $candidateManifest.gitDirty -and $candidateManifest.os -like '*(build 26200)' -and
+        $candidateManifest.webView2 -match '^[0-9]+(\.[0-9]+){3}$') {
+        $directory = Join-Path $root 'refused-pilot-wrong-approval'
+        $launchArgs = @($preflightArgs | Where-Object { $_ -ne '-VerifyPilotFreeze' }) + @(
+            $scheduleHash, '-PilotApprovalFile', $approvalPath, '-PilotApprovalSha256', ('0' * 64))
+        $result = Invoke-DryRun -Output $directory -From $from -Extra $launchArgs -NoDryRun
+        Test-Refused -Name 'real pilot with invalid approval hash' -Result $result -Directory $directory -Expected 'does not match -PilotApprovalSha256'
+    }
 }
 finally {
     if (-not $keep) { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
