@@ -1,0 +1,22 @@
+name: Prepare the pinned catalog runtime
+description: Let Cargo fetch the exact same-repository Git dependency from the authenticated Actions checkout.
+runs:
+  using: composite
+  steps:
+    - name: Verify and expose the pinned revision to Cargo
+      shell: pwsh
+      run: |
+        $workspace = (Resolve-Path -LiteralPath $env:GITHUB_WORKSPACE).Path
+        . (Join-Path $workspace 'benchmarks/catalog/scripts/CatalogManifest.ps1')
+        $manifest = Join-Path $workspace 'benchmarks/catalog/src-tauri/Cargo.toml'
+        $lock = Join-Path $workspace 'Cargo.lock'
+        $revision = Get-CatalogFrameworkRevision -ManifestPath $manifest -LockPath $lock
+        git -C $workspace cat-file -e "$revision^{commit}"
+        if ($LASTEXITCODE -ne 0) { throw "The checkout does not contain pinned runtime $revision. Use fetch-depth: 0 and keep the pinned commit reachable." }
+        $uri = [Uri]::new($workspace).AbsoluteUri
+        @(
+          'CARGO_NET_GIT_FETCH_WITH_CLI=true'
+          'GIT_CONFIG_COUNT=1'
+          "GIT_CONFIG_KEY_0=url.$uri.insteadOf"
+          'GIT_CONFIG_VALUE_0=https://github.com/kreeengvarotske/tauri-multi-window-runtime.git'
+        ) | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append

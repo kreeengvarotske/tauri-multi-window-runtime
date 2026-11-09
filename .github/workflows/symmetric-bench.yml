@@ -22,6 +22,9 @@ jobs:
         working-directory: benchmarks/symmetric
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/catalog-runtime-source
       - uses: actions/setup-node@v4
         with:
           node-version: 22
