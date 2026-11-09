@@ -228,6 +228,7 @@ if (Test-Path -LiteralPath $OutputDirectory) { throw "$OutputDirectory exists; a
 
 $runs = New-Object System.Collections.Generic.List[object]
 $processes = New-Object System.Collections.Generic.List[object]
+$windowHeap = New-Object System.Collections.Generic.List[object]
 foreach ($planned in $schedule) {
     $name = [string]$planned.Name
     $runsDirectory = if ($checked) { $runDirectories[$name] } else { Join-Path $ResultsDirectory 'runs' }
@@ -490,6 +491,20 @@ foreach ($planned in $schedule) {
     $row.Valid = $reasons.Count -eq 0
     $row.InvalidReason = $reasons -join '; '
     $runs.Add([pscustomobject]$row)
+    $windowReports = Get-Property $report 'windows'
+    if ($null -ne $windowReports) {
+        foreach ($window in $windowReports.PSObject.Properties) {
+            $heap = Get-Property $window.Value 'heap'
+            $supported = Get-Property $heap 'supported'
+            $bytes = ConvertTo-Number (Get-Property $heap 'loadAvgBytes')
+            $heapMiB = if ($supported -is [bool] -and $supported -and $null -ne $bytes -and $bytes -ge 0) { $bytes / 1MB }
+            $windowHeap.Add([pscustomobject][ordered]@{
+                Run = $name; Cell = $row.Cell; Arm = $row.Arm; Triplet = $row.Triplet; RunValid = $row.Valid
+                Window = $window.Name; WindowPassed = Get-Property $window.Value 'passed'
+                HeapSupported = $supported; LoadHeapMiB = $heapMiB
+            })
+        }
+    }
 }
 
 # Differences inside each triplet, valid runs only.
@@ -555,6 +570,7 @@ Export-Rows $triplets.ToArray() 'triplets.csv'
 Export-Rows $summary.ToArray() 'summary.csv'
 Export-Rows @(Get-GuardrailRows -Runs $runs.ToArray()) 'guardrail-evidence.csv'
 if ($processes.Count -gt 0) { Export-Rows $processes.ToArray() 'processes.csv' }
+if ($windowHeap.Count -gt 0) { Export-Rows $windowHeap.ToArray() 'window-heap.csv' }
 if ($checked) {
     $signResults | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'sign-evidence.json') -Encoding UTF8
 }
@@ -652,6 +668,9 @@ $lines.Add('')
 $lines.Add('## Retained size (protocol §4)')
 $lines.Add('')
 $lines.Add('Host and WebView2 Private above the D0 cell with the same windows and arm (medians), against the generator size of the Rust representation and the JS heap of all windows.')
+if ($windowHeap.Count -gt 0) {
+    $lines.Add('Per-window JS heap during load is in window-heap.csv. Blank heap values mean no measurement.')
+}
 $lines.Add('')
 $lines.Add('| Cell | Arm | Nominal MiB | Generator MB | Host above D0 MB | WebView2 above D0 MB | JS heap MB |')
 $lines.Add('|---|---|---|---|---|---|---|')

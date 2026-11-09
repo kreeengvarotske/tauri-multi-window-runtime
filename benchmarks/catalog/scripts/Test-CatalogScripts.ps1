@@ -161,6 +161,10 @@ try {
             schemaVersion = 1; scenario = 'M'; passed = $passed; problems = @($(if (-not $passed) { 'w1: completed 39/40' }))
             config = [ordered]@{ arm = $run.Arm; windows = [int]$run.Windows; dataMib = [int]$run.DataMib; records = 1000; rustDataBytes = [int]$run.DataMib * 1MB }
             phases = $phases
+            windows = [ordered]@{
+                main = @{ passed = $true; heap = @{ supported = $true; loadAvgBytes = 3MB } }
+                w1 = @{ passed = $passed; heap = @{ supported = $false; loadAvgBytes = $null } }
+            }
             totals = [ordered]@{ scheduledSteps = 80; completedSteps = $(if ($passed) { 80 } else { 79 }); failures = $(if ($passed) { 0 } else { 1 }); mismatches = 0; overruns = 0; maxP95LatencyMs = 3.5; maxTimeToFirstPageMs = 120; loadJsHeapAvgBytes = $(if ($run.Arm -eq 'A') { 80MB } else { 8MB }) }
         } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $runsDir "$($run.Name).json") -Encoding UTF8
         $monitor = New-Object System.Collections.Generic.List[string]
@@ -239,6 +243,12 @@ try {
     Assert-True 'summary.md: lists invalid runs' ($summaryText -like "*$($gapRun.Name): *load gap*")
     Assert-True 'summary.md: retained size of B above D0 (host 39.5 MB)' ($summaryText -match "\| N2D16 \| B \| 16 \| 16\.0 \| 39\.5 \| 0\.0 \|")
     Assert-True 'processes.csv: host and WebView2 rows' (@(Import-Csv -LiteralPath (Join-Path $analysis 'processes.csv') | Where-Object { $_.Host -eq 'True' }).Count -eq 8)
+    $heaps = @(Import-Csv -LiteralPath (Join-Path $analysis 'window-heap.csv'))
+    Assert-True 'window-heap.csv: keeps valid and invalid runs, including unsupported windows' (
+        $heaps.Count -eq 16 -and
+        @($heaps | Where-Object { $_.Window -eq 'main' -and $_.LoadHeapMiB -eq '3' }).Count -eq 8 -and
+        @($heaps | Where-Object { $_.Window -eq 'w1' -and $_.HeapSupported -eq 'False' -and $_.LoadHeapMiB -eq '' }).Count -eq 8 -and
+        @($heaps | Where-Object { $_.Run -eq $failedRun.Name -and $_.RunValid -eq 'False' -and $_.WindowPassed -eq 'False' }).Count -eq 1)
     $threw = $false
     try { & (Join-Path $PSScriptRoot 'Summarize-CatalogRuns.ps1') -ResultsDirectory $results -OutputDirectory $analysis | Out-Null } catch { $threw = $true }
     Assert-True 'summary: never overwrites an analysis' $threw
