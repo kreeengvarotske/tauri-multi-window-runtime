@@ -189,17 +189,17 @@ try {
     $protocolHash = (Get-FileHash -LiteralPath $externalProtocol -Algorithm SHA256).Hash
     $protocolOutput = Join-Path $root 'with-protocol'
     $protocolArgs = @('-ProtocolFile', $externalProtocol, '-ProtocolSha256', $protocolHash)
-    $result = Invoke-DryRun -Output $protocolOutput -From $from -Extra $protocolArgs
-    Assert-True 'explicit protocol file is accepted' ($result.ExitCode -eq 0) $result.Output
-    if ($result.ExitCode -eq 0) {
+    $protocolResult = Invoke-DryRun -Output $protocolOutput -From $from -Extra $protocolArgs
+    Assert-True 'explicit protocol file is accepted' ($protocolResult.ExitCode -eq 0) $protocolResult.Output
+    if ($protocolResult.ExitCode -eq 0) {
         $protocolManifest = Get-Content -LiteralPath (Join-Path $protocolOutput 'manifest.json') -Raw | ConvertFrom-Json
         Assert-True 'manifest records the explicit protocol hash' ($protocolManifest.protocolSha256 -eq $protocolHash)
         Assert-True 'checked protocol copy matches the supplied file' ((Get-FileHash -LiteralPath (Join-Path $protocolOutput 'protocol.md') -Algorithm SHA256).Hash -eq $protocolHash)
     }
     Test-NothingStarted -Name 'with explicit protocol' -Directory $protocolOutput
     $wrongProtocol = Join-Path $root 'wrong-protocol'
-    $result = Invoke-DryRun -Output $wrongProtocol -From $from -Extra @('-ProtocolFile', $externalProtocol, '-ProtocolSha256', ('0' * 64))
-    Test-Refused -Name 'wrong protocol hash' -Result $result -Directory $wrongProtocol -Expected 'does not match -ProtocolSha256'
+    $protocolResult = Invoke-DryRun -Output $wrongProtocol -From $from -Extra @('-ProtocolFile', $externalProtocol, '-ProtocolSha256', ('0' * 64))
+    Test-Refused -Name 'wrong protocol hash' -Result $protocolResult -Directory $wrongProtocol -Expected 'does not match -ProtocolSha256'
     Assert-True 'dry run: manifest has 72 runs and the schedule content hash' ($manifest.runs -eq 72 -and $manifest.scheduleContentSha256 -eq (Get-CatalogScheduleSha256 -Schedule $schedule))
     Assert-True 'dry run: manifest has the phase, cells and triplets' ($manifest.phase -eq 'Pilot' -and (@($manifest.cells) -join ',') -eq ($pilotCells -join ',') -and $manifest.triplets -eq 6)
     Assert-True 'dry run: manifest has the monitor SHA and its git head' ($manifest.monitorSha256 -eq (Get-FileHash -LiteralPath $monitor -Algorithm SHA256).Hash -and $manifest.monitorGitHead -match '^[0-9a-f]{40}$')
