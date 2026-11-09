@@ -79,6 +79,27 @@ Assert-Refused 'non-inferiority cannot mix outcomes' { Get-CatalogConfirmatorySi
 Assert-Refused 'fixed-cost control stays descriptive' { Get-CatalogConfirmatorySignFamily -Family P -FrozenIds @('N2D0/RAM') -ThresholdRows $thresholds -PairRows $pairRows -Triplets 2 } 'does not belong'
 Assert-Refused 'missing frozen threshold has no fallback' { Get-CatalogConfirmatorySignFamily -Family P -FrozenIds @('N4D64/RAM') -ThresholdRows @() -PairRows $pairRows -Triplets 2 } 'Missing or invalid frozen'
 
+$thresholdFile = [IO.Path]::GetTempFileName()
+try {
+    $csv = ($thresholds | ConvertTo-Csv -NoTypeInformation) -join "`r`n"
+    [IO.File]::WriteAllText($thresholdFile, $csv, (New-Object System.Text.UTF8Encoding($true)))
+    $hash = (Get-FileHash -LiteralPath $thresholdFile -Algorithm SHA256).Hash
+    $frozenInputs = @{
+        ThresholdsPath = $thresholdFile; ThresholdsSha256 = $hash
+        PrimaryIds = @('N4D64/RAM', 'N4D64/CPU'); NiRamIds = @(); NiCpuIds = @('N4D64/CPU')
+        PairRows = $pairRows; Triplets = 2
+    }
+    $result = Get-CatalogConfirmatorySignResults @frozenInputs
+    Assert-True 'verified CSV hash and three frozen families are recorded' (
+        $result.ThresholdsSha256 -ceq $hash.ToLowerInvariant() -and
+        $result.Primary.Adjustments.Count -eq 2 -and $result.NiRam.Adjustments.Count -eq 0 -and
+        $result.NiCpu.Evidence[0].Shift -eq -1)
+    [IO.File]::AppendAllText($thresholdFile, "`r`n")
+    Assert-Refused 'modified thresholds are refused before analysis' { Get-CatalogConfirmatorySignResults @frozenInputs } 'SHA-256 mismatch'
+} finally {
+    Remove-Item -LiteralPath $thresholdFile
+}
+
 $statements = @(
     @{ GuardrailsPassed = $false; RamSaving = $true; CpuSaving = $true; RamNotWorse = $true; CpuNotWorse = $true; Expected = 'BlockedByGuardrails' }
     @{ GuardrailsPassed = $true; RamSaving = $true; CpuSaving = $true; RamNotWorse = $false; CpuNotWorse = $false; Expected = 'SavesRamAndCpu' }
