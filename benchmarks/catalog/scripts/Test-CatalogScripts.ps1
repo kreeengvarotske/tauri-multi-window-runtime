@@ -222,6 +222,9 @@ try {
     Assert-Near 'summary: whole-run coverage' $valid.RunCoverage 1
     $cpuGapRun = @($runs | Where-Object { $_.Cell -eq 'N2D0' -and $_.Triplet -eq '2' -and $_.Arm -eq 'A' })[0]
     Assert-True 'summary: unreadable CPU after the load phase invalidates the run' ($cpuGapRun.Valid -eq 'False' -and $cpuGapRun.InvalidReason -like '*whole-run CPU: unreadable CPU*' -and $cpuGapRun.InvalidReason -notlike '*load gap*') $cpuGapRun.InvalidReason
+    Assert-True 'summary: sampling quality reports an unreadable row and retains invalid runs' (
+        $cpuGapRun.MonitorCpuUnreadableRows -eq '1' -and
+        $summaryText -like "*## Sampling quality by run*| $($cpuGapRun.Name) | False | 1.000 | 1.000 | 1.000 | 1 |*")
     Assert-True 'summary: the 7 s load gap also fails the whole-run check' ($gapRun.InvalidReason -like '*whole-run CPU: gap*') $gapRun.InvalidReason
     $diff = @($triplets | Where-Object { $_.Cell -eq 'N2D16' -and $_.Triplet -eq '1' -and $_.Comparison -eq 'B-A' })[0]
     Assert-Near 'triplet: B - A Σ Private' $diff.LoadPrivateMBDiff (-60)
@@ -629,6 +632,8 @@ try {
         @($assembledRuns | Where-Object { $_.Valid -ne 'False' -or $_.InvalidReason -like '*not run*' }).Count -eq 0)
     Assert-True 'confirmatory summary: reads the run artifact from its own session' (
         @($assembledRuns | Where-Object { $_.Name -eq $block2[0] -and $_.InvalidReason -like '*session two fixture*' }).Count -eq 1)
+    Assert-True 'confirmatory summary: unavailable CPU sampling counters are blank' (
+        @($assembledRuns | Where-Object { $_.MonitorCpuUnreadableRows -ne '' }).Count -eq 0)
     Assert-True 'confirmatory summary: records both hashes and stays descriptive' (
         $assembledSummary -like '*Confirmatory: descriptive, no conclusion*' -and
         $assembledSummary.Contains($freeze.Sha256) -and $assembledSummary.Contains($thresholdsSha))

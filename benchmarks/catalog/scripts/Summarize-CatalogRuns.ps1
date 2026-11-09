@@ -244,7 +244,7 @@ foreach ($planned in $schedule) {
         LoadPrivateMBAvg = $null; LoadPrivateMBMaxSample = $null; SteadyPrivateMBAvg = $null; IdleBeforePrivateMBAvg = $null
         ExePrivateMBLoadAvg = $null; WebViewPrivateMBLoadAvg = $null; LoadCpuSeconds = $null; LoadWorkingSetMBUpperBound = $null
         RunCpuSeconds = $null; StartupCpuSeconds = $null; CpuExitedProcesses = $null; CpuProcesses = $null
-        RunRows = $null; RunCoverage = $null; RunIntervalMaxSeconds = $null
+        RunRows = $null; RunCoverage = $null; RunIntervalMaxSeconds = $null; MonitorCpuUnreadableRows = $null
         CpuSource = $null; MonitorRunCpuSeconds = $null; MonitorStartupCpuSeconds = $null; MonitorLoadCpuSeconds = $null; MonitorCpuNotes = ''
         JobProcesses = $null; JobProcessesNeverSeenByMonitor = $null; MonitorProcessesInJob = $null; JobEndGapSeconds = $null
         JobMaxRowIntervalSeconds = $null; JobMaxClockDriftSeconds = $null; JobNotes = ''
@@ -376,6 +376,7 @@ foreach ($planned in $schedule) {
             else {
                 if ($runSamples[0].Time -gt (Get-Time $report.phases.idleBeforeStartedAt)) { $cpuReasons.Add('first monitor sample after the idle-before phase started') }
                 $unreadableRows = @($runSamples | Where-Object { $null -eq $_.CpuUnreadable -or $_.CpuUnreadable -gt 0 })
+                $row.MonitorCpuUnreadableRows = $unreadableRows.Count
                 if ($unreadableRows.Count -gt 0) {
                     $why = @($unreadableRows | ForEach-Object { $_.CpuReasons } | Sort-Object -Unique)
                     $cpuReasons.Add('unreadable CPU in a monitor row' + $(if ($why.Count -gt 0) { " ($($why -join '; '))" } else { '' }))
@@ -655,6 +656,18 @@ $lines.Add('')
 $lines.Add('| Cell | Arm | Nominal MiB | Generator MB | Host above D0 MB | WebView2 above D0 MB | JS heap MB |')
 $lines.Add('|---|---|---|---|---|---|---|')
 foreach ($line in $retained) { $lines.Add($line) }
+$lines.Add('')
+$lines.Add('## Sampling quality by run')
+$lines.Add('')
+$lines.Add('Monitor CPU unreadable rows count samples with missing or unreadable CPU counters. They are diagnostic when Job Object is the CPU source. A blank value means no observation.')
+$lines.Add('')
+$lines.Add('| Run | Valid | Load coverage | Median load interval (s) | Max load interval (s) | Monitor CPU unreadable rows | Job processes unseen by monitor |')
+$lines.Add('|---|---|---|---|---|---|---|')
+foreach ($run in $runs) {
+    $lines.Add(("| {0} | {1} | {2} | {3} | {4} | {5} | {6} |" -f $run.Name, $run.Valid,
+            (Format-Number $run.LoadCoverage 3), (Format-Number $run.LoadIntervalMedianSeconds 3),
+            (Format-Number $run.LoadIntervalMaxSeconds 3), $run.MonitorCpuUnreadableRows, $run.JobProcessesNeverSeenByMonitor))
+}
 $lines.Add('')
 $lines.Add('## Invalid runs')
 $lines.Add('')
