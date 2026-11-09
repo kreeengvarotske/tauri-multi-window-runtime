@@ -22,6 +22,7 @@ $culture = [System.Globalization.CultureInfo]::InvariantCulture
 . (Join-Path $PSScriptRoot 'CatalogJobCpu.ps1')
 . (Join-Path $PSScriptRoot 'CatalogManifest.ps1')
 . (Join-Path $PSScriptRoot 'CatalogConfirmatory.ps1')
+. (Join-Path $PSScriptRoot 'CatalogSignAnalysis.ps1')
 $failures = New-Object System.Collections.Generic.List[string]
 
 function Assert-True {
@@ -160,7 +161,11 @@ try {
             schemaVersion = 1; scenario = 'M'; passed = $passed; problems = @($(if (-not $passed) { 'w1: completed 39/40' }))
             config = [ordered]@{ arm = $run.Arm; windows = [int]$run.Windows; dataMib = [int]$run.DataMib; records = 1000; rustDataBytes = [int]$run.DataMib * 1MB }
             phases = $phases
-            totals = [ordered]@{ scheduledSteps = 80; completedSteps = 80; failures = 0; mismatches = 0; overruns = 0; maxP95LatencyMs = 3.5; maxTimeToFirstPageMs = 120; loadJsHeapAvgBytes = $(if ($run.Arm -eq 'A') { 80MB } else { 8MB }) }
+            windows = [ordered]@{
+                main = @{ passed = $true; heap = @{ supported = $true; loadAvgBytes = 3MB } }
+                w1 = @{ passed = $passed; heap = @{ supported = $false; loadAvgBytes = $null } }
+            }
+            totals = [ordered]@{ scheduledSteps = 80; completedSteps = $(if ($passed) { 80 } else { 79 }); failures = $(if ($passed) { 0 } else { 1 }); mismatches = 0; overruns = 0; maxP95LatencyMs = 3.5; maxTimeToFirstPageMs = 120; loadJsHeapAvgBytes = $(if ($run.Arm -eq 'A') { 80MB } else { 8MB }) }
         } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $runsDir "$($run.Name).json") -Encoding UTF8
         $monitor = New-Object System.Collections.Generic.List[string]
         $diagnostics = New-Object System.Collections.Generic.List[string]
@@ -192,6 +197,13 @@ try {
     $runs = @(Import-Csv -LiteralPath (Join-Path $analysis 'runs.csv'))
     $triplets = @(Import-Csv -LiteralPath (Join-Path $analysis 'triplets.csv'))
     $summaryText = Get-Content -LiteralPath (Join-Path $analysis 'summary.md') -Raw
+    $guardrails = @(Import-Csv -LiteralPath (Join-Path $analysis 'guardrail-evidence.csv'))
+    $d16Guardrail = @($guardrails | Where-Object Cell -eq 'N2D16')[0]
+    Assert-True 'guardrail evidence: includes failures from invalid runs' (
+        $d16Guardrail.ValidRuns -eq '1' -and $d16Guardrail.RunsWithErrors -eq '1' -and $d16Guardrail.RunsWithIncompleteSteps -eq '1')
+    Assert-Near 'guardrail evidence: p95 median uses valid runs' $d16Guardrail.P95MedianMs 3.5
+    Assert-Near 'guardrail evidence: p95 limit against A' $d16Guardrail.P95LimitVsAMs 23.5
+    Assert-Near 'guardrail evidence: first-page limit against A' $d16Guardrail.FirstPageLimitVsAMs 380
     Assert-True 'summary: 8 runs' ($runs.Count -eq 8)
     Assert-True 'summary: 5 valid runs' (@($runs | Where-Object { $_.Valid -eq 'True' }).Count -eq 5) (($runs | ForEach-Object { "$($_.Name)=$($_.InvalidReason)" }) -join '; ')
     $gapRun = @($runs | Where-Object { $_.Cell -eq 'N2D0' -and $_.Triplet -eq '1' -and $_.Arm -eq 'A' })[0]
@@ -214,6 +226,9 @@ try {
     Assert-Near 'summary: whole-run coverage' $valid.RunCoverage 1
     $cpuGapRun = @($runs | Where-Object { $_.Cell -eq 'N2D0' -and $_.Triplet -eq '2' -and $_.Arm -eq 'A' })[0]
     Assert-True 'summary: unreadable CPU after the load phase invalidates the run' ($cpuGapRun.Valid -eq 'False' -and $cpuGapRun.InvalidReason -like '*whole-run CPU: unreadable CPU*' -and $cpuGapRun.InvalidReason -notlike '*load gap*') $cpuGapRun.InvalidReason
+    Assert-True 'summary: sampling quality reports an unreadable row and retains invalid runs' (
+        $cpuGapRun.MonitorCpuUnreadableRows -eq '1' -and
+        $summaryText -like "*## Sampling quality by run*| $($cpuGapRun.Name) | False | 1.000 | 1.000 | 1.000 | 1 |*")
     Assert-True 'summary: the 7 s load gap also fails the whole-run check' ($gapRun.InvalidReason -like '*whole-run CPU: gap*') $gapRun.InvalidReason
     $diff = @($triplets | Where-Object { $_.Cell -eq 'N2D16' -and $_.Triplet -eq '1' -and $_.Comparison -eq 'B-A' })[0]
     Assert-Near 'triplet: B - A Σ Private' $diff.LoadPrivateMBDiff (-60)
@@ -223,9 +238,17 @@ try {
     $invalidPair = @($triplets | Where-Object { $_.Cell -eq 'N2D16' -and $_.Triplet -eq '2' })[0]
     Assert-True 'triplet: an invalid run gives no difference' ($invalidPair.Valid -eq 'False' -and $invalidPair.LoadPrivateMBDiff -eq '') $invalidPair.InvalidReason
     Assert-True 'summary.md: descriptive, no conclusion' ($summaryText -like '*Smoke: descriptive, no conclusion*')
+    Assert-True 'summary.md: correlation is undefined with one valid pair' (
+        $summaryText -like '*## RAM and CPU correlation within triplets*| N2D16 | B-A | 1 | n/a |*')
     Assert-True 'summary.md: lists invalid runs' ($summaryText -like "*$($gapRun.Name): *load gap*")
     Assert-True 'summary.md: retained size of B above D0 (host 39.5 MB)' ($summaryText -match "\| N2D16 \| B \| 16 \| 16\.0 \| 39\.5 \| 0\.0 \|")
     Assert-True 'processes.csv: host and WebView2 rows' (@(Import-Csv -LiteralPath (Join-Path $analysis 'processes.csv') | Where-Object { $_.Host -eq 'True' }).Count -eq 8)
+    $heaps = @(Import-Csv -LiteralPath (Join-Path $analysis 'window-heap.csv'))
+    Assert-True 'window-heap.csv: keeps valid and invalid runs, including unsupported windows' (
+        $heaps.Count -eq 16 -and
+        @($heaps | Where-Object { $_.Window -eq 'main' -and $_.LoadHeapMiB -eq '3' }).Count -eq 8 -and
+        @($heaps | Where-Object { $_.Window -eq 'w1' -and $_.HeapSupported -eq 'False' -and $_.LoadHeapMiB -eq '' }).Count -eq 8 -and
+        @($heaps | Where-Object { $_.Run -eq $failedRun.Name -and $_.RunValid -eq 'False' -and $_.WindowPassed -eq 'False' }).Count -eq 1)
     $threw = $false
     try { & (Join-Path $PSScriptRoot 'Summarize-CatalogRuns.ps1') -ResultsDirectory $results -OutputDirectory $analysis | Out-Null } catch { $threw = $true }
     Assert-True 'summary: never overwrites an analysis' $threw
@@ -399,7 +422,13 @@ $root = Join-Path ([System.IO.Path]::GetTempPath()) ("catalog-test-hash-{0}" -f 
 New-Item -ItemType Directory -Force -Path $root | Out-Null
 try {
     $thresholdsCsv = Join-Path $root 'thresholds.csv'
-    $table | Export-Csv -LiteralPath $thresholdsCsv -NoTypeInformation -Encoding UTF8
+    $originalCulture = [Threading.Thread]::CurrentThread.CurrentCulture
+    try {
+        [Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::GetCultureInfo('de-AT')
+        Export-CatalogThresholds -Rows $table -Path $thresholdsCsv
+    } finally {
+        [Threading.Thread]::CurrentThread.CurrentCulture = $originalCulture
+    }
     $frozen = Get-CatalogFileSha256 -Path $thresholdsCsv
     $loaded = Import-CatalogThresholds -Path $thresholdsCsv -ExpectedSha256 $frozen.ToUpperInvariant() -Cells N2D16, N4D64
     Assert-True 'thresholds hash: the frozen file is read, any letter case' ($loaded.Sha256 -eq $frozen -and @($loaded.Rows).Count -eq 12)
@@ -420,7 +449,7 @@ try {
     & $refused 'a cell missing from the file' $thresholdsCsv $frozen @('N2D16', 'N4D64', 'N2D0') 'missing: N2D0/'
     & $refused 'a cell not in the plan' $thresholdsCsv $frozen @('N2D16') 'unexpected: N4D64/'
     $doubled = Join-Path $root 'thresholds-doubled.csv'
-    @($table) + @($table[0]) | Export-Csv -LiteralPath $doubled -NoTypeInformation -Encoding UTF8
+    Export-CatalogThresholds -Rows (@($table) + @($table[0])) -Path $doubled
     & $refused 'a duplicated row' $doubled (Get-CatalogFileSha256 -Path $doubled) @('N2D16', 'N4D64') 'duplicated: N2D16/Delta/RAM'
     $text = Join-Path $root 'thresholds-text.csv'
     [System.IO.File]::WriteAllText($text, ([System.IO.File]::ReadAllText($thresholdsCsv)).Replace('15.25', 'n/a'))
@@ -546,6 +575,7 @@ try {
     function New-ConfirmConfiguration {
         $c = New-TestConfiguration
         $c.phase = 'Confirmatory'; $c.cells = $confirmCells; $c.triplets = 2; $c.scheduleSeed = 3; $c.dryRun = $false
+        $c['signFamilies'] = [ordered]@{ P = @('N2D16/RAM'); 'NI-RAM' = @(); 'NI-CPU' = @('N2D16/CPU') }
         $c
     }
     function New-Freeze {
@@ -574,7 +604,7 @@ try {
     $block2 = @($confirmSchedule | Where-Object { [int]$_.Block -eq 2 } | ForEach-Object { $_.Name })
     $freeze = New-Freeze 'ok' (New-ConfirmConfiguration) $confirmSchedule
     $thresholdsFile = Join-Path $confirmRoot 'freeze-ok\thresholds.csv'
-    $table | Export-Csv -LiteralPath $thresholdsFile -NoTypeInformation -Encoding UTF8
+    Export-CatalogThresholds -Rows $table -Path $thresholdsFile
     $thresholdsSha = (Get-FileHash -LiteralPath $thresholdsFile -Algorithm SHA256).Hash.ToLowerInvariant()
     $session1 = New-Session 'session-1' $freeze $confirmSchedule $block1
     $session2 = New-Session 'session-2' $freeze $confirmSchedule $block2
@@ -598,6 +628,56 @@ try {
     Assert-True 'confirmatory inputs: one complete session passes' ((Test-Confirm @($whole)).Problems.Count -eq 0)
     $ok = Assert-CatalogConfirmatoryInputs -ResultsDirectories @($session1, $session2) -FrozenManifestPath $freeze.Path -FrozenManifestSha256 $freeze.Sha256.ToUpperInvariant() -ThresholdsPath $thresholdsFile -ThresholdsSha256 $thresholdsSha
     Assert-True 'confirmatory inputs: Assert returns the checked inputs, any letter case of the hash' ($ok.ManifestSha256 -eq $freeze.Sha256)
+    $secondRuns = New-Item -ItemType Directory -Path (Join-Path $session2 'runs')
+    Set-Content -LiteralPath (Join-Path $secondRuns.FullName "$($block2[0]).json") -Value '{"configError":"session two fixture"}' -Encoding UTF8
+    $assembled = Join-Path $confirmRoot 'assembled'
+    & (Join-Path $PSScriptRoot 'Summarize-CatalogRuns.ps1') -ConfirmatoryDirectories @($session1, $session2) -FrozenManifestPath $freeze.Path -FrozenManifestSha256 $freeze.Sha256 -ThresholdsPath $thresholdsFile -ThresholdsSha256 $thresholdsSha -OutputDirectory $assembled
+    $assembledRuns = @(Import-Csv -LiteralPath (Join-Path $assembled 'runs.csv'))
+    $assembledPairs = @(Import-Csv -LiteralPath (Join-Path $assembled 'triplets.csv'))
+    $assembledSummary = Get-Content -LiteralPath (Join-Path $assembled 'summary.md') -Raw
+    $assembledSign = Get-Content -LiteralPath (Join-Path $assembled 'sign-evidence.json') -Raw | ConvertFrom-Json
+    $assembledGuardrails = @(Import-Csv -LiteralPath (Join-Path $assembled 'guardrail-evidence.csv'))
+    Assert-True 'confirmatory summary: preserves all invalid runs and pairs across two sessions' (
+        $assembledRuns.Count -eq 12 -and $assembledPairs.Count -eq 12 -and
+        @($assembledRuns | Where-Object { $_.Valid -ne 'False' -or $_.InvalidReason -like '*not run*' }).Count -eq 0)
+    Assert-True 'confirmatory summary: reads the run artifact from its own session' (
+        @($assembledRuns | Where-Object { $_.Name -eq $block2[0] -and $_.InvalidReason -like '*session two fixture*' }).Count -eq 1)
+    Assert-True 'confirmatory summary: unavailable CPU sampling counters are blank' (
+        @($assembledRuns | Where-Object { $_.MonitorCpuUnreadableRows -ne '' }).Count -eq 0)
+    Assert-True 'confirmatory summary: records both hashes and stays descriptive' (
+        $assembledSummary -like '*Confirmatory: descriptive, no conclusion*' -and
+        $assembledSummary.Contains($freeze.Sha256) -and $assembledSummary.Contains($thresholdsSha))
+    Assert-True 'confirmatory summary: insufficient valid pairs give no sign evidence against H0' (
+        $assembledSign.Primary.Evidence[0].N -eq 0 -and $assembledSign.Primary.Evidence[0].PValue -eq 1 -and
+        @($assembledSign.Primary.Evidence[0].Excluded).Count -eq 2 -and -not $assembledSign.Primary.Adjustments[0].Reject)
+    Assert-True 'confirmatory summary: missing guardrail observations stay missing' (
+        $assembledGuardrails.Count -eq 4 -and
+        @($assembledGuardrails | Where-Object {
+            $_.RunsMissingCounts -ne '2' -or $_.P95MedianMs -ne '' -or $_.P95LimitVsAMs -ne '' -or $_.FirstPageLimitVsAMs -ne ''
+        }).Count -eq 0)
+    $pairs = @(foreach ($triplet in ($ok.Schedule | Group-Object Cell, Triplet)) {
+        foreach ($comparison in 'C-A', 'C-B', 'B-A') {
+            [pscustomobject]@{
+                Cell = $triplet.Group[0].Cell; Triplet = $triplet.Group[0].Triplet; Comparison = $comparison
+                Valid = $true; LoadPrivateMBDiff = '-40'; RunCpuSecondsDiff = '-2'
+            }
+        }
+    })
+    $sign = Get-CatalogCheckedSignResults -CheckedInputs $ok -PairRows $pairs
+    Assert-True 'sign analysis: keeps both verified hashes and the frozen triplet count' (
+        $sign.ManifestSha256 -eq $freeze.Sha256 -and $sign.ThresholdsSha256 -eq $thresholdsSha -and
+        $sign.Primary.Evidence[0].N -eq 2 -and $sign.NiRam.Adjustments.Count -eq 0 -and
+        $sign.NiCpu.Evidence[0].Below -eq 2)
+    foreach ($fixture in @(
+        @{ Rows = @($pairs | Select-Object -SkipLast 1); Checked = $ok; Message = 'do not cover the full frozen schedule' }
+        @{ Rows = $pairs + $pairs[0]; Checked = $ok; Message = 'Duplicate pair row' }
+        @{ Rows = $pairs; Checked = (Test-Confirm @($session1)); Message = 'validation must pass' }
+    )) {
+        $errorText = ''
+        try { Get-CatalogCheckedSignResults -CheckedInputs $fixture.Checked -PairRows $fixture.Rows | Out-Null }
+        catch { $errorText = $_.Exception.Message }
+        Assert-True "sign analysis refuses inputs: $($fixture.Message)" ($errorText -like "*$($fixture.Message)*") $errorText
+    }
 
     # Thresholds SHA-256 (Import-CatalogThresholds inside the input check).
     $editedThresholds = Join-Path $confirmRoot 'thresholds-edited.csv'
@@ -607,6 +687,9 @@ try {
     Assert-ConfirmRefused 'a malformed thresholds hash' (Test-Confirm @($session1, $session2) -ThresholdsHash 'abc') 'not a 64-digit'
     Assert-ConfirmRefused 'missing thresholds' (Test-Confirm @($session1, $session2) -Thresholds (Join-Path $confirmRoot 'none.csv')) 'thresholds.csv not found'
     Assert-ConfirmRefused 'a frozen manifest edited after the freeze' (Test-Confirm @($session1, $session2) -Freeze ([pscustomobject]@{ Path = $freeze.Path; Sha256 = ('0' * 64) })) 'frozen manifest SHA-256'
+    $editedManifest = Join-Path $confirmRoot 'manifest-edited.json'
+    [IO.File]::WriteAllText($editedManifest, [IO.File]::ReadAllText($freeze.Path).Replace('N2D16/RAM', 'N4D64/RAM'))
+    Assert-ConfirmRefused 'a change to frozen sign membership' (Test-Confirm @($session1, $session2) -Freeze ([pscustomobject]@{ Path = $editedManifest; Sha256 = $freeze.Sha256 })) 'frozen manifest SHA-256'
     Assert-ConfirmRefused 'a malformed frozen manifest hash' (Test-Confirm @($session1, $session2) -Freeze ([pscustomobject]@{ Path = $freeze.Path; Sha256 = 'abc' })) 'not a 64-digit hex value'
 
     # Mixed phases.
@@ -620,6 +703,14 @@ try {
     Assert-ConfirmRefused 'a pilot freeze given as the confirmatory one' (Test-Confirm $pilotSessions -Freeze $pilotFreeze) "the frozen manifest is phase 'Pilot'"
     $dryDir = New-Session 'dry-run-session' $freeze $confirmSchedule $block2 -Configuration @{ dryRun = $true }
     Assert-ConfirmRefused 'a dry run among the sessions' (Test-Confirm @($session1, $dryDir)) 'is a dry run'
+    $stringDry = New-Session 'string-dry-run' $freeze $confirmSchedule $block2 -Configuration @{ dryRun = 'false' }
+    Assert-ConfirmRefused 'a string instead of the dry-run marker' (Test-Confirm @($session1, $stringDry)) 'has no boolean dryRun marker'
+    $brokenJson = New-Session 'broken-json' $freeze $confirmSchedule $block2
+    Set-Content -LiteralPath (Join-Path $brokenJson 'configuration.json') -Value '{' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $brokenJson 'manifest.json') -Value '[{}]' -Encoding UTF8
+    $brokenResult = Test-Confirm @($session1, $brokenJson)
+    Assert-ConfirmRefused 'a malformed session configuration' $brokenResult 'configuration.json is not a readable JSON object'
+    Assert-ConfirmRefused 'a manifest array in the same session' $brokenResult 'manifest.json is not a readable JSON object'
     $otherHead = New-ConfirmConfiguration; $otherHead.gitHead = ('b' * 40)
     $otherHeadFreeze = New-Freeze 'other-head' $otherHead $confirmSchedule
     $otherHeadDir = New-Session 'other-head-session' $freeze $confirmSchedule $block2 -ManifestPath $otherHeadFreeze.Path
@@ -674,6 +765,15 @@ try {
     # Runs counted twice or not scheduled; nested sessions.
     $again = New-Session 'again-session' $freeze $confirmSchedule ($block2 + $block1[0])
     Assert-ConfirmRefused 'a run in two sessions' (Test-Confirm @($session1, $again)) "run $($block1[0]) has 2 runs.log entries"
+    $splitFirst = New-Session 'split-first' $freeze $confirmSchedule @($block1[0])
+    $splitSecond = New-Session 'split-second' $freeze $confirmSchedule (@($block1 | Select-Object -Skip 1) + $block2)
+    Assert-ConfirmRefused 'a complete run set split within a block' (Test-Confirm @($splitFirst, $splitSecond)) 'block 1 is split across results directories'
+    $invalidLog = New-Session 'invalid-log' $freeze $confirmSchedule $block2
+    Add-Content -LiteralPath (Join-Path $invalidLog 'runs.log') -Value '{"name":["a-run"]}', '{}', 'not JSON'
+    $invalidLogResult = Test-Confirm @($session1, $invalidLog)
+    Assert-ConfirmRefused 'a non-string run name' $invalidLogResult 'runs.log line 7 has no valid run name'
+    Assert-ConfirmRefused 'a missing run name' $invalidLogResult 'runs.log line 8 has no valid run name'
+    Assert-ConfirmRefused 'an unreadable run log entry' $invalidLogResult 'runs.log line 9 is not readable'
     $extra = New-Session 'extra-session' $freeze $confirmSchedule ($block2 + 'r999-N8D256-A')
     Assert-ConfirmRefused 'a run that is not scheduled' (Test-Confirm @($session1, $extra)) 'run r999-N8D256-A is in runs.log but not in the frozen schedule'
     Assert-ConfirmRefused 'the same session twice' (Test-Confirm @($session1, $session1, $session2)) 'given more than once'

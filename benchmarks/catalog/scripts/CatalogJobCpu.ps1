@@ -582,7 +582,7 @@ function Get-CatalogJobValueAt {
     if ($before.Count -eq 0) { return [pscustomobject]@{ Row = $null; GapSeconds = $null; Problem = "no job row at or before $($Time.ToString('o'))" } }
     $row = $before[$before.Count - 1]
     $gap = ($Time - $row.Time).TotalSeconds
-    $problem = if ($gap -gt $MaxGapSeconds) { "last job row {0:F3} s before {1} (> {2} s)" -f $gap, $Time.ToString('o'), $MaxGapSeconds } else { $null }
+    $problem = if ($gap -gt $MaxGapSeconds) { [string]::Format([Globalization.CultureInfo]::InvariantCulture, 'last job row {0:F3} s before {1} (> {2} s)', $gap, $Time.ToString('o'), $MaxGapSeconds) } else { $null }
     [pscustomobject]@{ Row = $row; GapSeconds = $gap; Problem = $problem }
 }
 
@@ -657,11 +657,11 @@ function Get-CatalogJobCpu {
     $maxInterval = 0.0
     for ($i = 1; $i -lt $upToEnd.Count; $i++) { $maxInterval = [Math]::Max($maxInterval, ($upToEnd[$i].Time - $upToEnd[$i - 1].Time).TotalSeconds) }
     $result.MaxRowIntervalSeconds = $maxInterval
-    if ($maxInterval -gt $Limits.MaxRowIntervalSeconds) { $problems.Add(("job rows {0:F3} s apart up to the end (> {1} s)" -f $maxInterval, $Limits.MaxRowIntervalSeconds)) }
+    if ($maxInterval -gt $Limits.MaxRowIntervalSeconds) { $problems.Add([string]::Format([Globalization.CultureInfo]::InvariantCulture, 'job rows {0:F3} s apart up to the end (> {1} s)', $maxInterval, $Limits.MaxRowIntervalSeconds)) }
     $drift = 0.0
     foreach ($row in $parsed) { $drift = [Math]::Max($drift, [Math]::Abs((($row.Time - $parsed[0].Time).TotalSeconds) - ($row.Elapsed - $parsed[0].Elapsed))) }
     $result.MaxClockDriftSeconds = $drift
-    if ($drift -gt $Limits.MaxClockDriftSeconds) { $problems.Add(("wall clock drifted {0:F3} s from the stopwatch (> {1} s)" -f $drift, $Limits.MaxClockDriftSeconds)) }
+    if ($drift -gt $Limits.MaxClockDriftSeconds) { $problems.Add([string]::Format([Globalization.CultureInfo]::InvariantCulture, 'wall clock drifted {0:F3} s from the stopwatch (> {1} s)', $drift, $Limits.MaxClockDriftSeconds)) }
 
     # The interval ends at endedAt: the last row at or before it; nothing after it counts.
     $atEnd = Get-CatalogJobValueAt -Rows $parsed -Time $end -MaxGapSeconds $Limits.MaxBoundaryGapSeconds

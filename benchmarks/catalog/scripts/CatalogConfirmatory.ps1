@@ -17,7 +17,7 @@
 #   manifest; every cell and triplet complete with one run per arm
 #   (Test-CatalogSchedule); runs = cells x arms x triplets;
 # - completeness: every scheduled run has a runs.log entry in exactly one
-#   session, and no session has an entry for a run that is not scheduled.
+#   session, no session has an unscheduled run, and blocks are not split.
 #
 # A run that was started but is invalid by §7 (no report, a failed monitor,
 # missing job artifacts) is not missing data here: it stays in the analysis
@@ -33,6 +33,32 @@ function Get-CatalogJsonProperty {
     $Object.PSObject.Properties[$Name].Value
 }
 
+function Read-CatalogConfirmatoryJson {
+    param([string]$Path, [System.Collections.Generic.List[string]]$Problems, [string]$FrozenSha256)
+    try {
+        if ($FrozenSha256) {
+            $resolved = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).ProviderPath
+            $stream = [IO.MemoryStream]::new([IO.File]::ReadAllBytes($resolved))
+            try {
+                $actual = (Get-FileHash -InputStream $stream -Algorithm SHA256).Hash.ToLowerInvariant()
+                if ($actual -ne $FrozenSha256) {
+                    $Problems.Add("frozen manifest SHA-256 $actual does not match $($FrozenSha256.ToLowerInvariant())")
+                    return
+                }
+                $stream.Position = 0
+                $reader = [IO.StreamReader]::new($stream)
+                try { $json = $reader.ReadToEnd() } finally { $reader.Dispose() }
+            } finally { $stream.Dispose() }
+        }
+        else { $json = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop }
+        if ($json -notmatch '^\s*\{') { throw 'Expected a JSON object.' }
+        $value = ConvertFrom-Json -InputObject $json -ErrorAction Stop
+        if ($value -isnot [pscustomobject]) { throw 'Expected a JSON object.' }
+        $value
+    }
+    catch { $Problems.Add("$Path is not a readable JSON object: $($_.Exception.Message)") }
+}
+
 function Test-CatalogConfirmatoryInputs {
     param(
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$ResultsDirectories,
@@ -42,19 +68,17 @@ function Test-CatalogConfirmatoryInputs {
         [Parameter(Mandatory = $true)][AllowEmptyString()][string]$ThresholdsSha256
     )
     $problems = New-Object System.Collections.Generic.List[string]
-    $result = [ordered]@{ Problems = $problems; ManifestSha256 = $null; ThresholdsSha256 = $null; Thresholds = $null; Schedule = $null; Runs = @() }
+    $result = [ordered]@{ Problems = $problems; Manifest = $null; ManifestSha256 = $null; ThresholdsSha256 = $null; Thresholds = $null; Schedule = $null; Runs = @() }
 
     # The frozen manifest.
     $frozen = $null
     if ($FrozenManifestSha256 -notmatch '^[0-9a-fA-F]{64}$') { $problems.Add("the frozen manifest SHA-256 is not a 64-digit hex value ('$FrozenManifestSha256')") }
     elseif (-not (Test-Path -LiteralPath $FrozenManifestPath -PathType Leaf)) { $problems.Add("missing data: frozen manifest '$FrozenManifestPath' not found") }
     else {
-        $actual = (Get-FileHash -LiteralPath $FrozenManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($actual -ne $FrozenManifestSha256.ToLowerInvariant()) { $problems.Add("frozen manifest SHA-256 $actual does not match $($FrozenManifestSha256.ToLowerInvariant())") }
-        else {
-            $result.ManifestSha256 = $actual
-            try { $frozen = Get-Content -LiteralPath $FrozenManifestPath -Raw | ConvertFrom-Json }
-            catch { $problems.Add("the frozen manifest is not readable JSON: $($_.Exception.Message)") }
+        $frozen = Read-CatalogConfirmatoryJson -Path $FrozenManifestPath -Problems $problems -FrozenSha256 $FrozenManifestSha256
+        if ($null -ne $frozen) {
+            $result.ManifestSha256 = $FrozenManifestSha256.ToLowerInvariant()
+            $result.Manifest = $frozen
         }
     }
     $cells = @(); $arms = @(); $triplets = 0
@@ -102,17 +126,24 @@ function Test-CatalogConfirmatoryInputs {
         if (-not (Test-Path -LiteralPath $directory -PathType Container)) { $problems.Add("missing data: results directory $directory not found"); continue }
         if ($missing.Count -gt 0) { $problems.Add("missing data: $directory has no $($missing -join ', ')") }
         if ($missing -notcontains 'configuration.json') {
-            $configuration = Get-Content -LiteralPath (Join-Path $directory 'configuration.json') -Raw | ConvertFrom-Json
-            $phase = [string](Get-CatalogJsonProperty $configuration 'phase')
-            if ($phase -ne 'Confirmatory') { $problems.Add("mixed phases: $directory is phase '$phase', not Confirmatory") }
-            if ((Get-CatalogJsonProperty $configuration 'dryRun') -eq $true) { $problems.Add("$directory is a dry run") }
-            $recorded = [string](Get-CatalogJsonProperty $configuration 'frozenManifestSha256')
-            if ($null -ne $result.ManifestSha256 -and $recorded.ToLowerInvariant() -ne $result.ManifestSha256) { $problems.Add("$directory was run against manifest SHA-256 '$recorded', not the frozen $($result.ManifestSha256)") }
+            $configuration = Read-CatalogConfirmatoryJson -Path (Join-Path $directory 'configuration.json') -Problems $problems
+            if ($null -ne $configuration) {
+                $phase = [string](Get-CatalogJsonProperty $configuration 'phase')
+                if ($phase -ne 'Confirmatory') { $problems.Add("mixed phases: $directory is phase '$phase', not Confirmatory") }
+                $dryRun = $null
+                if ($configuration.PSObject.Properties['dryRun']) { $dryRun = $configuration.PSObject.Properties['dryRun'].Value }
+                if ($dryRun -isnot [bool]) { $problems.Add("$directory has no boolean dryRun marker") }
+                elseif ($dryRun) { $problems.Add("$directory is a dry run") }
+                $recorded = [string](Get-CatalogJsonProperty $configuration 'frozenManifestSha256')
+                if ($null -ne $result.ManifestSha256 -and $recorded.ToLowerInvariant() -ne $result.ManifestSha256) { $problems.Add("$directory was run against manifest SHA-256 '$recorded', not the frozen $($result.ManifestSha256)") }
+            }
         }
         if ($missing -notcontains 'manifest.json' -and $null -ne $frozen) {
-            $own = Get-Content -LiteralPath (Join-Path $directory 'manifest.json') -Raw | ConvertFrom-Json
-            $differences = @(Compare-CatalogManifest -Frozen $frozen -Current $own)
-            if ($differences.Count -gt 0) { $problems.Add("$directory differs from the frozen manifest: $($differences -join '; ')") }
+            $own = Read-CatalogConfirmatoryJson -Path (Join-Path $directory 'manifest.json') -Problems $problems
+            if ($null -ne $own) {
+                $differences = @(Compare-CatalogManifest -Frozen $frozen -Current $own)
+                if ($differences.Count -gt 0) { $problems.Add("$directory differs from the frozen manifest: $($differences -join '; ')") }
+            }
         }
         if ($missing -notcontains 'schedule.csv') {
             $own = @(Import-Csv -LiteralPath (Join-Path $directory 'schedule.csv') | Sort-Object { [int]$_.Seq })
@@ -124,10 +155,18 @@ function Test-CatalogConfirmatoryInputs {
             foreach ($line in Get-Content -LiteralPath (Join-Path $directory 'runs.log')) {
                 $lineNumber++
                 if ([string]::IsNullOrWhiteSpace($line)) { continue }
-                try { $name = [string]((ConvertFrom-Json -InputObject $line).name) }
+                try { $event = ConvertFrom-Json -InputObject $line -ErrorAction Stop }
                 catch { $problems.Add("$directory runs.log line $lineNumber is not readable"); continue }
-                if (-not $entries.ContainsKey($name)) { $entries[$name] = New-Object System.Collections.Generic.List[string] }
-                $entries[$name].Add($directory)
+                $name = $null
+                if ($null -ne $event -and $null -ne $event.PSObject.Properties['name']) {
+                    $name = $event.PSObject.Properties['name'].Value
+                }
+                if ($name -isnot [string] -or [string]::IsNullOrWhiteSpace($name)) {
+                    $problems.Add("$directory runs.log line $lineNumber has no valid run name")
+                    continue
+                }
+                if (-not $entries.ContainsKey($name)) { $entries[$name] = New-Object System.Collections.Generic.List[object] }
+                $entries[$name].Add([pscustomobject]@{ Directory = $directory; Log = $event })
             }
         }
     }
@@ -139,12 +178,22 @@ function Test-CatalogConfirmatoryInputs {
         $scheduleProblems = @(Test-CatalogSchedule -Schedule $schedule -Cells $cells -Arms $arms -Triplets $triplets)
         foreach ($p in $scheduleProblems) { $problems.Add("cell composition: $p") }
         $runs = New-Object System.Collections.Generic.List[object]
+        $blockSessions = @{}
         foreach ($planned in $schedule) {
             $name = [string]$planned.Name
             $where = @(if ($entries.ContainsKey($name)) { $entries[$name] })
             if ($where.Count -eq 0) { $problems.Add("missing data: run $name was never run (no runs.log entry in any session)") }
-            elseif ($where.Count -gt 1) { $problems.Add("run $name has $($where.Count) runs.log entries ($($where -join ', '))") }
-            else { $runs.Add([pscustomobject]@{ Name = $name; Cell = $planned.Cell; Arm = $planned.Arm; Triplet = [int]$planned.Triplet; Directory = $where[0] }) }
+            elseif ($where.Count -gt 1) { $problems.Add("run $name has $($where.Count) runs.log entries ($($where.Directory -join ', '))") }
+            else {
+                $runs.Add([pscustomobject]@{ Name = $name; Cell = $planned.Cell; Arm = $planned.Arm; Triplet = [int]$planned.Triplet; Directory = $where[0].Directory; Log = $where[0].Log })
+                $block = [int]$planned.Block
+                if (-not $blockSessions.ContainsKey($block)) { $blockSessions[$block] = @{} }
+                $blockSessions[$block][$where[0].Directory] = $true
+            }
+        }
+        foreach ($block in @($blockSessions.Keys | Sort-Object)) {
+            $sessions = @($blockSessions[$block].Keys | Sort-Object)
+            if ($sessions.Count -gt 1) { $problems.Add("block $block is split across results directories: $($sessions -join ', ')") }
         }
         $scheduled = @{}
         foreach ($planned in $schedule) { $scheduled[[string]$planned.Name] = $true }

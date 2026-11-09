@@ -6,8 +6,9 @@ descriptive statistics per cell and arm.
 
 .DESCRIPTION
 Descriptive only: smoke and pilot results carry "descriptive, no conclusion"
-whatever the numbers. The confirmatory analysis (protocol §8b) is not here;
-it is written and reviewed before any confirmatory run.
+whatever the numbers. Confirmatory input mode assembles tables and frozen
+sign-test evidence from validated sessions. It does not issue conclusions
+under protocol §8b.
 
 Co-primary measures (protocol revision 3, §3, §8c):
 - RAM: LoadPrivateMBAvg, the time average over the load phase of the sum of
@@ -55,10 +56,21 @@ runs.csv with their reasons.
 Output goes to a new directory (default <results>\analysis-<timestamp>);
 raw data is never changed.
 #>
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Descriptive')]
 param(
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $true, ParameterSetName = 'Descriptive')]
     [string]$ResultsDirectory,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'Confirmatory')]
+    [string[]]$ConfirmatoryDirectories,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Confirmatory')]
+    [string]$FrozenManifestPath,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Confirmatory')]
+    [string]$FrozenManifestSha256,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Confirmatory')]
+    [string]$ThresholdsPath,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Confirmatory')]
+    [string]$ThresholdsSha256,
 
     [string]$OutputDirectory
 )
@@ -66,6 +78,7 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'CatalogJobCpu.ps1')
+. (Join-Path $PSScriptRoot 'CatalogSignAnalysis.ps1')
 $culture = [System.Globalization.CultureInfo]::InvariantCulture
 
 $minLoadCoverage = 0.8
@@ -97,6 +110,43 @@ function Get-Stat {
     return ($Values | Measure-Object -Average -Minimum -Maximum).$Kind
 }
 
+function Get-GuardrailRows {
+    param([object[]]$Runs)
+    foreach ($cell in ($Runs | Group-Object Cell)) {
+        $validByArm = @{}
+        foreach ($arm in 'A', 'B', 'C') {
+            $validByArm[$arm] = @($cell.Group | Where-Object { $_.Arm -eq $arm -and $_.Valid })
+        }
+        $p95A = Get-Median @($validByArm['A'] | ForEach-Object P95LatencyMsMax | Where-Object { $null -ne $_ })
+        $p95B = Get-Median @($validByArm['B'] | ForEach-Object P95LatencyMsMax | Where-Object { $null -ne $_ })
+        $firstA = Get-Median @($validByArm['A'] | ForEach-Object TimeToFirstPageMsMax | Where-Object { $null -ne $_ })
+        foreach ($arm in 'B', 'C') {
+            $all = @($cell.Group | Where-Object { $_.Arm -eq $arm })
+            if ($all.Count -eq 0) { continue }
+            $valid = $validByArm[$arm]
+            $p95 = Get-Median @($valid | ForEach-Object P95LatencyMsMax | Where-Object { $null -ne $_ })
+            $first = Get-Median @($valid | ForEach-Object TimeToFirstPageMsMax | Where-Object { $null -ne $_ })
+            [pscustomobject][ordered]@{
+                Cell = $cell.Name; Arm = $arm; Runs = $all.Count; ValidRuns = $valid.Count
+                RunsWithErrors = @($all | Where-Object { $_.Failures -gt 0 -or $_.Mismatches -gt 0 }).Count
+                RunsWithIncompleteSteps = @($all | Where-Object {
+                    $null -ne $_.CompletedSteps -and $null -ne $_.ScheduledSteps -and $_.CompletedSteps -lt $_.ScheduledSteps
+                }).Count
+                RunsMissingCounts = @($all | Where-Object {
+                    $null -eq $_.Failures -or $null -eq $_.Mismatches -or
+                    $null -eq $_.CompletedSteps -or $null -eq $_.ScheduledSteps
+                }).Count
+                P95MedianMs = $p95
+                P95LimitVsAMs = $(if ($null -ne $p95A) { [Math]::Max(1.5 * $p95A, $p95A + 20) })
+                P95AbsoluteLimitMs = 100
+                P95LimitVsBMs = $(if ($arm -eq 'C' -and $null -ne $p95B) { 1.2 * $p95B + 5 })
+                FirstPageMedianMs = $first
+                FirstPageLimitVsAMs = $(if ($null -ne $firstA) { 1.5 * $firstA + 200 })
+            }
+        }
+    }
+}
+
 function Format-Number {
     param([AllowNull()][object]$Value, [int]$Digits = 1)
     if ($null -eq $Value -or '' -eq $Value) { return '' }
@@ -126,15 +176,35 @@ function Get-Property {
     return $Object.$Name
 }
 
+$checked = $null
+$runDirectories = @{}
+$logs = @{}
+if ($PSCmdlet.ParameterSetName -eq 'Confirmatory') {
+    . (Join-Path $PSScriptRoot 'CatalogSchedule.ps1')
+    . (Join-Path $PSScriptRoot 'CatalogManifest.ps1')
+    . (Join-Path $PSScriptRoot 'CatalogConfirmatory.ps1')
+    $checked = Assert-CatalogConfirmatoryInputs -ResultsDirectories $ConfirmatoryDirectories -FrozenManifestPath $FrozenManifestPath -FrozenManifestSha256 $FrozenManifestSha256 -ThresholdsPath $ThresholdsPath -ThresholdsSha256 $ThresholdsSha256
+    foreach ($run in $checked.Runs) {
+        $runDirectories[$run.Name] = Join-Path $run.Directory 'runs'
+        $logs[$run.Name] = $run.Log
+    }
+    $ResultsDirectory = $ConfirmatoryDirectories[0]
+}
 $ResultsDirectory = (Resolve-Path -LiteralPath $ResultsDirectory).Path
 $configurationFile = Join-Path $ResultsDirectory 'configuration.json'
 $scheduleFile = Join-Path $ResultsDirectory 'schedule.csv'
-foreach ($file in @($configurationFile, $scheduleFile)) {
-    if (-not (Test-Path -LiteralPath $file)) { throw "Missing $file" }
+if ($checked) { $configuration = $checked.Manifest }
+else {
+    foreach ($file in @($configurationFile, $scheduleFile)) {
+        if (-not (Test-Path -LiteralPath $file)) { throw "Missing $file" }
+    }
+    $configuration = Get-Content -LiteralPath $configurationFile -Raw | ConvertFrom-Json
+    if ([string]$configuration.scenario -ne 'M') { throw "$configurationFile is not a scenario M run." }
 }
-$configuration = Get-Content -LiteralPath $configurationFile -Raw | ConvertFrom-Json
-if ([string]$configuration.scenario -ne 'M') { throw "$configurationFile is not a scenario M run." }
 $nominalInterval = [double]$configuration.sampleIntervalSeconds
+if ($checked -and ($nominalInterval -le 0 -or (Get-Property $configuration 'cpuSource') -ne 'job')) {
+    throw 'Confirmatory analysis requires a positive frozen sample interval and job CPU.'
+}
 # The CPU source is fixed by the runner in configuration.json, never inferred
 # from which files exist: with cpuSource = job every run needs its job files,
 # and a run without them is invalid. Results without cpuSource (written before
@@ -142,25 +212,26 @@ $nominalInterval = [double]$configuration.sampleIntervalSeconds
 $cpuSource = [string](Get-Property $configuration 'cpuSource')
 if ([string]::IsNullOrEmpty($cpuSource)) { $cpuSource = 'legacy-monitor' }
 elseif ($cpuSource -ne 'job') { throw "$configurationFile has an unknown cpuSource '$cpuSource'." }
-$schedule = @(Import-Csv -LiteralPath $scheduleFile | Sort-Object { [int]$_.Seq })
-$runsDirectory = Join-Path $ResultsDirectory 'runs'
-$logs = @{}
-$runLog = Join-Path $ResultsDirectory 'runs.log'
-if (Test-Path -LiteralPath $runLog) {
-    foreach ($line in Get-Content -LiteralPath $runLog) {
-        if ([string]::IsNullOrWhiteSpace($line)) { continue }
-        $entry = $line | ConvertFrom-Json
-        $logs[[string]$entry.name] = $entry
+$schedule = @(if ($checked) { $checked.Schedule } else { Import-Csv -LiteralPath $scheduleFile | Sort-Object { [int]$_.Seq } })
+if (-not $checked) {
+    $runLog = Join-Path $ResultsDirectory 'runs.log'
+    if (Test-Path -LiteralPath $runLog) {
+        foreach ($line in Get-Content -LiteralPath $runLog) {
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            $entry = $line | ConvertFrom-Json
+            $logs[[string]$entry.name] = $entry
+        }
     }
 }
 if (-not $OutputDirectory) { $OutputDirectory = Join-Path $ResultsDirectory ("analysis-{0}" -f (Get-Date -Format 'yyyyMMdd-HHmmss')) }
 if (Test-Path -LiteralPath $OutputDirectory) { throw "$OutputDirectory exists; analyses are never overwritten." }
-New-Item -ItemType Directory -Path $OutputDirectory | Out-Null
 
 $runs = New-Object System.Collections.Generic.List[object]
 $processes = New-Object System.Collections.Generic.List[object]
+$windowHeap = New-Object System.Collections.Generic.List[object]
 foreach ($planned in $schedule) {
     $name = [string]$planned.Name
+    $runsDirectory = if ($checked) { $runDirectories[$name] } else { Join-Path $ResultsDirectory 'runs' }
     $reasons = New-Object System.Collections.Generic.List[string]
     $row = [ordered]@{
         Seq = [int]$planned.Seq; Name = $name; Cell = $planned.Cell; Windows = [int]$planned.Windows; DataMib = [int]$planned.DataMib
@@ -174,7 +245,7 @@ foreach ($planned in $schedule) {
         LoadPrivateMBAvg = $null; LoadPrivateMBMaxSample = $null; SteadyPrivateMBAvg = $null; IdleBeforePrivateMBAvg = $null
         ExePrivateMBLoadAvg = $null; WebViewPrivateMBLoadAvg = $null; LoadCpuSeconds = $null; LoadWorkingSetMBUpperBound = $null
         RunCpuSeconds = $null; StartupCpuSeconds = $null; CpuExitedProcesses = $null; CpuProcesses = $null
-        RunRows = $null; RunCoverage = $null; RunIntervalMaxSeconds = $null
+        RunRows = $null; RunCoverage = $null; RunIntervalMaxSeconds = $null; MonitorCpuUnreadableRows = $null
         CpuSource = $null; MonitorRunCpuSeconds = $null; MonitorStartupCpuSeconds = $null; MonitorLoadCpuSeconds = $null; MonitorCpuNotes = ''
         JobProcesses = $null; JobProcessesNeverSeenByMonitor = $null; MonitorProcessesInJob = $null; JobEndGapSeconds = $null
         JobMaxRowIntervalSeconds = $null; JobMaxClockDriftSeconds = $null; JobNotes = ''
@@ -185,7 +256,7 @@ foreach ($planned in $schedule) {
     if ($null -eq $log) { $reasons.Add('no runs.log entry (not run)') }
     else {
         if ($null -eq (Get-Property $log 'exitCode') -or [int]$log.exitCode -ne 0) { $reasons.Add("app exit code '$(Get-Property $log 'exitCode')'") }
-        if ($log.timedOut) { $reasons.Add('timed out') }
+        if (Get-Property $log 'timedOut') { $reasons.Add('timed out') }
         if ($null -eq (Get-Property $log 'monitorExit') -or [int]$log.monitorExit -ne 0) { $reasons.Add("monitor exit code '$(Get-Property $log 'monitorExit')'") }
         $row.MonitorCpuSeconds = Get-Property $log 'monitorCpuSeconds'
     }
@@ -306,6 +377,7 @@ foreach ($planned in $schedule) {
             else {
                 if ($runSamples[0].Time -gt (Get-Time $report.phases.idleBeforeStartedAt)) { $cpuReasons.Add('first monitor sample after the idle-before phase started') }
                 $unreadableRows = @($runSamples | Where-Object { $null -eq $_.CpuUnreadable -or $_.CpuUnreadable -gt 0 })
+                $row.MonitorCpuUnreadableRows = $unreadableRows.Count
                 if ($unreadableRows.Count -gt 0) {
                     $why = @($unreadableRows | ForEach-Object { $_.CpuReasons } | Sort-Object -Unique)
                     $cpuReasons.Add('unreadable CPU in a monitor row' + $(if ($why.Count -gt 0) { " ($($why -join '; '))" } else { '' }))
@@ -419,6 +491,20 @@ foreach ($planned in $schedule) {
     $row.Valid = $reasons.Count -eq 0
     $row.InvalidReason = $reasons -join '; '
     $runs.Add([pscustomobject]$row)
+    $windowReports = Get-Property $report 'windows'
+    if ($null -ne $windowReports) {
+        foreach ($window in $windowReports.PSObject.Properties) {
+            $heap = Get-Property $window.Value 'heap'
+            $supported = Get-Property $heap 'supported'
+            $bytes = ConvertTo-Number (Get-Property $heap 'loadAvgBytes')
+            $heapMiB = if ($supported -is [bool] -and $supported -and $null -ne $bytes -and $bytes -ge 0) { $bytes / 1MB }
+            $windowHeap.Add([pscustomobject][ordered]@{
+                Run = $name; Cell = $row.Cell; Arm = $row.Arm; Triplet = $row.Triplet; RunValid = $row.Valid
+                Window = $window.Name; WindowPassed = Get-Property $window.Value 'passed'
+                HeapSupported = $supported; LoadHeapMiB = $heapMiB
+            })
+        }
+    }
 }
 
 # Differences inside each triplet, valid runs only.
@@ -477,10 +563,17 @@ function Export-Rows {
         [pscustomobject]$out
     } | Export-Csv -LiteralPath (Join-Path $OutputDirectory $File) -NoTypeInformation -Encoding UTF8
 }
+$signResults = if ($checked) { Get-CatalogCheckedSignResults -CheckedInputs $checked -PairRows $triplets.ToArray() }
+New-Item -ItemType Directory -Path $OutputDirectory -ErrorAction Stop | Out-Null
 Export-Rows $runs.ToArray() 'runs.csv'
 Export-Rows $triplets.ToArray() 'triplets.csv'
 Export-Rows $summary.ToArray() 'summary.csv'
+Export-Rows @(Get-GuardrailRows -Runs $runs.ToArray()) 'guardrail-evidence.csv'
 if ($processes.Count -gt 0) { Export-Rows $processes.ToArray() 'processes.csv' }
+if ($windowHeap.Count -gt 0) { Export-Rows $windowHeap.ToArray() 'window-heap.csv' }
+if ($checked) {
+    $signResults | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'sign-evidence.json') -Encoding UTF8
+}
 
 # Retained size check (protocol §4): host Private above the D0 cell with the same windows, against the generator's size.
 $retained = New-Object System.Collections.Generic.List[string]
@@ -502,6 +595,14 @@ $lines = New-Object System.Collections.Generic.List[string]
 $lines.Add("# Scenario M: $($configuration.phase) summary")
 $lines.Add('')
 $lines.Add("**$($configuration.phase): descriptive, no conclusion.** Platform: $($configuration.os) on $($configuration.machine); every statement is for this platform only.")
+if ($checked) {
+    $lines.Add('')
+    $lines.Add("Frozen manifest SHA-256: $($checked.ManifestSha256)")
+    $lines.Add("Frozen thresholds SHA-256: $($checked.ThresholdsSha256)")
+    $lines.Add('Frozen sign-test evidence is in sign-evidence.json. Claim decisions are pending.')
+}
+$lines.Add('')
+$lines.Add('Individual guardrail measures and limits are in guardrail-evidence.csv when B or C was scheduled.')
 $lines.Add('')
 $lines.Add("Git $($configuration.gitHead)$(if ($configuration.gitDirty) { ' (dirty)' }); arms $(@($configuration.arms) -join ', '); cells $(@($configuration.cells) -join ', '); $($configuration.triplets) triplets; schedule seed $($configuration.scheduleSeed).")
 $lines.Add('')
@@ -541,6 +642,19 @@ foreach ($group in ($triplets | Group-Object Cell, Comparison)) {
             (Format-Range $cell $comparison 'LoadCpuSecondsDiff' 2)))
 }
 $lines.Add('')
+$lines.Add('## RAM and CPU correlation within triplets')
+$lines.Add('')
+$lines.Add('Pearson correlation of the paired RAM and CPU differences, by cell and comparison. Undefined with fewer than two valid pairs or a constant outcome.')
+$lines.Add('')
+$lines.Add('| Cell | Comparison | Valid pairs | Pearson r |')
+$lines.Add('|---|---|---|---|')
+foreach ($group in ($triplets | Group-Object Cell, Comparison)) {
+    $valid = @($group.Group | Where-Object Valid)
+    $correlation = Get-CatalogPairCorrelation -ValidPairs $valid
+    $display = if ($null -eq $correlation) { 'n/a' } else { Format-Number $correlation 3 }
+    $lines.Add(("| {0} | {1} | {2} | {3} |" -f $group.Group[0].Cell, $group.Group[0].Comparison, $valid.Count, $display))
+}
+$lines.Add('')
 $lines.Add('## Position effect (differences by the arm that ran first)')
 $lines.Add('')
 $lines.Add('| Cell | Comparison | First arm | Pairs | Σ Private MB median | Run CPU s median |')
@@ -554,10 +668,25 @@ $lines.Add('')
 $lines.Add('## Retained size (protocol §4)')
 $lines.Add('')
 $lines.Add('Host and WebView2 Private above the D0 cell with the same windows and arm (medians), against the generator size of the Rust representation and the JS heap of all windows.')
+if ($windowHeap.Count -gt 0) {
+    $lines.Add('Per-window JS heap during load is in window-heap.csv. Blank heap values mean no measurement.')
+}
 $lines.Add('')
 $lines.Add('| Cell | Arm | Nominal MiB | Generator MB | Host above D0 MB | WebView2 above D0 MB | JS heap MB |')
 $lines.Add('|---|---|---|---|---|---|---|')
 foreach ($line in $retained) { $lines.Add($line) }
+$lines.Add('')
+$lines.Add('## Sampling quality by run')
+$lines.Add('')
+$lines.Add('Monitor CPU unreadable rows count samples with missing or unreadable CPU counters. They are diagnostic when Job Object is the CPU source. A blank value means no observation.')
+$lines.Add('')
+$lines.Add('| Run | Valid | Load coverage | Median load interval (s) | Max load interval (s) | Monitor CPU unreadable rows | Job processes unseen by monitor |')
+$lines.Add('|---|---|---|---|---|---|---|')
+foreach ($run in $runs) {
+    $lines.Add(("| {0} | {1} | {2} | {3} | {4} | {5} | {6} |" -f $run.Name, $run.Valid,
+            (Format-Number $run.LoadCoverage 3), (Format-Number $run.LoadIntervalMedianSeconds 3),
+            (Format-Number $run.LoadIntervalMaxSeconds 3), $run.MonitorCpuUnreadableRows, $run.JobProcessesNeverSeenByMonitor))
+}
 $lines.Add('')
 $lines.Add('## Invalid runs')
 $lines.Add('')
