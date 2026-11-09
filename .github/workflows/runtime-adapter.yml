@@ -1,6 +1,8 @@
 name: Runtime adapter
 
 on:
+  # Allow release verification when the automatic push run is absent.
+  workflow_dispatch:
   # The release revision is a commit on main or a preview tag, so both are
   # tested at their exact SHA, not only the pull request that produced them.
   push:
