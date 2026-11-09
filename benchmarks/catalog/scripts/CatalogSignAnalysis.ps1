@@ -215,6 +215,25 @@ function Get-CatalogConfirmatorySignFamily {
     }
 }
 
+function Get-CatalogFixedCostControl {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$PairRows,
+        [Parameter(Mandatory = $true)][ValidateRange(1, 50)][int]$Triplets
+    )
+    foreach ($outcome in 'RAM', 'CPU') {
+        $band = if ($outcome -eq 'RAM') { 10 } else { 1 }
+        $pairs = Get-CatalogPairedDifferences -Rows $PairRows -Cell N2D0 -Comparison C-A -Outcome $outcome -Triplets $Triplets
+        $interval = Get-CatalogMedianInterval -Differences $pairs.Differences -Alpha 0.05
+        $withinBand = $null
+        if ($interval.Rank -gt 0) { $withinBand = $interval.Lower -ge -$band -and $interval.Upper -le $band }
+        [pscustomobject]@{
+            Cell = 'N2D0'; Comparison = 'C-A'; Outcome = $outcome
+            Band = $band; NominalCoverage = 0.95; Interval = $interval
+            WithinReferenceBand = $withinBand; Excluded = $pairs.Excluded
+        }
+    }
+}
+
 function Get-CatalogCheckedSignResults {
     # Pair rows must be produced by the summarizer from the checked sessions.
     # This step checks their schedule coverage before computing sign evidence.
@@ -259,12 +278,16 @@ function Get-CatalogCheckedSignResults {
     }
     $triplets = ($CheckedInputs.Schedule | Measure-Object -Property Triplet -Maximum).Maximum
     $inputs = @{ ThresholdRows = $CheckedInputs.Thresholds; PairRows = $PairRows; Triplets = $triplets }
+    $fixedCost = @(if ($CheckedInputs.Schedule.Cell -contains 'N2D0') {
+        Get-CatalogFixedCostControl -PairRows $PairRows -Triplets $triplets
+    })
     [pscustomobject]@{
         ManifestSha256 = $CheckedInputs.ManifestSha256
         ThresholdsSha256 = $CheckedInputs.ThresholdsSha256
         Primary = Get-CatalogConfirmatorySignFamily @inputs -Family P -FrozenIds $ids['P']
         NiRam = Get-CatalogConfirmatorySignFamily @inputs -Family NI-RAM -FrozenIds $ids['NI-RAM']
         NiCpu = Get-CatalogConfirmatorySignFamily @inputs -Family NI-CPU -FrozenIds $ids['NI-CPU']
+        DescriptiveFixedCost = $fixedCost
     }
 }
 

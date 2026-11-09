@@ -103,6 +103,8 @@ The confirmatory manifest carries a `signFamilies` object with arrays `P`, `NI-R
 
 Family P retains hypotheses with fewer than ten valid C–A pairs in the Holm correction. The report labels them `InsufficientValidTriplets` and uses a p-value of 1.
 
+When the frozen schedule includes N2D0, `sign-evidence.json` also records the descriptive C–A fixed-cost control. It uses unadjusted 95% median intervals and reports whether the entire interval lies within ±10 MiB for RAM or ±1 second for CPU. An unbounded interval has no band decision.
+
 `guardrail-evidence.csv` lists the individual limits and observed medians for B and C. Latency medians use valid runs. The counts of errors and incomplete workloads include invalid runs with available reports. Missing observations are recorded separately. The table leaves the final combination of latency limits to the protocol decision.
 
 ## What this does not show

@@ -63,6 +63,21 @@ $six = Get-CatalogMedianInterval -Differences (6..1) -Alpha 0.05
 Assert-True 'six pairs can only use their extrema at 95 percent' ($six.Rank -eq 1 -and $six.Lower -eq 1 -and $six.Upper -eq 6 -and [Math]::Abs($six.Coverage - 0.96875) -lt 1e-12)
 $eleven = Get-CatalogMedianInterval -Differences (11..1) -Alpha 0.05
 Assert-True 'eleven pairs use the second and tenth order statistics' ($eleven.Rank -eq 2 -and $eleven.Lower -eq 2 -and $eleven.Upper -eq 10)
+$controlPairs = @(foreach ($triplet in 1..6) {
+    [pscustomobject]@{
+        Cell = 'N2D0'; Comparison = 'C-A'; Triplet = $triplet; Valid = $true; InvalidReason = ''
+        LoadPrivateMBDiff = 10.0; RunCpuSecondsDiff = 1.25
+    }
+})
+$control = @(Get-CatalogFixedCostControl -PairRows $controlPairs -Triplets 6)
+Assert-True 'fixed-cost report notes an interval touching the RAM band and CPU outside its band' (
+    $control[0].WithinReferenceBand -eq $true -and $control[0].Interval.Upper -eq 10 -and
+    $control[1].WithinReferenceBand -eq $false -and $control[1].Interval.Lower -eq 1.25)
+$controlPairs[5].Valid = $false
+$controlPairs[5].InvalidReason = 'missing monitor'
+$control = @(Get-CatalogFixedCostControl -PairRows $controlPairs -Triplets 6)
+Assert-True 'fixed-cost report marks an unbounded interval without a band decision' (
+    $control[0].Interval.N -eq 5 -and $null -eq $control[0].WithinReferenceBand -and $control[0].Excluded[0].Triplet -eq 6)
 
 $pairRows[1].LoadPrivateMBDiff = '-12.5'
 $thresholds = @(
