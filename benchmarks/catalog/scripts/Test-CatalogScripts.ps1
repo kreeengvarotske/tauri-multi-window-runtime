@@ -626,6 +626,14 @@ try {
     Assert-ConfirmRefused 'a pilot freeze given as the confirmatory one' (Test-Confirm $pilotSessions -Freeze $pilotFreeze) "the frozen manifest is phase 'Pilot'"
     $dryDir = New-Session 'dry-run-session' $freeze $confirmSchedule $block2 -Configuration @{ dryRun = $true }
     Assert-ConfirmRefused 'a dry run among the sessions' (Test-Confirm @($session1, $dryDir)) 'is a dry run'
+    $stringDry = New-Session 'string-dry-run' $freeze $confirmSchedule $block2 -Configuration @{ dryRun = 'false' }
+    Assert-ConfirmRefused 'a string instead of the dry-run marker' (Test-Confirm @($session1, $stringDry)) 'has no boolean dryRun marker'
+    $brokenJson = New-Session 'broken-json' $freeze $confirmSchedule $block2
+    Set-Content -LiteralPath (Join-Path $brokenJson 'configuration.json') -Value '{' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $brokenJson 'manifest.json') -Value '[{}]' -Encoding UTF8
+    $brokenResult = Test-Confirm @($session1, $brokenJson)
+    Assert-ConfirmRefused 'a malformed session configuration' $brokenResult 'configuration.json is not a readable JSON object'
+    Assert-ConfirmRefused 'a manifest array in the same session' $brokenResult 'manifest.json is not a readable JSON object'
     $otherHead = New-ConfirmConfiguration; $otherHead.gitHead = ('b' * 40)
     $otherHeadFreeze = New-Freeze 'other-head' $otherHead $confirmSchedule
     $otherHeadDir = New-Session 'other-head-session' $freeze $confirmSchedule $block2 -ManifestPath $otherHeadFreeze.Path

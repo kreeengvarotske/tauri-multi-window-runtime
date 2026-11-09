@@ -33,6 +33,18 @@ function Get-CatalogJsonProperty {
     $Object.PSObject.Properties[$Name].Value
 }
 
+function Read-CatalogConfirmatoryJson {
+    param([string]$Path, [System.Collections.Generic.List[string]]$Problems)
+    try {
+        $json = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop
+        if ($json -notmatch '^\s*\{') { throw 'Expected a JSON object.' }
+        $value = ConvertFrom-Json -InputObject $json -ErrorAction Stop
+        if ($value -isnot [pscustomobject]) { throw 'Expected a JSON object.' }
+        $value
+    }
+    catch { $Problems.Add("$Path is not a readable JSON object: $($_.Exception.Message)") }
+}
+
 function Test-CatalogConfirmatoryInputs {
     param(
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$ResultsDirectories,
@@ -53,8 +65,7 @@ function Test-CatalogConfirmatoryInputs {
         if ($actual -ne $FrozenManifestSha256.ToLowerInvariant()) { $problems.Add("frozen manifest SHA-256 $actual does not match $($FrozenManifestSha256.ToLowerInvariant())") }
         else {
             $result.ManifestSha256 = $actual
-            try { $frozen = Get-Content -LiteralPath $FrozenManifestPath -Raw | ConvertFrom-Json }
-            catch { $problems.Add("the frozen manifest is not readable JSON: $($_.Exception.Message)") }
+            $frozen = Read-CatalogConfirmatoryJson -Path $FrozenManifestPath -Problems $problems
         }
     }
     $cells = @(); $arms = @(); $triplets = 0
@@ -102,17 +113,24 @@ function Test-CatalogConfirmatoryInputs {
         if (-not (Test-Path -LiteralPath $directory -PathType Container)) { $problems.Add("missing data: results directory $directory not found"); continue }
         if ($missing.Count -gt 0) { $problems.Add("missing data: $directory has no $($missing -join ', ')") }
         if ($missing -notcontains 'configuration.json') {
-            $configuration = Get-Content -LiteralPath (Join-Path $directory 'configuration.json') -Raw | ConvertFrom-Json
-            $phase = [string](Get-CatalogJsonProperty $configuration 'phase')
-            if ($phase -ne 'Confirmatory') { $problems.Add("mixed phases: $directory is phase '$phase', not Confirmatory") }
-            if ((Get-CatalogJsonProperty $configuration 'dryRun') -eq $true) { $problems.Add("$directory is a dry run") }
-            $recorded = [string](Get-CatalogJsonProperty $configuration 'frozenManifestSha256')
-            if ($null -ne $result.ManifestSha256 -and $recorded.ToLowerInvariant() -ne $result.ManifestSha256) { $problems.Add("$directory was run against manifest SHA-256 '$recorded', not the frozen $($result.ManifestSha256)") }
+            $configuration = Read-CatalogConfirmatoryJson -Path (Join-Path $directory 'configuration.json') -Problems $problems
+            if ($null -ne $configuration) {
+                $phase = [string](Get-CatalogJsonProperty $configuration 'phase')
+                if ($phase -ne 'Confirmatory') { $problems.Add("mixed phases: $directory is phase '$phase', not Confirmatory") }
+                $dryRun = $null
+                if ($configuration.PSObject.Properties['dryRun']) { $dryRun = $configuration.PSObject.Properties['dryRun'].Value }
+                if ($dryRun -isnot [bool]) { $problems.Add("$directory has no boolean dryRun marker") }
+                elseif ($dryRun) { $problems.Add("$directory is a dry run") }
+                $recorded = [string](Get-CatalogJsonProperty $configuration 'frozenManifestSha256')
+                if ($null -ne $result.ManifestSha256 -and $recorded.ToLowerInvariant() -ne $result.ManifestSha256) { $problems.Add("$directory was run against manifest SHA-256 '$recorded', not the frozen $($result.ManifestSha256)") }
+            }
         }
         if ($missing -notcontains 'manifest.json' -and $null -ne $frozen) {
-            $own = Get-Content -LiteralPath (Join-Path $directory 'manifest.json') -Raw | ConvertFrom-Json
-            $differences = @(Compare-CatalogManifest -Frozen $frozen -Current $own)
-            if ($differences.Count -gt 0) { $problems.Add("$directory differs from the frozen manifest: $($differences -join '; ')") }
+            $own = Read-CatalogConfirmatoryJson -Path (Join-Path $directory 'manifest.json') -Problems $problems
+            if ($null -ne $own) {
+                $differences = @(Compare-CatalogManifest -Frozen $frozen -Current $own)
+                if ($differences.Count -gt 0) { $problems.Add("$directory differs from the frozen manifest: $($differences -join '; ')") }
+            }
         }
         if ($missing -notcontains 'schedule.csv') {
             $own = @(Import-Csv -LiteralPath (Join-Path $directory 'schedule.csv') | Sort-Object { [int]$_.Seq })
