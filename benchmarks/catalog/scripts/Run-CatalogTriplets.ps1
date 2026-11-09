@@ -96,7 +96,12 @@ param(
     # The runner refuses to start if the file's hash differs or if anything in
     # the manifest of this invocation differs from it.
     [string]$Manifest,
-    [string]$ManifestSha256
+    [string]$ManifestSha256,
+
+    # A protocol from a separate reviewed checkout and its expected hash.
+    [string]$ProtocolFile,
+    [ValidatePattern('^[0-9a-fA-F]{64}$')]
+    [string]$ProtocolSha256
 )
 
 Set-StrictMode -Version 2.0
@@ -107,7 +112,7 @@ $ErrorActionPreference = 'Stop'
 
 $benchRoot = Split-Path -Parent $PSScriptRoot
 $repoRoot = Split-Path -Parent (Split-Path -Parent $benchRoot)
-$protocolFile = Join-Path $repoRoot 'docs\benchmark\memory-pilot-protocol.md'
+$protocolPath = Join-Path $repoRoot 'docs\benchmark\memory-pilot-protocol.md'
 $sampleIntervalSeconds = 1
 
 if ($Phase -eq 'Pilot' -and -not $DryRun) {
@@ -115,6 +120,16 @@ if ($Phase -eq 'Pilot' -and -not $DryRun) {
 }
 if ($DryRun -and -not ($ExecutablesFrom -or $SkipBuild)) { throw '-DryRun builds nothing: give -ExecutablesFrom or -SkipBuild.' }
 if ([bool]$Manifest -ne [bool]$ManifestSha256) { throw '-Manifest and -ManifestSha256 go together.' }
+if ([bool]$ProtocolFile -ne [bool]$ProtocolSha256) { throw '-ProtocolFile and -ProtocolSha256 go together.' }
+if ($ProtocolFile) {
+    $protocolPath = (Resolve-Path -LiteralPath $ProtocolFile).Path
+}
+$protocolHash = if (Test-Path -LiteralPath $protocolPath -PathType Leaf) {
+    (Get-FileHash -LiteralPath $protocolPath -Algorithm SHA256).Hash
+} else { $null }
+if ($ProtocolSha256 -and $protocolHash -ne $ProtocolSha256) {
+    throw 'The protocol file does not match -ProtocolSha256.'
+}
 if ($ExecutablesFrom -and $SkipBuild) { throw 'Choose either -ExecutablesFrom or -SkipBuild.' }
 if ($Manifest -and -not ($ExecutablesFrom -or $SkipBuild)) { throw 'A frozen manifest requires prebuilt executables. Give -ExecutablesFrom or -SkipBuild.' }
 $OutputDirectory = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputDirectory)
@@ -276,7 +291,7 @@ $configuration = [ordered]@{
     manifestScriptSha256  = (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'CatalogManifest.ps1') -Algorithm SHA256).Hash
     dryRun                = [bool]$DryRun
     readmeSha256          = (Get-FileHash -LiteralPath (Join-Path $benchRoot 'README.md') -Algorithm SHA256).Hash
-    protocolSha256        = if (Test-Path -LiteralPath $protocolFile) { (Get-FileHash -LiteralPath $protocolFile -Algorithm SHA256).Hash } else { $null }
+    protocolSha256        = $protocolHash
 }
 # The manifest of this invocation; with -Manifest, nothing is written or run
 # unless it equals the frozen one.
@@ -303,7 +318,13 @@ if ($BuildRecord) {
 $configuration | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'configuration.json') -Encoding UTF8
 $runManifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'manifest.json') -Encoding UTF8
 Copy-Item -LiteralPath (Join-Path $benchRoot 'README.md') -Destination (Join-Path $OutputDirectory 'README.md')
-if (Test-Path -LiteralPath $protocolFile) { Copy-Item -LiteralPath $protocolFile -Destination (Join-Path $OutputDirectory 'protocol.md') }
+if ($protocolHash) {
+    $protocolCopy = Join-Path $OutputDirectory 'protocol.md'
+    Copy-Item -LiteralPath $protocolPath -Destination $protocolCopy -ErrorAction Stop
+    if ((Get-FileHash -LiteralPath $protocolCopy -Algorithm SHA256).Hash -ne $protocolHash) {
+        throw 'The protocol changed while preparing the run.'
+    }
+}
 
 # The full order, written before the first run.
 $schedule | Export-Csv -LiteralPath (Join-Path $OutputDirectory 'schedule.csv') -NoTypeInformation -Encoding UTF8

@@ -22,6 +22,8 @@ Use `scripts/Build-CatalogArms.ps1 -OutputDirectory <new build directory>` from 
 
 When replaying a frozen manifest, supply prebuilt executables with either `-ExecutablesFrom` or `-SkipBuild`. The runner checks the source executable hashes and the frozen manifest before creating the output directories or copying binaries.
 
+If the protocol lives in a separate checkout, pass `-ProtocolFile <file> -ProtocolSha256 <hash>`. The runner checks the supplied file before preparing outputs, records its hash in the manifest and preserves a checked copy with the run. A pilot preparation for review should use the intended protocol revision rather than leaving this field empty.
+
 At startup, arm C loads the catalog into the runtime's cache before the windows open, as arms A and B generate it at startup. The runner still refuses `-Phase Pilot` (except a `-DryRun`, which starts no app; see Running) until there is a native smoke of all three arms and the frozen protocol has had its final check (#33 §10).
 
 Everything else is the same in all arms: the frontend (`src/window.ts` runs one window; only `setupSource` picks the source), the table, the windows (`main`, `w1`…), the workload, the timing, the release profile, `Cargo.lock` (the crate is a member of the root workspace) and `--locked`. Runtime Lab and its public IPC contract are not touched; the `catalog_*` commands exist only in this app.
