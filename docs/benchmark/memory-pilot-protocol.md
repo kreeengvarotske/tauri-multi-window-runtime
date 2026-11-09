@@ -1,8 +1,9 @@
 # Memory and CPU benchmark: pilot protocol (draft for review)
 
 Status: **revision 3, Q1–Q8 decided, not yet frozen; two freezes (pilot, then confirmatory) per §10a** (roadmap Phase 4, `docs/ROADMAP.md`
-in #30). **Smoke gate open (11/12 valid on 2026-10-28), pilot blocked**
-(#36 decision 6687069270; state in §10). Revision 3 (2026-10-26, after #33 comment 6429162749) makes **RAM
+in #30). **12/12 valid in the Windows 11 build 26200 smoke; pilot blocked
+pending exact-revision evidence, freeze, and approval** (§10).
+Revision 3 (2026-10-26, after #33 comment 6429162749) makes **RAM
 and CPU co-primary outcomes**: hypotheses, multiplicity family, success
 criteria, the reading of discordant results, triplet counts, thresholds,
 duration and the pilot matrix are recomputed (§1, §3, §8, §10 Q7–Q8). Revision 3 also
@@ -220,10 +221,10 @@ WebView2 version; rustc; app and monitor hashes; arm; position in triplet;
 window count; nominal and generator data set size; all monitor rows; the app
 report; exit codes. Failed and aborted runs are kept with their reason.
 
-**Platform.** The pilot runs only on the current native machine: Windows 10
-Home 22H2, build 19045 (Maxim's PC). Every result is stated for that
-platform only. No Windows 11 statement is made without a separate run on
-Windows 11.
+**Platform.** The pilot runs only on the native machine used for the
+2026-11-09 smoke: Windows 11 Home, build 26200. Record the machine, OS and
+WebView2 version in the pilot freeze. Report results for that environment
+only.
 
 ## 7. Validity filters
 
@@ -392,7 +393,7 @@ the outcome matters.
 | | |
 |---|---|
 | Runs | 4 cells × 6 triplets × 3 arms = **72** |
-| Time | 72 × (204–209 s per run + 30 s pause) ≈ **4.7–4.8 h**, plus ~30 min setup (build, hashes, schedule). This is an estimate from the 2026-10-28 native smoke (12 runs, scenario `5c05f6c`, monitor `1d967e0`, default phases), replacing the provisional 72 × ~4.1 min ≈ 4.9 h; it is checked again against the next smoke |
+| Time | 72 × (about 208 s per run + 30 s pause) ≈ **4.8 h**, plus ~30 min setup (build, hashes, schedule). Estimate from the 2026-11-09 native smoke (12 runs, about 47 min including the pauses between runs). Recompute from the final candidate's native smoke before freezing. |
 | Blocks | 6 blocks of 4 triplets (one per cell), 12 runs ≈ 47–48 min each; a block may be split across sessions only between triplets |
 
 Why 6, not 5:
@@ -648,8 +649,10 @@ Decided in the review on #33 (2026-10-26):
   C vs B the framework cost.
 - **Q2 Sizes**: D0 kept as fixed-cost control; D16/D64 and N = 2/4 are
   preliminary and confirmed or changed after the pilot (§4).
-- **Q3 Machine**: pilot on the native Windows 10 Home 22H2 (19045) machine
-  only; results limited to it.
+- **Q3 Machine**: the original decision selected the native Windows 10 Home
+  22H2 machine (build 19045). The 2026-11-09 decision selects the Windows 11
+  Home build 26200 machine used for the 12/12 native smoke. Results are
+  limited to the frozen pilot environment.
 - **Q4 Implementation**: a separate Draft PR on top of the #23 harness; no
   change to Runtime Lab or the public `runtime_*` contract.
 
@@ -716,7 +719,8 @@ runs only after:
 
 The pilot stays descriptive and is never used for confirmatory conclusions.
 
-**Gate status (2026-11-06).** Not passed; the pilot is blocked.
+**Gate status (2026-11-09).** The pilot is blocked pending evidence for the
+exact runnable revision, freeze, and written approval.
 - Smoke 1, scenario `0055c78`, monitor `6952886` (2026-10-27): 12/12 runs
   passed, 8/12 valid (startup unit check, PID reuse, a transient child).
   Report: #36 comment 6453085356.
@@ -735,7 +739,14 @@ The pilot stays descriptive and is never used for confirmatory conclusions.
   schedule written before the run (#36 `plans/smoke-abc-3`). The plan and
   the #43 evidence are reviewed before it runs. A C-only repeat or a
   recount of old data does not replace it.
-- Duration: the §8a estimate now comes from smoke 2.
+- Windows 11 Home build 26200 smoke (2026-11-09): **12/12 valid**.
+  Scenario `e83c2693d4d68028d94846738b3b565afc8654ae`, monitor
+  `c5a4f16b54fb4c14dc79c21a2d52d227fc0dfff9`, and arm C runtime
+  `2dac921fcccde1bbadd86da16dbb3136d00341da`. The results archive and its
+  SHA-256 are recorded in [the #50 evidence comment](https://github.com/kreeengvarotske/tauri-multi-window-runtime/pull/50#issuecomment-6751389847).
+  This run supports the Q3 machine choice. The final runner and protocol hashes must be recorded and
+  checked against the evidence required above before the pilot starts.
+- Duration: the §8a estimate now comes from the build 26200 smoke.
 
 ### 10a. Two freezes (#33 comment 6452488540)
 
@@ -800,7 +811,7 @@ assembled only after a passed smoke; nothing here opens the pilot.
    difference stated and re-smoked.
 2. **CI.** Hosted runs at each exact SHA: Rust, frontend and Windows release
    for #36; PowerShell 5.1 and 7 for #43. Links and conclusions.
-3. **Native evidence (Windows 10 22H2, 19045).** The #43 targeted tests at
+3. **Native evidence (Windows 11 Home, build 26200).** The #43 targeted tests at
    the monitor SHA. The passed smoke: `configuration.json`, `schedule.csv`,
    `runs.csv`, every invalid reason, retained sizes, process counts per
    `N`, CPU reason columns, run durations. Earlier smokes listed with their
@@ -811,7 +822,7 @@ assembled only after a passed smoke; nothing here opens the pilot.
      once per cell, each arm in each position twice per cell);
    - the exact runner command with `-ExpectedSchedule`, the phases and
      seeds, and a new output directory;
-   - the time from §8a (≈ 4.7–4.8 h + setup) and how blocks may be split.
+   - the time from §8a (about 4.8 h + setup) and how blocks may be split.
 5. **Measures and validity.**
    - RAM (`LoadPrivateMBAvg`) and CPU (`RunCpuSeconds`) co-primary, with
      the same weight (§3);
