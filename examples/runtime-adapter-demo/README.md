@@ -34,7 +34,7 @@ See the [adapter guide](../../crates/shared-runtime-tauri/README.md), the [Rust 
 
 ### Use the preview from another project
 
-Add both crates to the Cargo manifest that builds your Tauri backend. Pin both to the same release tag. Cargo records the tag's commit SHA in your `Cargo.lock`. Check it against the SHA in the [release notes](../../docs/windows-preview-release-notes.md).
+Add both crates to the Cargo manifest that builds your Tauri backend. Pin both to the same release tag. Cargo records the tag's commit SHA in your `Cargo.lock`. Check that SHA against the one stated in the GitHub Release for the tag.
 
 ```toml
 [dependencies]
