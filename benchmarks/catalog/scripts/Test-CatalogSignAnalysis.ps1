@@ -19,6 +19,20 @@ function Assert-Refused {
     Assert-True $Name $refused
 }
 
+$pairRows = @(
+    [pscustomobject]@{ Cell = 'N4D64'; Comparison = 'C-A'; Triplet = '2'; Valid = 'False'; InvalidReason = 'CPU coverage'; LoadPrivateMBDiff = ''; RunCpuSecondsDiff = '' }
+    [pscustomobject]@{ Cell = 'N4D64'; Comparison = 'C-A'; Triplet = '1'; Valid = 'True'; InvalidReason = ''; LoadPrivateMBDiff = '-12.5'; RunCpuSecondsDiff = '-0.75' }
+    [pscustomobject]@{ Cell = 'N4D64'; Comparison = 'C-B'; Triplet = '1'; Valid = 'True'; InvalidReason = ''; LoadPrivateMBDiff = '2'; RunCpuSecondsDiff = '0.25' }
+)
+$paired = Get-CatalogPairedDifferences -Rows $pairRows -Cell N4D64 -Comparison C-A -Outcome RAM -Triplets 2
+Assert-True 'valid pairs are numerical and invalid pairs keep their reason' ($paired.Differences.Count -eq 1 -and $paired.Differences[0] -eq -12.5 -and $paired.Excluded[0].Reason -eq 'CPU coverage')
+$cpu = Get-CatalogPairedDifferences -Rows $pairRows -Cell N4D64 -Comparison C-B -Outcome CPU -Triplets 1
+Assert-True 'CPU uses only the requested comparison' ($cpu.Differences.Count -eq 1 -and $cpu.Differences[0] -eq 0.25)
+Assert-Refused 'missing pair is not treated as invalid' { Get-CatalogPairedDifferences -Rows $pairRows -Cell N4D64 -Comparison C-A -Outcome RAM -Triplets 3 } 'Missing triplet 3'
+Assert-Refused 'duplicate pair is rejected' { Get-CatalogPairedDifferences -Rows ($pairRows + $pairRows[0]) -Cell N4D64 -Comparison C-A -Outcome RAM -Triplets 2 } 'duplicate triplet'
+$pairRows[1].LoadPrivateMBDiff = ''
+Assert-Refused 'missing value on valid pair is rejected' { Get-CatalogPairedDifferences -Rows $pairRows -Cell N4D64 -Comparison C-A -Outcome RAM -Triplets 2 } 'Missing or non-finite'
+
 $evidence = Get-CatalogSignEvidence -Id 'N4D64/RAM' -Differences (@(-12) * 10 + @(-10)) -Shift 10
 Assert-True 'ties remain in N and do not support H1' ($evidence.N -eq 11 -and $evidence.Below -eq 10 -and $evidence.Ties -eq 1)
 Assert-True '10 of 11 has the exact protocol tail' ([Math]::Abs($evidence.PValue - (12.0 / 2048)) -lt 1e-12)

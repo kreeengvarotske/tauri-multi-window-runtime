@@ -2,6 +2,50 @@
 # The caller supplies the frozen family membership and validated paired data.
 . (Join-Path $PSScriptRoot 'CatalogThresholds.ps1')
 
+function Get-CatalogPairedDifferences {
+    # Reads one comparison from the summarizer's triplets.csv rows. Missing
+    # or duplicate rows are input errors; explicitly invalid pairs stay in
+    # the audit trail and do not contribute a numerical difference.
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Rows,
+        [Parameter(Mandatory = $true)][string]$Cell,
+        [Parameter(Mandatory = $true)][ValidateSet('C-A', 'C-B', 'B-A')][string]$Comparison,
+        [Parameter(Mandatory = $true)][ValidateSet('RAM', 'CPU')][string]$Outcome,
+        [Parameter(Mandatory = $true)][ValidateRange(1, 50)][int]$Triplets
+    )
+    $measure = if ($Outcome -eq 'RAM') { 'LoadPrivateMBDiff' } else { 'RunCpuSecondsDiff' }
+    $pairs = @{}
+    foreach ($row in $Rows) {
+        if ($row.Cell -ne $Cell -or $row.Comparison -ne $Comparison) { continue }
+        $number = 0
+        if (-not [int]::TryParse([string]$row.Triplet, [ref]$number) -or $number -lt 1 -or $number -gt $Triplets -or $pairs.ContainsKey($number)) {
+            throw "Unexpected or duplicate triplet '$($row.Triplet)' for $Cell/$Comparison."
+        }
+        $pairs[$number] = $row
+    }
+    $differences = New-Object 'System.Collections.Generic.List[double]'
+    $excluded = New-Object 'System.Collections.Generic.List[object]'
+    for ($number = 1; $number -le $Triplets; $number++) {
+        if (-not $pairs.ContainsKey($number)) { throw "Missing triplet $number for $Cell/$Comparison." }
+        $row = $pairs[$number]
+        $valid = $false
+        if (-not [bool]::TryParse([string]$row.Valid, [ref]$valid)) {
+            throw "Invalid validity marker on triplet $number for $Cell/$Comparison."
+        }
+        if (-not $valid) {
+            $excluded.Add([pscustomobject]@{ Triplet = $number; Reason = [string]$row.InvalidReason })
+            continue
+        }
+        $value = 0.0
+        if (-not [double]::TryParse([string]$row.$measure, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$value) -or
+            [double]::IsNaN($value) -or [double]::IsInfinity($value)) {
+            throw "Missing or non-finite $measure on valid triplet $number for $Cell/$Comparison."
+        }
+        $differences.Add($value)
+    }
+    [pscustomobject]@{ Differences = $differences.ToArray(); Excluded = $excluded.ToArray() }
+}
+
 function Get-CatalogSignEvidence {
     param(
         [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$Id,
