@@ -73,6 +73,27 @@ $thresholds = @(
 $primary = Get-CatalogConfirmatorySignFamily -Family P -FrozenIds @('N4D64/RAM', 'N4D64/CPU') -ThresholdRows $thresholds -PairRows $pairRows -Triplets 2
 Assert-True 'primary family combines RAM and CPU with the frozen Delta shifts' ($primary.Adjustments.Count -eq 2 -and $primary.Evidence[0].Below -eq 1 -and $primary.Evidence[1].Below -eq 0)
 Assert-True 'family evidence retains excluded triplets' ($primary.Evidence[0].Excluded[0].Triplet -eq 2)
+$boundaryPairs = @(foreach ($triplet in 1..10) {
+    [pscustomobject]@{
+        Cell = 'N4D64'; Comparison = 'C-A'; Triplet = $triplet
+        Valid = $true; InvalidReason = ''; LoadPrivateMBDiff = '-20'; RunCpuSecondsDiff = '-2'
+    }
+})
+$boundaryInputs = @{ Family = 'P'; FrozenIds = @('N4D64/RAM', 'N4D64/CPU'); ThresholdRows = $thresholds; PairRows = $boundaryPairs; Triplets = 10 }
+$boundaryPairs[0].LoadPrivateMBDiff = [BitConverter]::Int64BitsToDouble([BitConverter]::DoubleToInt64Bits(-10.0) + 1)
+$tenPairs = Get-CatalogConfirmatorySignFamily @boundaryInputs
+Assert-True 'ten valid pairs can reject in family P' (
+    $tenPairs.Evidence[0].Status -eq 'Evaluated' -and $tenPairs.Adjustments[0].Reject)
+Assert-True 'a typed double one representable value below the threshold remains below' (
+    $tenPairs.Evidence[0].Below -eq 10 -and $tenPairs.Evidence[0].Ties -eq 0)
+$boundaryPairs[9].Valid = $false
+$boundaryPairs[9].InvalidReason = 'missing monitor'
+$ninePairs = Get-CatalogConfirmatorySignFamily @boundaryInputs
+Assert-True 'nine favorable pairs stay in family P with p = 1' (
+    $ninePairs.Evidence[0].N -eq 9 -and $ninePairs.Evidence[0].Below -eq 9 -and
+    $ninePairs.Evidence[0].Status -eq 'InsufficientValidTriplets' -and
+    $ninePairs.Adjustments[0].FamilySize -eq 2 -and $ninePairs.Adjustments[0].PValue -eq 1 -and
+    -not $ninePairs.Adjustments[0].Reject)
 $ni = Get-CatalogConfirmatorySignFamily -Family NI-CPU -FrozenIds @('N4D64/CPU') -ThresholdRows $thresholds -PairRows $pairRows -Triplets 2
 Assert-True 'non-inferiority subtracts the frozen Eta margin' ($ni.Evidence[0].Shift -eq -1 -and $ni.Evidence[0].Below -eq 1)
 Assert-Refused 'non-inferiority cannot mix outcomes' { Get-CatalogConfirmatorySignFamily -Family NI-CPU -FrozenIds @('N4D64/RAM') -ThresholdRows $thresholds -PairRows $pairRows -Triplets 2 } 'does not belong'

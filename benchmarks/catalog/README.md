@@ -101,6 +101,8 @@ Use the `ConfirmatoryDirectories` parameter set of `Summarize-CatalogRuns.ps1` t
 
 The confirmatory manifest carries a `signFamilies` object with arrays `P`, `NI-RAM`, and `NI-CPU`. Each entry is a frozen hypothesis ID such as `N4D64/RAM`. Use an empty array for a family with no frozen hypotheses. The summarizer writes `sign-evidence.json` with pair exclusions, sign counts, and Holm results. Claim decisions, guardrails and framework-cost intervals are pending.
 
+Family P retains hypotheses with fewer than ten valid C–A pairs in the Holm correction. The report labels them `InsufficientValidTriplets` and uses a p-value of 1.
+
 `guardrail-evidence.csv` lists the individual limits and observed medians for B and C. Latency medians use valid runs. The counts of errors and incomplete workloads include invalid runs with available reports. Missing observations are recorded separately. The table leaves the final combination of latency limits to the protocol decision.
 
 ## What this does not show

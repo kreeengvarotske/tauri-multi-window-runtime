@@ -36,9 +36,14 @@ function Get-CatalogPairedDifferences {
             $excluded.Add([pscustomobject]@{ Triplet = $number; Reason = [string]$row.InvalidReason })
             continue
         }
+        $raw = $row.$measure
         $value = 0.0
-        if (-not [double]::TryParse([string]$row.$measure, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$value) -or
-            [double]::IsNaN($value) -or [double]::IsInfinity($value)) {
+        $parsed = $true
+        if ($raw -is [double]) { $value = $raw }
+        else {
+            $parsed = [double]::TryParse([string]$raw, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$value)
+        }
+        if (-not $parsed -or [double]::IsNaN($value) -or [double]::IsInfinity($value)) {
             throw "Missing or non-finite $measure on valid triplet $number for $Cell/$Comparison."
         }
         $differences.Add($value)
@@ -193,6 +198,13 @@ function Get-CatalogConfirmatorySignFamily {
         $pairs = Get-CatalogPairedDifferences -Rows $PairRows -Cell $cell -Comparison C-A -Outcome $outcome -Triplets $Triplets
         $shift = if ($Family -eq 'P') { $margin } else { -$margin }
         $result = Get-CatalogSignEvidence -Id $id -Differences $pairs.Differences -Shift $shift
+        $status = 'Evaluated'
+        if ($Family -eq 'P' -and $result.N -lt 10) {
+            # Protocol §8b keeps the hypothesis in Holm with p = 1.
+            $result.PValue = 1.0
+            $status = 'InsufficientValidTriplets'
+        }
+        $result | Add-Member -NotePropertyName Status -NotePropertyValue $status
         $result | Add-Member -NotePropertyName Excluded -NotePropertyValue $pairs.Excluded
         $result
     })
