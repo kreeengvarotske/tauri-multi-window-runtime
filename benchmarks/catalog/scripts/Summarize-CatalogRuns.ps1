@@ -6,8 +6,9 @@ descriptive statistics per cell and arm.
 
 .DESCRIPTION
 Descriptive only: smoke and pilot results carry "descriptive, no conclusion"
-whatever the numbers. Confirmatory input mode assembles descriptive tables
-from validated sessions. It does not issue conclusions under protocol §8b.
+whatever the numbers. Confirmatory input mode assembles tables and frozen
+sign-test evidence from validated sessions. It does not issue conclusions
+under protocol §8b.
 
 Co-primary measures (protocol revision 3, §3, §8c):
 - RAM: LoadPrivateMBAvg, the time average over the load phase of the sum of
@@ -142,7 +143,7 @@ $runDirectories = @{}
 $logs = @{}
 if ($PSCmdlet.ParameterSetName -eq 'Confirmatory') {
     . (Join-Path $PSScriptRoot 'CatalogSchedule.ps1')
-    . (Join-Path $PSScriptRoot 'CatalogThresholds.ps1')
+    . (Join-Path $PSScriptRoot 'CatalogSignAnalysis.ps1')
     . (Join-Path $PSScriptRoot 'CatalogManifest.ps1')
     . (Join-Path $PSScriptRoot 'CatalogConfirmatory.ps1')
     $checked = Assert-CatalogConfirmatoryInputs -ResultsDirectories $ConfirmatoryDirectories -FrozenManifestPath $FrozenManifestPath -FrozenManifestSha256 $FrozenManifestSha256 -ThresholdsPath $ThresholdsPath -ThresholdsSha256 $ThresholdsSha256
@@ -187,7 +188,6 @@ if (-not $checked) {
 }
 if (-not $OutputDirectory) { $OutputDirectory = Join-Path $ResultsDirectory ("analysis-{0}" -f (Get-Date -Format 'yyyyMMdd-HHmmss')) }
 if (Test-Path -LiteralPath $OutputDirectory) { throw "$OutputDirectory exists; analyses are never overwritten." }
-New-Item -ItemType Directory -Path $OutputDirectory | Out-Null
 
 $runs = New-Object System.Collections.Generic.List[object]
 $processes = New-Object System.Collections.Generic.List[object]
@@ -510,10 +510,15 @@ function Export-Rows {
         [pscustomobject]$out
     } | Export-Csv -LiteralPath (Join-Path $OutputDirectory $File) -NoTypeInformation -Encoding UTF8
 }
+$signResults = if ($checked) { Get-CatalogCheckedSignResults -CheckedInputs $checked -PairRows $triplets.ToArray() }
+New-Item -ItemType Directory -Path $OutputDirectory -ErrorAction Stop | Out-Null
 Export-Rows $runs.ToArray() 'runs.csv'
 Export-Rows $triplets.ToArray() 'triplets.csv'
 Export-Rows $summary.ToArray() 'summary.csv'
 if ($processes.Count -gt 0) { Export-Rows $processes.ToArray() 'processes.csv' }
+if ($checked) {
+    $signResults | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'sign-evidence.json') -Encoding UTF8
+}
 
 # Retained size check (protocol §4): host Private above the D0 cell with the same windows, against the generator's size.
 $retained = New-Object System.Collections.Generic.List[string]
@@ -539,6 +544,7 @@ if ($checked) {
     $lines.Add('')
     $lines.Add("Frozen manifest SHA-256: $($checked.ManifestSha256)")
     $lines.Add("Frozen thresholds SHA-256: $($checked.ThresholdsSha256)")
+    $lines.Add('Frozen sign-test evidence is in sign-evidence.json. Claim and guardrail decisions are pending.')
 }
 $lines.Add('')
 $lines.Add("Git $($configuration.gitHead)$(if ($configuration.gitDirty) { ' (dirty)' }); arms $(@($configuration.arms) -join ', '); cells $(@($configuration.cells) -join ', '); $($configuration.triplets) triplets; schedule seed $($configuration.scheduleSeed).")

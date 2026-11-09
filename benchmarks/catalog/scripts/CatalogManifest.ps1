@@ -80,6 +80,9 @@ function New-CatalogManifest {
     foreach ($field in $script:CatalogManifestFields) {
         $manifest[$field] = if ($Configuration.Contains($field)) { $Configuration[$field] } else { $null }
     }
+    if ($manifest.phase -eq 'Confirmatory' -and $Configuration.Contains('signFamilies')) {
+        $manifest['signFamilies'] = $Configuration['signFamilies']
+    }
     $manifest['runs'] = $Schedule.Count
     $manifest['scheduleContentSha256'] = Get-CatalogScheduleSha256 -Schedule $Schedule
     $manifest

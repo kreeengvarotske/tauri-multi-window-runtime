@@ -208,9 +208,6 @@ function Get-CatalogCheckedSignResults {
     # This step checks their schedule coverage before computing sign evidence.
     param(
         [Parameter(Mandatory = $true)][object]$CheckedInputs,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$PrimaryIds,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$NiRamIds,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$NiCpuIds,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$PairRows
     )
     if ($CheckedInputs.Problems.Count -ne 0 -or -not $CheckedInputs.ManifestSha256 -or
@@ -231,14 +228,31 @@ function Get-CatalogCheckedSignResults {
     }
     if ($observed.Count -ne (3 * $expected.Count)) { throw 'Pair rows do not cover the full frozen schedule.' }
 
+    $families = $CheckedInputs.Manifest.PSObject.Properties['signFamilies']
+    if ($null -eq $families -or $families.Value -isnot [pscustomobject]) {
+        throw 'The frozen manifest must contain a signFamilies object.'
+    }
+    $ids = @{}
+    foreach ($family in 'P', 'NI-RAM', 'NI-CPU') {
+        $member = $families.Value.PSObject.Properties[$family]
+        if ($null -eq $member -or $member.Value -isnot [array]) {
+            throw "The frozen signFamilies object must contain an array for '$family'."
+        }
+        foreach ($id in $member.Value) {
+            if ($id -isnot [string] -or [string]::IsNullOrWhiteSpace($id)) {
+                throw "Frozen family '$family' contains an invalid hypothesis ID."
+            }
+        }
+        $ids[$family] = [string[]]$member.Value
+    }
     $triplets = ($CheckedInputs.Schedule | Measure-Object -Property Triplet -Maximum).Maximum
     $inputs = @{ ThresholdRows = $CheckedInputs.Thresholds; PairRows = $PairRows; Triplets = $triplets }
     [pscustomobject]@{
         ManifestSha256 = $CheckedInputs.ManifestSha256
         ThresholdsSha256 = $CheckedInputs.ThresholdsSha256
-        Primary = Get-CatalogConfirmatorySignFamily @inputs -Family P -FrozenIds $PrimaryIds
-        NiRam = Get-CatalogConfirmatorySignFamily @inputs -Family NI-RAM -FrozenIds $NiRamIds
-        NiCpu = Get-CatalogConfirmatorySignFamily @inputs -Family NI-CPU -FrozenIds $NiCpuIds
+        Primary = Get-CatalogConfirmatorySignFamily @inputs -Family P -FrozenIds $ids['P']
+        NiRam = Get-CatalogConfirmatorySignFamily @inputs -Family NI-RAM -FrozenIds $ids['NI-RAM']
+        NiCpu = Get-CatalogConfirmatorySignFamily @inputs -Family NI-CPU -FrozenIds $ids['NI-CPU']
     }
 }
 

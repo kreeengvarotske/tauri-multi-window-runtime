@@ -97,7 +97,9 @@ One run by hand: `catalog-bench.exe --data-mib 16 --windows 2 --report out.json`
 
 `Test-CatalogJobCpu.ps1` checks the job on real processes (a short process between two samples against a handle held from creation, a failed assignment, a foreign process, completion, kill on close) and `Test-CatalogJobApp.ps1` runs built arms in a job as the runner does (CI, both PowerShell versions where applicable). `Test-CatalogScripts.ps1` checks the schedule's balance for the pilot shape, the threshold forms, references, sign counts at the threshold and the protocol's cut-offs, and the summarizer end to end on synthetic data, in Windows PowerShell 5.1 and PowerShell 7 (CI).
 
-Use the `ConfirmatoryDirectories` parameter set of `Summarize-CatalogRuns.ps1` to assemble descriptive tables from validated sessions. Pass the session directories, `FrozenManifestPath`, `FrozenManifestSha256`, `ThresholdsPath`, and `ThresholdsSha256`. The summary records the two verified hashes and reads each run from the session that logged it. The output contains descriptive tables only.
+Use the `ConfirmatoryDirectories` parameter set of `Summarize-CatalogRuns.ps1` to assemble results from validated sessions. Pass the session directories, `FrozenManifestPath`, `FrozenManifestSha256`, `ThresholdsPath`, and `ThresholdsSha256`. The summary records the two verified hashes and reads each run from the session that logged it.
+
+The confirmatory manifest carries a `signFamilies` object with arrays `P`, `NI-RAM`, and `NI-CPU`. Each entry is a frozen hypothesis ID such as `N4D64/RAM`. Use an empty array for a family with no frozen hypotheses. The summarizer writes `sign-evidence.json` with pair exclusions, sign counts, and Holm results. Claim decisions, guardrails and framework-cost intervals are pending.
 
 ## What this does not show
 

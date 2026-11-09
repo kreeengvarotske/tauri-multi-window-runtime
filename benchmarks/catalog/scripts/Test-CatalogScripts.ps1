@@ -553,6 +553,7 @@ try {
     function New-ConfirmConfiguration {
         $c = New-TestConfiguration
         $c.phase = 'Confirmatory'; $c.cells = $confirmCells; $c.triplets = 2; $c.scheduleSeed = 3; $c.dryRun = $false
+        $c['signFamilies'] = [ordered]@{ P = @('N2D16/RAM'); 'NI-RAM' = @(); 'NI-CPU' = @('N2D16/CPU') }
         $c
     }
     function New-Freeze {
@@ -612,6 +613,7 @@ try {
     $assembledRuns = @(Import-Csv -LiteralPath (Join-Path $assembled 'runs.csv'))
     $assembledPairs = @(Import-Csv -LiteralPath (Join-Path $assembled 'triplets.csv'))
     $assembledSummary = Get-Content -LiteralPath (Join-Path $assembled 'summary.md') -Raw
+    $assembledSign = Get-Content -LiteralPath (Join-Path $assembled 'sign-evidence.json') -Raw | ConvertFrom-Json
     Assert-True 'confirmatory summary: preserves all invalid runs and pairs across two sessions' (
         $assembledRuns.Count -eq 12 -and $assembledPairs.Count -eq 12 -and
         @($assembledRuns | Where-Object { $_.Valid -ne 'False' -or $_.InvalidReason -like '*not run*' }).Count -eq 0)
@@ -620,6 +622,9 @@ try {
     Assert-True 'confirmatory summary: records both hashes and stays descriptive' (
         $assembledSummary -like '*Confirmatory: descriptive, no conclusion*' -and
         $assembledSummary.Contains($freeze.Sha256) -and $assembledSummary.Contains($thresholdsSha))
+    Assert-True 'confirmatory summary: insufficient valid pairs give no sign evidence against H0' (
+        $assembledSign.Primary.Evidence[0].N -eq 0 -and $assembledSign.Primary.Evidence[0].PValue -eq 1 -and
+        @($assembledSign.Primary.Evidence[0].Excluded).Count -eq 2 -and -not $assembledSign.Primary.Adjustments[0].Reject)
     $pairs = @(foreach ($triplet in ($ok.Schedule | Group-Object Cell, Triplet)) {
         foreach ($comparison in 'C-A', 'C-B', 'B-A') {
             [pscustomobject]@{
@@ -628,8 +633,7 @@ try {
             }
         }
     })
-    $signArgs = @{ PrimaryIds = @('N2D16/RAM'); NiRamIds = @(); NiCpuIds = @('N2D16/CPU') }
-    $sign = Get-CatalogCheckedSignResults @signArgs -CheckedInputs $ok -PairRows $pairs
+    $sign = Get-CatalogCheckedSignResults -CheckedInputs $ok -PairRows $pairs
     Assert-True 'sign analysis: keeps both verified hashes and the frozen triplet count' (
         $sign.ManifestSha256 -eq $freeze.Sha256 -and $sign.ThresholdsSha256 -eq $thresholdsSha -and
         $sign.Primary.Evidence[0].N -eq 2 -and $sign.NiRam.Adjustments.Count -eq 0 -and
@@ -640,7 +644,7 @@ try {
         @{ Rows = $pairs; Checked = (Test-Confirm @($session1)); Message = 'validation must pass' }
     )) {
         $errorText = ''
-        try { Get-CatalogCheckedSignResults @signArgs -CheckedInputs $fixture.Checked -PairRows $fixture.Rows | Out-Null }
+        try { Get-CatalogCheckedSignResults -CheckedInputs $fixture.Checked -PairRows $fixture.Rows | Out-Null }
         catch { $errorText = $_.Exception.Message }
         Assert-True "sign analysis refuses inputs: $($fixture.Message)" ($errorText -like "*$($fixture.Message)*") $errorText
     }
