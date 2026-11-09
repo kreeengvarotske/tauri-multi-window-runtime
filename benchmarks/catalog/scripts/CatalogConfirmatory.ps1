@@ -54,7 +54,7 @@ function Test-CatalogConfirmatoryInputs {
         [Parameter(Mandatory = $true)][AllowEmptyString()][string]$ThresholdsSha256
     )
     $problems = New-Object System.Collections.Generic.List[string]
-    $result = [ordered]@{ Problems = $problems; ManifestSha256 = $null; ThresholdsSha256 = $null; Thresholds = $null; Schedule = $null; Runs = @() }
+    $result = [ordered]@{ Problems = $problems; Manifest = $null; ManifestSha256 = $null; ThresholdsSha256 = $null; Thresholds = $null; Schedule = $null; Runs = @() }
 
     # The frozen manifest.
     $frozen = $null
@@ -66,6 +66,7 @@ function Test-CatalogConfirmatoryInputs {
         else {
             $result.ManifestSha256 = $actual
             $frozen = Read-CatalogConfirmatoryJson -Path $FrozenManifestPath -Problems $problems
+            $result.Manifest = $frozen
         }
     }
     $cells = @(); $arms = @(); $triplets = 0
@@ -152,8 +153,8 @@ function Test-CatalogConfirmatoryInputs {
                     $problems.Add("$directory runs.log line $lineNumber has no valid run name")
                     continue
                 }
-                if (-not $entries.ContainsKey($name)) { $entries[$name] = New-Object System.Collections.Generic.List[string] }
-                $entries[$name].Add($directory)
+                if (-not $entries.ContainsKey($name)) { $entries[$name] = New-Object System.Collections.Generic.List[object] }
+                $entries[$name].Add([pscustomobject]@{ Directory = $directory; Log = $event })
             }
         }
     }
@@ -170,12 +171,12 @@ function Test-CatalogConfirmatoryInputs {
             $name = [string]$planned.Name
             $where = @(if ($entries.ContainsKey($name)) { $entries[$name] })
             if ($where.Count -eq 0) { $problems.Add("missing data: run $name was never run (no runs.log entry in any session)") }
-            elseif ($where.Count -gt 1) { $problems.Add("run $name has $($where.Count) runs.log entries ($($where -join ', '))") }
+            elseif ($where.Count -gt 1) { $problems.Add("run $name has $($where.Count) runs.log entries ($($where.Directory -join ', '))") }
             else {
-                $runs.Add([pscustomobject]@{ Name = $name; Cell = $planned.Cell; Arm = $planned.Arm; Triplet = [int]$planned.Triplet; Directory = $where[0] })
+                $runs.Add([pscustomobject]@{ Name = $name; Cell = $planned.Cell; Arm = $planned.Arm; Triplet = [int]$planned.Triplet; Directory = $where[0].Directory; Log = $where[0].Log })
                 $block = [int]$planned.Block
                 if (-not $blockSessions.ContainsKey($block)) { $blockSessions[$block] = @{} }
-                $blockSessions[$block][$where[0]] = $true
+                $blockSessions[$block][$where[0].Directory] = $true
             }
         }
         foreach ($block in @($blockSessions.Keys | Sort-Object)) {

@@ -6,8 +6,8 @@ descriptive statistics per cell and arm.
 
 .DESCRIPTION
 Descriptive only: smoke and pilot results carry "descriptive, no conclusion"
-whatever the numbers. The confirmatory analysis (protocol §8b) is not here;
-it is written and reviewed before any confirmatory run.
+whatever the numbers. Confirmatory input mode assembles descriptive tables
+from validated sessions. It does not issue conclusions under protocol §8b.
 
 Co-primary measures (protocol revision 3, §3, §8c):
 - RAM: LoadPrivateMBAvg, the time average over the load phase of the sum of
@@ -55,10 +55,21 @@ runs.csv with their reasons.
 Output goes to a new directory (default <results>\analysis-<timestamp>);
 raw data is never changed.
 #>
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Descriptive')]
 param(
-    [Parameter(Mandatory = $true)]
+    [Parameter(Mandatory = $true, ParameterSetName = 'Descriptive')]
     [string]$ResultsDirectory,
+
+    [Parameter(Mandatory = $true, ParameterSetName = 'Confirmatory')]
+    [string[]]$ConfirmatoryDirectories,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Confirmatory')]
+    [string]$FrozenManifestPath,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Confirmatory')]
+    [string]$FrozenManifestSha256,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Confirmatory')]
+    [string]$ThresholdsPath,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Confirmatory')]
+    [string]$ThresholdsSha256,
 
     [string]$OutputDirectory
 )
@@ -126,15 +137,36 @@ function Get-Property {
     return $Object.$Name
 }
 
+$checked = $null
+$runDirectories = @{}
+$logs = @{}
+if ($PSCmdlet.ParameterSetName -eq 'Confirmatory') {
+    . (Join-Path $PSScriptRoot 'CatalogSchedule.ps1')
+    . (Join-Path $PSScriptRoot 'CatalogThresholds.ps1')
+    . (Join-Path $PSScriptRoot 'CatalogManifest.ps1')
+    . (Join-Path $PSScriptRoot 'CatalogConfirmatory.ps1')
+    $checked = Assert-CatalogConfirmatoryInputs -ResultsDirectories $ConfirmatoryDirectories -FrozenManifestPath $FrozenManifestPath -FrozenManifestSha256 $FrozenManifestSha256 -ThresholdsPath $ThresholdsPath -ThresholdsSha256 $ThresholdsSha256
+    foreach ($run in $checked.Runs) {
+        $runDirectories[$run.Name] = Join-Path $run.Directory 'runs'
+        $logs[$run.Name] = $run.Log
+    }
+    $ResultsDirectory = $ConfirmatoryDirectories[0]
+}
 $ResultsDirectory = (Resolve-Path -LiteralPath $ResultsDirectory).Path
 $configurationFile = Join-Path $ResultsDirectory 'configuration.json'
 $scheduleFile = Join-Path $ResultsDirectory 'schedule.csv'
-foreach ($file in @($configurationFile, $scheduleFile)) {
-    if (-not (Test-Path -LiteralPath $file)) { throw "Missing $file" }
+if ($checked) { $configuration = $checked.Manifest }
+else {
+    foreach ($file in @($configurationFile, $scheduleFile)) {
+        if (-not (Test-Path -LiteralPath $file)) { throw "Missing $file" }
+    }
+    $configuration = Get-Content -LiteralPath $configurationFile -Raw | ConvertFrom-Json
+    if ([string]$configuration.scenario -ne 'M') { throw "$configurationFile is not a scenario M run." }
 }
-$configuration = Get-Content -LiteralPath $configurationFile -Raw | ConvertFrom-Json
-if ([string]$configuration.scenario -ne 'M') { throw "$configurationFile is not a scenario M run." }
 $nominalInterval = [double]$configuration.sampleIntervalSeconds
+if ($checked -and ($nominalInterval -le 0 -or (Get-Property $configuration 'cpuSource') -ne 'job')) {
+    throw 'Confirmatory analysis requires a positive frozen sample interval and job CPU.'
+}
 # The CPU source is fixed by the runner in configuration.json, never inferred
 # from which files exist: with cpuSource = job every run needs its job files,
 # and a run without them is invalid. Results without cpuSource (written before
@@ -142,15 +174,15 @@ $nominalInterval = [double]$configuration.sampleIntervalSeconds
 $cpuSource = [string](Get-Property $configuration 'cpuSource')
 if ([string]::IsNullOrEmpty($cpuSource)) { $cpuSource = 'legacy-monitor' }
 elseif ($cpuSource -ne 'job') { throw "$configurationFile has an unknown cpuSource '$cpuSource'." }
-$schedule = @(Import-Csv -LiteralPath $scheduleFile | Sort-Object { [int]$_.Seq })
-$runsDirectory = Join-Path $ResultsDirectory 'runs'
-$logs = @{}
-$runLog = Join-Path $ResultsDirectory 'runs.log'
-if (Test-Path -LiteralPath $runLog) {
-    foreach ($line in Get-Content -LiteralPath $runLog) {
-        if ([string]::IsNullOrWhiteSpace($line)) { continue }
-        $entry = $line | ConvertFrom-Json
-        $logs[[string]$entry.name] = $entry
+$schedule = @(if ($checked) { $checked.Schedule } else { Import-Csv -LiteralPath $scheduleFile | Sort-Object { [int]$_.Seq } })
+if (-not $checked) {
+    $runLog = Join-Path $ResultsDirectory 'runs.log'
+    if (Test-Path -LiteralPath $runLog) {
+        foreach ($line in Get-Content -LiteralPath $runLog) {
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            $entry = $line | ConvertFrom-Json
+            $logs[[string]$entry.name] = $entry
+        }
     }
 }
 if (-not $OutputDirectory) { $OutputDirectory = Join-Path $ResultsDirectory ("analysis-{0}" -f (Get-Date -Format 'yyyyMMdd-HHmmss')) }
@@ -161,6 +193,7 @@ $runs = New-Object System.Collections.Generic.List[object]
 $processes = New-Object System.Collections.Generic.List[object]
 foreach ($planned in $schedule) {
     $name = [string]$planned.Name
+    $runsDirectory = if ($checked) { $runDirectories[$name] } else { Join-Path $ResultsDirectory 'runs' }
     $reasons = New-Object System.Collections.Generic.List[string]
     $row = [ordered]@{
         Seq = [int]$planned.Seq; Name = $name; Cell = $planned.Cell; Windows = [int]$planned.Windows; DataMib = [int]$planned.DataMib
@@ -185,7 +218,7 @@ foreach ($planned in $schedule) {
     if ($null -eq $log) { $reasons.Add('no runs.log entry (not run)') }
     else {
         if ($null -eq (Get-Property $log 'exitCode') -or [int]$log.exitCode -ne 0) { $reasons.Add("app exit code '$(Get-Property $log 'exitCode')'") }
-        if ($log.timedOut) { $reasons.Add('timed out') }
+        if (Get-Property $log 'timedOut') { $reasons.Add('timed out') }
         if ($null -eq (Get-Property $log 'monitorExit') -or [int]$log.monitorExit -ne 0) { $reasons.Add("monitor exit code '$(Get-Property $log 'monitorExit')'") }
         $row.MonitorCpuSeconds = Get-Property $log 'monitorCpuSeconds'
     }
@@ -502,6 +535,11 @@ $lines = New-Object System.Collections.Generic.List[string]
 $lines.Add("# Scenario M: $($configuration.phase) summary")
 $lines.Add('')
 $lines.Add("**$($configuration.phase): descriptive, no conclusion.** Platform: $($configuration.os) on $($configuration.machine); every statement is for this platform only.")
+if ($checked) {
+    $lines.Add('')
+    $lines.Add("Frozen manifest SHA-256: $($checked.ManifestSha256)")
+    $lines.Add("Frozen thresholds SHA-256: $($checked.ThresholdsSha256)")
+}
 $lines.Add('')
 $lines.Add("Git $($configuration.gitHead)$(if ($configuration.gitDirty) { ' (dirty)' }); arms $(@($configuration.arms) -join ', '); cells $(@($configuration.cells) -join ', '); $($configuration.triplets) triplets; schedule seed $($configuration.scheduleSeed).")
 $lines.Add('')

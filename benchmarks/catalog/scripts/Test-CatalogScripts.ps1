@@ -605,6 +605,21 @@ try {
     Assert-True 'confirmatory inputs: one complete session passes' ((Test-Confirm @($whole)).Problems.Count -eq 0)
     $ok = Assert-CatalogConfirmatoryInputs -ResultsDirectories @($session1, $session2) -FrozenManifestPath $freeze.Path -FrozenManifestSha256 $freeze.Sha256.ToUpperInvariant() -ThresholdsPath $thresholdsFile -ThresholdsSha256 $thresholdsSha
     Assert-True 'confirmatory inputs: Assert returns the checked inputs, any letter case of the hash' ($ok.ManifestSha256 -eq $freeze.Sha256)
+    $secondRuns = New-Item -ItemType Directory -Path (Join-Path $session2 'runs')
+    Set-Content -LiteralPath (Join-Path $secondRuns.FullName "$($block2[0]).json") -Value '{"configError":"session two fixture"}' -Encoding UTF8
+    $assembled = Join-Path $confirmRoot 'assembled'
+    & (Join-Path $PSScriptRoot 'Summarize-CatalogRuns.ps1') -ConfirmatoryDirectories @($session1, $session2) -FrozenManifestPath $freeze.Path -FrozenManifestSha256 $freeze.Sha256 -ThresholdsPath $thresholdsFile -ThresholdsSha256 $thresholdsSha -OutputDirectory $assembled
+    $assembledRuns = @(Import-Csv -LiteralPath (Join-Path $assembled 'runs.csv'))
+    $assembledPairs = @(Import-Csv -LiteralPath (Join-Path $assembled 'triplets.csv'))
+    $assembledSummary = Get-Content -LiteralPath (Join-Path $assembled 'summary.md') -Raw
+    Assert-True 'confirmatory summary: preserves all invalid runs and pairs across two sessions' (
+        $assembledRuns.Count -eq 12 -and $assembledPairs.Count -eq 12 -and
+        @($assembledRuns | Where-Object { $_.Valid -ne 'False' -or $_.InvalidReason -like '*not run*' }).Count -eq 0)
+    Assert-True 'confirmatory summary: reads the run artifact from its own session' (
+        @($assembledRuns | Where-Object { $_.Name -eq $block2[0] -and $_.InvalidReason -like '*session two fixture*' }).Count -eq 1)
+    Assert-True 'confirmatory summary: records both hashes and stays descriptive' (
+        $assembledSummary -like '*Confirmatory: descriptive, no conclusion*' -and
+        $assembledSummary.Contains($freeze.Sha256) -and $assembledSummary.Contains($thresholdsSha))
     $pairs = @(foreach ($triplet in ($ok.Schedule | Group-Object Cell, Triplet)) {
         foreach ($comparison in 'C-A', 'C-B', 'B-A') {
             [pscustomobject]@{

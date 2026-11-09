@@ -97,6 +97,8 @@ One run by hand: `catalog-bench.exe --data-mib 16 --windows 2 --report out.json`
 
 `Test-CatalogJobCpu.ps1` checks the job on real processes (a short process between two samples against a handle held from creation, a failed assignment, a foreign process, completion, kill on close) and `Test-CatalogJobApp.ps1` runs built arms in a job as the runner does (CI, both PowerShell versions where applicable). `Test-CatalogScripts.ps1` checks the schedule's balance for the pilot shape, the threshold forms, references, sign counts at the threshold and the protocol's cut-offs, and the summarizer end to end on synthetic data, in Windows PowerShell 5.1 and PowerShell 7 (CI).
 
+Use the `ConfirmatoryDirectories` parameter set of `Summarize-CatalogRuns.ps1` to assemble descriptive tables from validated sessions. Pass the session directories, `FrozenManifestPath`, `FrozenManifestSha256`, `ThresholdsPath`, and `ThresholdsSha256`. The summary records the two verified hashes and reads each run from the session that logged it. The output contains descriptive tables only.
+
 ## What this does not show
 
 WebView2 processes exist in every arm, one renderer per window; nothing here shares them. A smaller process tree in arm B or C means the renderers hold less data, not that any process is shared. CI runs on the Actions Windows Server image and is a build and correctness check only; measurements come from native runs on a named machine, reported with that machine's OS, at an exact SHA.
