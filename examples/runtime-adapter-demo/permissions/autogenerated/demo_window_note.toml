@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-demo-window-note"
+description = "Enables the demo_window_note command without any pre-configured scope."
+commands.allow = ["demo_window_note"]
+
+[[permission]]
+identifier = "deny-demo-window-note"
+description = "Denies the demo_window_note command without any pre-configured scope."
+commands.deny = ["demo_window_note"]

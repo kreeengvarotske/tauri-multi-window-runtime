@@ -4,4 +4,14 @@ resolver = "3"
 members = [
     "crates/runtime-core",
     "crates/runtime-ipc",
+    "crates/shared-runtime",
+    "crates/shared-runtime-tauri",
+    "examples/runtime-adapter-demo",
 ]
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "abort"
+strip = true

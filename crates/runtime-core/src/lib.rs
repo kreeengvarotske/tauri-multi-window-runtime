@@ -2,7 +2,7 @@ pub mod cache;
 pub mod cache_policy;
 pub mod service;
 
-pub use cache::PolicyCache;
+pub use cache::{CacheBudget, CacheStats, PolicyCache};
 pub use cache_policy::CachePolicy;
 pub use service::{CachedService, ServiceRunKind, ServiceRunOutcome};
 use std::{
@@ -23,13 +23,22 @@ pub(crate) enum CoalescerRunKind {
     Coalesced,
 }
 
-/// Одна операция и количество вызовов, которые используют её.
+/// One operation and the number of callers sharing it.
 struct TaskEntry<V, E> {
     cell: OnceCell<Result<Arc<V>, Arc<E>>>,
     callers: AtomicUsize,
 }
 
-/// Удаляет запись при завершении или отмене вызывающего вызова.
+impl<V, E> TaskEntry<V, E> {
+    fn new_arc() -> Arc<Self> {
+        Arc::new(Self {
+            cell: OnceCell::new(),
+            callers: AtomicUsize::new(0),
+        })
+    }
+}
+
+/// Releases the caller's registration on completion or cancellation.
 struct CallerGuard<'a, K: Eq + Hash, V, E> {
     tasks: &'a Mutex<HashMap<K, Arc<TaskEntry<V, E>>>>,
     key: K,
@@ -45,18 +54,34 @@ where
 
         let previous = self.entry.callers.fetch_sub(1, Ordering::Relaxed);
 
-        if previous == 1
+        let removed = if previous == 1
             && tasks
                 .get(&self.key)
                 .is_some_and(|current| Arc::ptr_eq(current, &self.entry))
         {
-            tasks.remove(&self.key);
-        }
+            tasks.remove_entry(&self.key)
+        } else {
+            None
+        };
+        drop(tasks);
+        drop(removed);
     }
 }
 
-/// Объединяет одинаковые параллельные операции.
-/// Результаты не кэшируются после завершения всех вызовов.
+/// Shares work between concurrent calls with the same key.
+/// Completed results are not cached.
+///
+/// An operation completes when it publishes its result to the entry's
+/// `OnceCell`. Callers that registered before publication receive that result,
+/// including errors. A later caller starts a new operation even if a waiter
+/// still holds the old entry.
+///
+/// The first caller to initialize the cell executes the operation. If that
+/// caller is cancelled before publication, a remaining waiter restarts it.
+/// If every caller is cancelled, the entry is removed and the work ends.
+///
+/// Callers are grouped only by key. Include any access context that affects
+/// the result in that key.
 pub struct TaskCoalescer<K, V, E> {
     tasks: Mutex<HashMap<K, Arc<TaskEntry<V, E>>>>,
 }
@@ -99,29 +124,32 @@ where
     {
         let entry = {
             let mut tasks = self.tasks.lock().unwrap_or_else(|p| p.into_inner());
+            #[cfg(test)]
+            coalescer_probe::mark_join();
 
-            let entry = tasks
-                .entry(key.clone())
-                .or_insert_with(|| {
-                    Arc::new(TaskEntry {
-                        cell: OnceCell::new(),
-                        callers: AtomicUsize::new(0),
-                    })
-                })
-                .clone();
+            let entry = if let Some(slot) = tasks.get_mut(&key) {
+                // A published result belongs to the old callers only.
+                if slot.cell.initialized() {
+                    *slot = TaskEntry::new_arc();
+                }
+                Arc::clone(slot)
+            } else {
+                let entry = TaskEntry::new_arc();
+                tasks.insert(key.clone(), Arc::clone(&entry));
+                entry
+            };
 
             entry.callers.fetch_add(1, Ordering::Relaxed);
             entry
         };
-
         let _guard = CallerGuard {
             tasks: &self.tasks,
             key,
             entry: Arc::clone(&entry),
         };
 
-        let initialized_by_this_call = Arc::new(AtomicBool::new(false));
-        let initializer_flag = Arc::clone(&initialized_by_this_call);
+        let initialized_by_this_call = AtomicBool::new(false);
+        let initializer_flag = &initialized_by_this_call;
 
         let result = entry
             .cell
@@ -132,6 +160,12 @@ where
             .await
             .clone();
 
+        // Test-only: the initializer ticks after its result has been published.
+        #[cfg(test)]
+        if initialized_by_this_call.load(Ordering::Relaxed) {
+            coalescer_probe::mark_done();
+        }
+
         let kind = if initialized_by_this_call.load(Ordering::Relaxed) {
             CoalescerRunKind::Executed
         } else {
@@ -139,6 +173,43 @@ where
         };
 
         (result, kind)
+    }
+}
+
+/// Test-only ticks on the `service::probe` clock: `JOIN` is taken under the
+/// `tasks` mutex when a call registers, `DONE` by the initializer after the
+/// result is published. A call whose `JOIN` is greater than an operation's
+/// `DONE` registered after that operation had completed.
+#[cfg(test)]
+pub(crate) mod coalescer_probe {
+    use std::cell::Cell;
+    tokio::task_local! {
+        pub(crate) static JOIN: Cell<u64>;
+        pub(crate) static DONE: Cell<u64>;
+    }
+    pub(crate) fn mark_join() {
+        let tick = crate::service::probe::now();
+        let _ = JOIN.try_with(|c| c.set(tick));
+    }
+    pub(crate) fn mark_done() {
+        let tick = crate::service::probe::now();
+        let _ = DONE.try_with(|c| c.set(tick));
+    }
+}
+
+/// Test-only views of the in-flight table.
+#[cfg(test)]
+impl<K, V, E> TaskCoalescer<K, V, E> {
+    pub(crate) fn test_len(&self) -> usize {
+        self.tasks.lock().unwrap().len()
+    }
+    pub(crate) fn test_callers(&self) -> usize {
+        self.tasks
+            .lock()
+            .unwrap()
+            .values()
+            .map(|e| e.callers.load(Ordering::SeqCst))
+            .sum()
     }
 }
 
@@ -153,6 +224,57 @@ mod tests {
         time::Duration,
     };
     use tokio::task::JoinSet;
+
+    #[tokio::test]
+    async fn key_destructors_run_outside_the_task_lock() {
+        use std::{
+            hash::{Hash, Hasher},
+            sync::Weak,
+        };
+
+        #[derive(Clone)]
+        struct Key {
+            owner: Weak<TaskCoalescer<Key, usize, ()>>,
+            locked_drops: Arc<AtomicUsize>,
+        }
+
+        impl PartialEq for Key {
+            fn eq(&self, _: &Self) -> bool {
+                true
+            }
+        }
+        impl Eq for Key {}
+        impl Hash for Key {
+            fn hash<H: Hasher>(&self, state: &mut H) {
+                0u8.hash(state);
+            }
+        }
+        impl Drop for Key {
+            fn drop(&mut self) {
+                if let Some(owner) = self.owner.upgrade()
+                    && owner.tasks.try_lock().is_err()
+                {
+                    self.locked_drops.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+
+        let owner = Arc::new(TaskCoalescer::new());
+        let locked_drops = Arc::new(AtomicUsize::new(0));
+        let key = Key {
+            owner: Arc::downgrade(&owner),
+            locked_drops: Arc::clone(&locked_drops),
+        };
+        let (first, second) = tokio::join!(
+            owner.run(key.clone(), || async {
+                tokio::task::yield_now().await;
+                Ok(1)
+            }),
+            owner.run(key, || async { Ok(2) }),
+        );
+        assert!(Arc::ptr_eq(&first.unwrap(), &second.unwrap()));
+        assert_eq!(locked_drops.load(Ordering::Relaxed), 0);
+    }
 
     #[tokio::test]
     async fn coalesces_concurrent_requests() {
@@ -384,5 +506,210 @@ mod tests {
             !tasks.contains_key("shared-key"),
             "completed operation left a stale entry"
         );
+    }
+}
+
+#[cfg(test)]
+mod completed_operation {
+    use super::{CoalescerRunKind, TaskCoalescer};
+    use std::{
+        future::Future,
+        pin::Pin,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        task::{Context, Poll, Waker},
+        time::Duration,
+    };
+    use tokio::{
+        sync::{Notify, Semaphore},
+        time::timeout,
+    };
+
+    const LIMIT: Duration = Duration::from_secs(5);
+    fn poll_once<F: Future>(f: Pin<&mut F>) -> Poll<F::Output> {
+        f.poll(&mut Context::from_waker(Waker::noop()))
+    }
+    async fn wait_until(mut cond: impl FnMut() -> bool, what: &str) {
+        timeout(LIMIT, async {
+            while !cond() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for: {what}"));
+    }
+
+    async fn b1_case(fail: bool) {
+        let c = TaskCoalescer::<u8, u64, String>::new();
+        let gate = Arc::new(Notify::new());
+        let g = gate.clone();
+        let mut a = Box::pin(c.run_with_kind(1, move || async move {
+            g.notified().await;
+            if fail { Err("boom".to_owned()) } else { Ok(1) }
+        }));
+        assert!(poll_once(a.as_mut()).is_pending());
+        let mut w = Box::pin(c.run_with_kind(1, || async { Ok(2) }));
+        assert!(poll_once(w.as_mut()).is_pending());
+        gate.notify_one();
+        let (ra, ka) = a.await;
+        assert_eq!((ra.is_err(), ka), (fail, CoalescerRunKind::Executed));
+        let (rn, kn) = c.run_with_kind(1, || async { Ok(3) }).await;
+        assert_eq!(
+            kn,
+            CoalescerRunKind::Executed,
+            "new caller joined a finished entry (fail={fail})"
+        );
+        assert_eq!(*rn.unwrap(), 3);
+        let (rw, kw) = w.await;
+        assert_eq!(kw, CoalescerRunKind::Coalesced);
+        assert_eq!(rw.is_err(), fail);
+        assert_eq!(c.test_len(), 0);
+    }
+    #[tokio::test]
+    async fn b1_new_caller_after_completion_starts_new_operation() {
+        b1_case(false).await;
+        b1_case(true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn b2_stale_caller_guard_does_not_remove_newer_entry() {
+        let c = Arc::new(TaskCoalescer::<u8, u64, String>::new());
+        let gate = Arc::new(Notify::new());
+        let g = gate.clone();
+        let mut a = Box::pin(c.run_with_kind(1, move || async move {
+            g.notified().await;
+            Ok(1)
+        }));
+        assert!(poll_once(a.as_mut()).is_pending());
+        let mut w = Box::pin(c.run_with_kind(1, || async { Ok(2) }));
+        assert!(poll_once(w.as_mut()).is_pending());
+        gate.notify_one();
+        let _ = a.await;
+        // N registers a new entry for the same key and blocks behind its own gate
+        let (n_gate, n_started) = (Arc::new(Semaphore::new(0)), Arc::new(AtomicUsize::new(0)));
+        let n = {
+            let (c, n_gate, n_started) = (c.clone(), n_gate.clone(), n_started.clone());
+            tokio::spawn(async move {
+                c.run_with_kind(1, move || async move {
+                    n_started.fetch_add(1, Ordering::SeqCst);
+                    let _open = n_gate.acquire().await.unwrap();
+                    Ok(3)
+                })
+                .await
+            })
+        };
+        wait_until(
+            || n.is_finished() || n_started.load(Ordering::SeqCst) == 1,
+            "N finished or started",
+        )
+        .await;
+        assert_eq!(
+            n_started.load(Ordering::SeqCst),
+            1,
+            "N reused the finished entry instead of starting its own"
+        );
+        drop(w); // the old waiter's guard is released after the newer entry exists
+        assert_eq!(c.test_len(), 1, "stale guard removed the newer entry");
+        let m = {
+            let c = c.clone();
+            tokio::spawn(async move { c.run_with_kind(1, || async { Ok(4) }).await })
+        };
+        wait_until(
+            || m.is_finished() || c.test_callers() == 2,
+            "M finished or joined",
+        )
+        .await;
+        n_gate.add_permits(1);
+        let (rn, kn) = timeout(LIMIT, n).await.unwrap().unwrap();
+        let (rm, km) = timeout(LIMIT, m).await.unwrap().unwrap();
+        assert_eq!((kn, *rn.unwrap()), (CoalescerRunKind::Executed, 3));
+        assert_eq!(
+            (km, *rm.unwrap()),
+            (CoalescerRunKind::Coalesced, 3),
+            "M did not join N's entry"
+        );
+        assert_eq!(c.test_len(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn b3_initializer_cancel_reexecutes_once_for_waiters() {
+        let c = Arc::new(TaskCoalescer::<u8, u64, String>::new());
+        let started = Arc::new(Notify::new());
+        let a = {
+            let (c, started) = (c.clone(), started.clone());
+            tokio::spawn(async move {
+                c.run_with_kind(1, move || async move {
+                    started.notify_one();
+                    std::future::pending::<()>().await;
+                    Ok(1)
+                })
+                .await
+            })
+        };
+        timeout(LIMIT, started.notified()).await.unwrap();
+        let (gate, reexec) = (Arc::new(Semaphore::new(0)), Arc::new(AtomicUsize::new(0)));
+        let spawn_waiter = |v: u64| {
+            let (c, gate, reexec) = (c.clone(), gate.clone(), reexec.clone());
+            tokio::spawn(async move {
+                c.run_with_kind(1, move || async move {
+                    reexec.fetch_add(1, Ordering::SeqCst);
+                    let _open = gate.acquire().await.unwrap();
+                    Ok(v)
+                })
+                .await
+            })
+        };
+        let w1 = spawn_waiter(2);
+        let w2 = spawn_waiter(3);
+        wait_until(
+            || c.test_callers() == 3 || reexec.load(Ordering::SeqCst) > 0,
+            "two waiters joined or one executed",
+        )
+        .await;
+        assert_eq!(
+            reexec.load(Ordering::SeqCst),
+            0,
+            "a waiter executed while the initializer was still in flight"
+        );
+        a.abort();
+        assert!(a.await.unwrap_err().is_cancelled());
+        wait_until(
+            || reexec.load(Ordering::SeqCst) >= 1,
+            "one waiter re-executes",
+        )
+        .await;
+        // a new caller during the re-execution joins it
+        let n = spawn_waiter(4);
+        wait_until(
+            || n.is_finished() || c.test_callers() == 3 || reexec.load(Ordering::SeqCst) >= 2,
+            "N finished, joined or executed separately",
+        )
+        .await;
+        gate.add_permits(1);
+        let r1 = timeout(LIMIT, w1).await.unwrap().unwrap();
+        let r2 = timeout(LIMIT, w2).await.unwrap().unwrap();
+        let rn = timeout(LIMIT, n).await.unwrap().unwrap();
+        assert_eq!(
+            reexec.load(Ordering::SeqCst),
+            1,
+            "unnecessary extra execution after initializer cancel"
+        );
+        let kinds = [r1.1, r2.1, rn.1];
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|k| **k == CoalescerRunKind::Executed)
+                .count(),
+            1
+        );
+        let v1 = *r1.0.unwrap();
+        assert_eq!(
+            (*r2.0.unwrap(), *rn.0.unwrap()),
+            (v1, v1),
+            "callers received different results"
+        );
+        assert_eq!(c.test_len(), 0);
     }
 }

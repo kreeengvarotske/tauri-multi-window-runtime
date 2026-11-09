@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "description": "Only the main window may read runtime stats",
+  "windows": ["main"],
+  "permissions": ["allow-demo-stats"]
+}
