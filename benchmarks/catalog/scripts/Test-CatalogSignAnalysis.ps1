@@ -81,11 +81,16 @@ Assert-Refused 'missing frozen threshold has no fallback' { Get-CatalogConfirmat
 
 $thresholdFile = [IO.Path]::GetTempFileName()
 try {
-    $csv = ($thresholds | ConvertTo-Csv -NoTypeInformation) -join "`r`n"
+    $completeThresholds = $thresholds + @(
+        [pscustomobject]@{ Cell = 'N4D64'; Kind = 'Eta'; Outcome = 'RAM'; Threshold = '5' }
+        [pscustomobject]@{ Cell = 'N4D64'; Kind = 'Epsilon'; Outcome = 'RAM'; Threshold = '5' }
+        [pscustomobject]@{ Cell = 'N4D64'; Kind = 'Epsilon'; Outcome = 'CPU'; Threshold = '1' }
+    )
+    $csv = ($completeThresholds | ConvertTo-Csv -NoTypeInformation) -join "`r`n"
     [IO.File]::WriteAllText($thresholdFile, $csv, (New-Object System.Text.UTF8Encoding($true)))
     $hash = (Get-FileHash -LiteralPath $thresholdFile -Algorithm SHA256).Hash
     $frozenInputs = @{
-        ThresholdsPath = $thresholdFile; ThresholdsSha256 = $hash
+        ThresholdsPath = $thresholdFile; ThresholdsSha256 = $hash; Cells = @('N4D64')
         PrimaryIds = @('N4D64/RAM', 'N4D64/CPU'); NiRamIds = @(); NiCpuIds = @('N4D64/CPU')
         PairRows = $pairRows; Triplets = 2
     }
@@ -95,7 +100,7 @@ try {
         $result.Primary.Adjustments.Count -eq 2 -and $result.NiRam.Adjustments.Count -eq 0 -and
         $result.NiCpu.Evidence[0].Shift -eq -1)
     [IO.File]::AppendAllText($thresholdFile, "`r`n")
-    Assert-Refused 'modified thresholds are refused before analysis' { Get-CatalogConfirmatorySignResults @frozenInputs } 'SHA-256 mismatch'
+    Assert-Refused 'modified thresholds are refused before analysis' { Get-CatalogConfirmatorySignResults @frozenInputs } 'does not match the frozen'
 } finally {
     Remove-Item -LiteralPath $thresholdFile
 }

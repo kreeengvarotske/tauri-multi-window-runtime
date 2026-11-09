@@ -2,30 +2,6 @@
 # The caller supplies the frozen family membership and validated paired data.
 . (Join-Path $PSScriptRoot 'CatalogThresholds.ps1')
 
-function Read-CatalogFrozenThresholds {
-    param(
-        [Parameter(Mandatory = $true)][string]$LiteralPath,
-        [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-fA-F]{64}$')][string]$ExpectedSha256
-    )
-    $path = (Resolve-Path -LiteralPath $LiteralPath -ErrorAction Stop).ProviderPath
-    $bytes = [IO.File]::ReadAllBytes($path)
-    $sha256 = [Security.Cryptography.SHA256]::Create()
-    try {
-        $actual = [BitConverter]::ToString($sha256.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant()
-    } finally {
-        $sha256.Dispose()
-    }
-    if ($actual -ne $ExpectedSha256) {
-        throw "Frozen thresholds SHA-256 mismatch: expected $ExpectedSha256, got $actual."
-    }
-    # Decode the same bytes that were hashed, including files with a UTF-8 BOM.
-    $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
-    $csv = $utf8.GetString($bytes).TrimStart([char]0xFEFF)
-    $rows = @(ConvertFrom-Csv -InputObject $csv)
-    if ($rows.Count -eq 0) { throw 'Frozen thresholds CSV contains no rows.' }
-    [pscustomobject]@{ Sha256 = $actual; Rows = $rows }
-}
-
 function Get-CatalogPairedDifferences {
     # Reads one comparison from the summarizer's triplets.csv rows. Missing
     # or duplicate rows are input errors; explicitly invalid pairs stay in
@@ -231,13 +207,14 @@ function Get-CatalogConfirmatorySignResults {
     param(
         [Parameter(Mandatory = $true)][string]$ThresholdsPath,
         [Parameter(Mandatory = $true)][string]$ThresholdsSha256,
+        [Parameter(Mandatory = $true)][string[]]$Cells,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$PrimaryIds,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$NiRamIds,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$NiCpuIds,
         [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$PairRows,
         [Parameter(Mandatory = $true)][ValidateRange(1, 50)][int]$Triplets
     )
-    $thresholds = Read-CatalogFrozenThresholds -LiteralPath $ThresholdsPath -ExpectedSha256 $ThresholdsSha256
+    $thresholds = Import-CatalogThresholds -Path $ThresholdsPath -ExpectedSha256 $ThresholdsSha256 -Cells $Cells
     $inputs = @{ ThresholdRows = $thresholds.Rows; PairRows = $PairRows; Triplets = $Triplets }
     [pscustomobject]@{
         ThresholdsSha256 = $thresholds.Sha256

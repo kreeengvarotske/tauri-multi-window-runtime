@@ -399,7 +399,13 @@ $root = Join-Path ([System.IO.Path]::GetTempPath()) ("catalog-test-hash-{0}" -f 
 New-Item -ItemType Directory -Force -Path $root | Out-Null
 try {
     $thresholdsCsv = Join-Path $root 'thresholds.csv'
-    $table | Export-Csv -LiteralPath $thresholdsCsv -NoTypeInformation -Encoding UTF8
+    $originalCulture = [Threading.Thread]::CurrentThread.CurrentCulture
+    try {
+        [Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::GetCultureInfo('de-AT')
+        Export-CatalogThresholds -Rows $table -Path $thresholdsCsv
+    } finally {
+        [Threading.Thread]::CurrentThread.CurrentCulture = $originalCulture
+    }
     $frozen = Get-CatalogFileSha256 -Path $thresholdsCsv
     $loaded = Import-CatalogThresholds -Path $thresholdsCsv -ExpectedSha256 $frozen.ToUpperInvariant() -Cells N2D16, N4D64
     Assert-True 'thresholds hash: the frozen file is read, any letter case' ($loaded.Sha256 -eq $frozen -and @($loaded.Rows).Count -eq 12)
@@ -420,7 +426,7 @@ try {
     & $refused 'a cell missing from the file' $thresholdsCsv $frozen @('N2D16', 'N4D64', 'N2D0') 'missing: N2D0/'
     & $refused 'a cell not in the plan' $thresholdsCsv $frozen @('N2D16') 'unexpected: N4D64/'
     $doubled = Join-Path $root 'thresholds-doubled.csv'
-    @($table) + @($table[0]) | Export-Csv -LiteralPath $doubled -NoTypeInformation -Encoding UTF8
+    Export-CatalogThresholds -Rows (@($table) + @($table[0])) -Path $doubled
     & $refused 'a duplicated row' $doubled (Get-CatalogFileSha256 -Path $doubled) @('N2D16', 'N4D64') 'duplicated: N2D16/Delta/RAM'
     $text = Join-Path $root 'thresholds-text.csv'
     [System.IO.File]::WriteAllText($text, ([System.IO.File]::ReadAllText($thresholdsCsv)).Replace('15.25', 'n/a'))
@@ -574,7 +580,7 @@ try {
     $block2 = @($confirmSchedule | Where-Object { [int]$_.Block -eq 2 } | ForEach-Object { $_.Name })
     $freeze = New-Freeze 'ok' (New-ConfirmConfiguration) $confirmSchedule
     $thresholdsFile = Join-Path $confirmRoot 'freeze-ok\thresholds.csv'
-    $table | Export-Csv -LiteralPath $thresholdsFile -NoTypeInformation -Encoding UTF8
+    Export-CatalogThresholds -Rows $table -Path $thresholdsFile
     $thresholdsSha = (Get-FileHash -LiteralPath $thresholdsFile -Algorithm SHA256).Hash.ToLowerInvariant()
     $session1 = New-Session 'session-1' $freeze $confirmSchedule $block1
     $session2 = New-Session 'session-2' $freeze $confirmSchedule $block2

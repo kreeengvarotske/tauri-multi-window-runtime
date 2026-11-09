@@ -107,6 +107,16 @@ function New-CatalogThresholds {
     }
 }
 
+function Export-CatalogThresholds {
+    param([Parameter(Mandatory)][object[]]$Rows, [Parameter(Mandatory)][string]$Path)
+    $culture = [Globalization.CultureInfo]::InvariantCulture
+    $Rows | Select-Object Cell, Kind, Outcome, ReferenceArm,
+        @{ Name = 'Reference'; Expression = { if ($null -ne $_.Reference) { ([double]$_.Reference).ToString('R', $culture) } } },
+        ValidPilotRuns, Form,
+        @{ Name = 'Threshold'; Expression = { if ($null -ne $_.Threshold) { ([double]$_.Threshold).ToString('R', $culture) } } },
+        Reason | Export-Csv -LiteralPath $Path -NoTypeInformation -Encoding UTF8
+}
+
 function Get-CatalogFileSha256 {
     param([Parameter(Mandatory)][string]$Path)
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -128,9 +138,18 @@ function Import-CatalogThresholds {
     )
     if ($ExpectedSha256 -notmatch '^[0-9a-fA-F]{64}$') { throw "The frozen SHA-256 of thresholds.csv is not a 64-digit hex value ('$ExpectedSha256'); the confirmatory analysis stops." }
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "thresholds.csv not found at '$Path'; the confirmatory analysis stops." }
-    $actual = Get-CatalogFileSha256 -Path $Path
+    $resolved = (Resolve-Path -LiteralPath $Path -ErrorAction Stop).ProviderPath
+    $bytes = [IO.File]::ReadAllBytes($resolved)
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $actual = [BitConverter]::ToString($sha256.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant()
+    } finally {
+        $sha256.Dispose()
+    }
     if ($actual -ne $ExpectedSha256.ToLowerInvariant()) { throw "thresholds.csv SHA-256 $actual does not match the frozen $($ExpectedSha256.ToLowerInvariant()); the confirmatory analysis stops." }
-    $rows = @(Import-Csv -LiteralPath $Path)
+    # Decode the same bytes that were verified, including files with a UTF-8 BOM.
+    $utf8 = New-Object System.Text.UTF8Encoding($false, $true)
+    $rows = @(ConvertFrom-Csv -InputObject $utf8.GetString($bytes).TrimStart([char]0xFEFF))
     $culture = [System.Globalization.CultureInfo]::InvariantCulture
     $expected = New-Object System.Collections.Generic.List[string]
     foreach ($cell in $Cells) { foreach ($form in Get-CatalogThresholdForms) { $expected.Add("$cell/$($form.Kind)/$($form.Outcome)") } }
