@@ -25,8 +25,8 @@ The cache expiry optimization in `be2ad3b` was checked with an isolated Windows 
 ## Before publishing
 
 - [ ] Review and integrate the runtime and adapter stack, including the [IPC error fix](https://github.com/kreeengvarotske/tauri-multi-window-runtime/pull/42).
-- [ ] Agree on a repository license and apply it to the distributed crates. The tested source revision has no root license file or license metadata for these crates.
-- [ ] Choose the preview version and source revision. Verify that an account with the intended access can fetch it and that all examples pin the same revision.
+- [ ] Agree on a repository license and apply it to the distributed crates. Proposed: MIT OR Apache-2.0, with `LICENSE-MIT`, `LICENSE-APACHE` and `license` metadata in every workspace crate. The repository owner decides.
+- [ ] Choose the preview version and source revision. Proposed: crate version `0.1.0-preview.1`, Git tag `v0.1.0-preview.1` on the commit on `main` that CI tested. `publish = false` until a crates.io release is decided. Verify that an account with the intended access can fetch the tag and that all examples pin it.
 - [ ] Repeat the standalone Release build and native self-test on the selected release revision. Record the tested Windows and Rust versions. Document an MSRV only after validating it.
 - [ ] Review installation instructions, the scope of the preview, and the [draft release notes](windows-preview-release-notes.md). The preview covers sharing within a single app. The cross-app broker is a separate experiment.
 

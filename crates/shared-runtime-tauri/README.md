@@ -1,6 +1,6 @@
 # shared-runtime-tauri
 
-The Tauri v2 adapter for `shared-runtime` (stage R3 in `docs/design/runtime-api.md`). `shared-runtime` and `runtime-core` have no Tauri dependency; this crate is the only place where the two meet. `examples/runtime-adapter-demo` is a minimal app that uses it.
+The Tauri v2 adapter for `shared-runtime` (stage R3 of the runtime API proposal, PR #32). `shared-runtime` and `runtime-core` have no Tauri dependency; this crate is the only place where the two meet. `examples/runtime-adapter-demo` is a minimal app that uses it.
 
 ## Using it
 
