@@ -101,6 +101,8 @@ Use the `ConfirmatoryDirectories` parameter set of `Summarize-CatalogRuns.ps1` t
 
 The confirmatory manifest carries a `signFamilies` object with arrays `P`, `NI-RAM`, and `NI-CPU`. Each entry is a frozen hypothesis ID such as `N4D64/RAM`. Use an empty array for a family with no frozen hypotheses. The summarizer writes `sign-evidence.json` with pair exclusions, sign counts, and Holm results. Claim decisions, guardrails and framework-cost intervals are pending.
 
+`guardrail-evidence.csv` lists the individual limits and observed medians for B and C. Latency medians use valid runs. The counts of errors and incomplete workloads include invalid runs with available reports. Missing observations are recorded separately. The table leaves the final combination of latency limits to the protocol decision.
+
 ## What this does not show
 
 WebView2 processes exist in every arm, one renderer per window; nothing here shares them. A smaller process tree in arm B or C means the renderers hold less data, not that any process is shared. CI runs on the Actions Windows Server image and is a build and correctness check only; measurements come from native runs on a named machine, reported with that machine's OS, at an exact SHA.

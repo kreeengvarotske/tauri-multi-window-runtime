@@ -109,6 +109,43 @@ function Get-Stat {
     return ($Values | Measure-Object -Average -Minimum -Maximum).$Kind
 }
 
+function Get-GuardrailRows {
+    param([object[]]$Runs)
+    foreach ($cell in ($Runs | Group-Object Cell)) {
+        $validByArm = @{}
+        foreach ($arm in 'A', 'B', 'C') {
+            $validByArm[$arm] = @($cell.Group | Where-Object { $_.Arm -eq $arm -and $_.Valid })
+        }
+        $p95A = Get-Median @($validByArm['A'] | ForEach-Object P95LatencyMsMax | Where-Object { $null -ne $_ })
+        $p95B = Get-Median @($validByArm['B'] | ForEach-Object P95LatencyMsMax | Where-Object { $null -ne $_ })
+        $firstA = Get-Median @($validByArm['A'] | ForEach-Object TimeToFirstPageMsMax | Where-Object { $null -ne $_ })
+        foreach ($arm in 'B', 'C') {
+            $all = @($cell.Group | Where-Object { $_.Arm -eq $arm })
+            if ($all.Count -eq 0) { continue }
+            $valid = $validByArm[$arm]
+            $p95 = Get-Median @($valid | ForEach-Object P95LatencyMsMax | Where-Object { $null -ne $_ })
+            $first = Get-Median @($valid | ForEach-Object TimeToFirstPageMsMax | Where-Object { $null -ne $_ })
+            [pscustomobject][ordered]@{
+                Cell = $cell.Name; Arm = $arm; Runs = $all.Count; ValidRuns = $valid.Count
+                RunsWithErrors = @($all | Where-Object { $_.Failures -gt 0 -or $_.Mismatches -gt 0 }).Count
+                RunsWithIncompleteSteps = @($all | Where-Object {
+                    $null -ne $_.CompletedSteps -and $null -ne $_.ScheduledSteps -and $_.CompletedSteps -lt $_.ScheduledSteps
+                }).Count
+                RunsMissingCounts = @($all | Where-Object {
+                    $null -eq $_.Failures -or $null -eq $_.Mismatches -or
+                    $null -eq $_.CompletedSteps -or $null -eq $_.ScheduledSteps
+                }).Count
+                P95MedianMs = $p95
+                P95LimitVsAMs = $(if ($null -ne $p95A) { [Math]::Max(1.5 * $p95A, $p95A + 20) })
+                P95AbsoluteLimitMs = 100
+                P95LimitVsBMs = $(if ($arm -eq 'C' -and $null -ne $p95B) { 1.2 * $p95B + 5 })
+                FirstPageMedianMs = $first
+                FirstPageLimitVsAMs = $(if ($null -ne $firstA) { 1.5 * $firstA + 200 })
+            }
+        }
+    }
+}
+
 function Format-Number {
     param([AllowNull()][object]$Value, [int]$Digits = 1)
     if ($null -eq $Value -or '' -eq $Value) { return '' }
@@ -515,6 +552,7 @@ New-Item -ItemType Directory -Path $OutputDirectory -ErrorAction Stop | Out-Null
 Export-Rows $runs.ToArray() 'runs.csv'
 Export-Rows $triplets.ToArray() 'triplets.csv'
 Export-Rows $summary.ToArray() 'summary.csv'
+Export-Rows @(Get-GuardrailRows -Runs $runs.ToArray()) 'guardrail-evidence.csv'
 if ($processes.Count -gt 0) { Export-Rows $processes.ToArray() 'processes.csv' }
 if ($checked) {
     $signResults | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'sign-evidence.json') -Encoding UTF8
@@ -544,8 +582,10 @@ if ($checked) {
     $lines.Add('')
     $lines.Add("Frozen manifest SHA-256: $($checked.ManifestSha256)")
     $lines.Add("Frozen thresholds SHA-256: $($checked.ThresholdsSha256)")
-    $lines.Add('Frozen sign-test evidence is in sign-evidence.json. Claim and guardrail decisions are pending.')
+    $lines.Add('Frozen sign-test evidence is in sign-evidence.json. Claim decisions are pending.')
 }
+$lines.Add('')
+$lines.Add('Individual guardrail measures and limits are in guardrail-evidence.csv when B or C was scheduled.')
 $lines.Add('')
 $lines.Add("Git $($configuration.gitHead)$(if ($configuration.gitDirty) { ' (dirty)' }); arms $(@($configuration.arms) -join ', '); cells $(@($configuration.cells) -join ', '); $($configuration.triplets) triplets; schedule seed $($configuration.scheduleSeed).")
 $lines.Add('')

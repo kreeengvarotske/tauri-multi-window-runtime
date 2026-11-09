@@ -161,7 +161,7 @@ try {
             schemaVersion = 1; scenario = 'M'; passed = $passed; problems = @($(if (-not $passed) { 'w1: completed 39/40' }))
             config = [ordered]@{ arm = $run.Arm; windows = [int]$run.Windows; dataMib = [int]$run.DataMib; records = 1000; rustDataBytes = [int]$run.DataMib * 1MB }
             phases = $phases
-            totals = [ordered]@{ scheduledSteps = 80; completedSteps = 80; failures = 0; mismatches = 0; overruns = 0; maxP95LatencyMs = 3.5; maxTimeToFirstPageMs = 120; loadJsHeapAvgBytes = $(if ($run.Arm -eq 'A') { 80MB } else { 8MB }) }
+            totals = [ordered]@{ scheduledSteps = 80; completedSteps = $(if ($passed) { 80 } else { 79 }); failures = $(if ($passed) { 0 } else { 1 }); mismatches = 0; overruns = 0; maxP95LatencyMs = 3.5; maxTimeToFirstPageMs = 120; loadJsHeapAvgBytes = $(if ($run.Arm -eq 'A') { 80MB } else { 8MB }) }
         } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $runsDir "$($run.Name).json") -Encoding UTF8
         $monitor = New-Object System.Collections.Generic.List[string]
         $diagnostics = New-Object System.Collections.Generic.List[string]
@@ -193,6 +193,13 @@ try {
     $runs = @(Import-Csv -LiteralPath (Join-Path $analysis 'runs.csv'))
     $triplets = @(Import-Csv -LiteralPath (Join-Path $analysis 'triplets.csv'))
     $summaryText = Get-Content -LiteralPath (Join-Path $analysis 'summary.md') -Raw
+    $guardrails = @(Import-Csv -LiteralPath (Join-Path $analysis 'guardrail-evidence.csv'))
+    $d16Guardrail = @($guardrails | Where-Object Cell -eq 'N2D16')[0]
+    Assert-True 'guardrail evidence: includes failures from invalid runs' (
+        $d16Guardrail.ValidRuns -eq '1' -and $d16Guardrail.RunsWithErrors -eq '1' -and $d16Guardrail.RunsWithIncompleteSteps -eq '1')
+    Assert-Near 'guardrail evidence: p95 median uses valid runs' $d16Guardrail.P95MedianMs 3.5
+    Assert-Near 'guardrail evidence: p95 limit against A' $d16Guardrail.P95LimitVsAMs 23.5
+    Assert-Near 'guardrail evidence: first-page limit against A' $d16Guardrail.FirstPageLimitVsAMs 380
     Assert-True 'summary: 8 runs' ($runs.Count -eq 8)
     Assert-True 'summary: 5 valid runs' (@($runs | Where-Object { $_.Valid -eq 'True' }).Count -eq 5) (($runs | ForEach-Object { "$($_.Name)=$($_.InvalidReason)" }) -join '; ')
     $gapRun = @($runs | Where-Object { $_.Cell -eq 'N2D0' -and $_.Triplet -eq '1' -and $_.Arm -eq 'A' })[0]
@@ -614,6 +621,7 @@ try {
     $assembledPairs = @(Import-Csv -LiteralPath (Join-Path $assembled 'triplets.csv'))
     $assembledSummary = Get-Content -LiteralPath (Join-Path $assembled 'summary.md') -Raw
     $assembledSign = Get-Content -LiteralPath (Join-Path $assembled 'sign-evidence.json') -Raw | ConvertFrom-Json
+    $assembledGuardrails = @(Import-Csv -LiteralPath (Join-Path $assembled 'guardrail-evidence.csv'))
     Assert-True 'confirmatory summary: preserves all invalid runs and pairs across two sessions' (
         $assembledRuns.Count -eq 12 -and $assembledPairs.Count -eq 12 -and
         @($assembledRuns | Where-Object { $_.Valid -ne 'False' -or $_.InvalidReason -like '*not run*' }).Count -eq 0)
@@ -625,6 +633,11 @@ try {
     Assert-True 'confirmatory summary: insufficient valid pairs give no sign evidence against H0' (
         $assembledSign.Primary.Evidence[0].N -eq 0 -and $assembledSign.Primary.Evidence[0].PValue -eq 1 -and
         @($assembledSign.Primary.Evidence[0].Excluded).Count -eq 2 -and -not $assembledSign.Primary.Adjustments[0].Reject)
+    Assert-True 'confirmatory summary: missing guardrail observations stay missing' (
+        $assembledGuardrails.Count -eq 4 -and
+        @($assembledGuardrails | Where-Object {
+            $_.RunsMissingCounts -ne '2' -or $_.P95MedianMs -ne '' -or $_.P95LimitVsAMs -ne '' -or $_.FirstPageLimitVsAMs -ne ''
+        }).Count -eq 0)
     $pairs = @(foreach ($triplet in ($ok.Schedule | Group-Object Cell, Triplet)) {
         foreach ($comparison in 'C-A', 'C-B', 'B-A') {
             [pscustomobject]@{
