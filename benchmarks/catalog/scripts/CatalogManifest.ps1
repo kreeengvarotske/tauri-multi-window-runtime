@@ -81,6 +81,9 @@ function New-CatalogManifest {
         $manifest[$field] = if ($Configuration.Contains($field)) { $Configuration[$field] } else { $null }
     }
     $manifest['runs'] = $Schedule.Count
+    if ($manifest.phase -eq 'Pilot' -and $Configuration.Contains('expectedScheduleSha256') -and $Configuration['expectedScheduleSha256']) {
+        $manifest['expectedScheduleSha256'] = $Configuration['expectedScheduleSha256']
+    }
     $manifest['scheduleContentSha256'] = Get-CatalogScheduleSha256 -Schedule $Schedule
     $manifest
 }
