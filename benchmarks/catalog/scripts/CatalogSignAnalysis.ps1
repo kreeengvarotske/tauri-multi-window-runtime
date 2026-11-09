@@ -163,3 +163,42 @@ function Get-CatalogMedianInterval {
         Coverage = $coverage
     }
 }
+
+function Get-CatalogConfirmatorySignFamily {
+    # The freeze defines membership. This function never selects hypotheses
+    # from observed data or recomputes margins from confirmatory runs.
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('P', 'NI-RAM', 'NI-CPU')][string]$Family,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$FrozenIds,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$ThresholdRows,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$PairRows,
+        [Parameter(Mandatory = $true)][ValidateRange(1, 50)][int]$Triplets
+    )
+    $kind = if ($Family -eq 'P') { 'Delta' } else { 'Eta' }
+    $evidence = @(foreach ($id in $FrozenIds) {
+        $parsed = [regex]::Match($id, '^(?<cell>N[0-9]+D[0-9]+)/(?<outcome>RAM|CPU)$')
+        if (-not $parsed.Success) { throw "Invalid frozen hypothesis ID '$id'." }
+        $cell = $parsed.Groups['cell'].Value
+        $outcome = $parsed.Groups['outcome'].Value
+        if ($cell -eq 'N2D0' -or ($Family -ne 'P' -and $Family -ne "NI-$outcome")) {
+            throw "Hypothesis '$id' does not belong to family '$Family'."
+        }
+        $threshold = @($ThresholdRows | Where-Object { $_.Cell -eq $cell -and $_.Kind -eq $kind -and $_.Outcome -eq $outcome })
+        $margin = 0.0
+        if ($threshold.Count -ne 1 -or
+            -not [double]::TryParse([string]$threshold[0].Threshold, [Globalization.NumberStyles]::Float, [Globalization.CultureInfo]::InvariantCulture, [ref]$margin) -or
+            [double]::IsNaN($margin) -or [double]::IsInfinity($margin) -or $margin -lt 0) {
+            throw "Missing or invalid frozen $kind threshold for '$id'."
+        }
+        $pairs = Get-CatalogPairedDifferences -Rows $PairRows -Cell $cell -Comparison C-A -Outcome $outcome -Triplets $Triplets
+        $shift = if ($Family -eq 'P') { $margin } else { -$margin }
+        $result = Get-CatalogSignEvidence -Id $id -Differences $pairs.Differences -Shift $shift
+        $result | Add-Member -NotePropertyName Excluded -NotePropertyValue $pairs.Excluded
+        $result
+    })
+    [pscustomobject]@{
+        Family = $Family
+        Evidence = $evidence
+        Adjustments = @(Resolve-CatalogHolmFamily -FrozenIds $FrozenIds -Evidence $evidence)
+    }
+}

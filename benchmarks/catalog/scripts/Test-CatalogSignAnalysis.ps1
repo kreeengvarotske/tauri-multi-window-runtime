@@ -64,4 +64,19 @@ Assert-True 'six pairs can only use their extrema at 95 percent' ($six.Rank -eq 
 $eleven = Get-CatalogMedianInterval -Differences (11..1) -Alpha 0.05
 Assert-True 'eleven pairs use the second and tenth order statistics' ($eleven.Rank -eq 2 -and $eleven.Lower -eq 2 -and $eleven.Upper -eq 10)
 
+$pairRows[1].LoadPrivateMBDiff = '-12.5'
+$thresholds = @(
+    [pscustomobject]@{ Cell = 'N4D64'; Kind = 'Delta'; Outcome = 'RAM'; Threshold = '10' }
+    [pscustomobject]@{ Cell = 'N4D64'; Kind = 'Delta'; Outcome = 'CPU'; Threshold = '1' }
+    [pscustomobject]@{ Cell = 'N4D64'; Kind = 'Eta'; Outcome = 'CPU'; Threshold = '1' }
+)
+$primary = Get-CatalogConfirmatorySignFamily -Family P -FrozenIds @('N4D64/RAM', 'N4D64/CPU') -ThresholdRows $thresholds -PairRows $pairRows -Triplets 2
+Assert-True 'primary family combines RAM and CPU with the frozen Delta shifts' ($primary.Adjustments.Count -eq 2 -and $primary.Evidence[0].Below -eq 1 -and $primary.Evidence[1].Below -eq 0)
+Assert-True 'family evidence retains excluded triplets' ($primary.Evidence[0].Excluded[0].Triplet -eq 2)
+$ni = Get-CatalogConfirmatorySignFamily -Family NI-CPU -FrozenIds @('N4D64/CPU') -ThresholdRows $thresholds -PairRows $pairRows -Triplets 2
+Assert-True 'non-inferiority subtracts the frozen Eta margin' ($ni.Evidence[0].Shift -eq -1 -and $ni.Evidence[0].Below -eq 1)
+Assert-Refused 'non-inferiority cannot mix outcomes' { Get-CatalogConfirmatorySignFamily -Family NI-CPU -FrozenIds @('N4D64/RAM') -ThresholdRows $thresholds -PairRows $pairRows -Triplets 2 } 'does not belong'
+Assert-Refused 'fixed-cost control stays descriptive' { Get-CatalogConfirmatorySignFamily -Family P -FrozenIds @('N2D0/RAM') -ThresholdRows $thresholds -PairRows $pairRows -Triplets 2 } 'does not belong'
+Assert-Refused 'missing frozen threshold has no fallback' { Get-CatalogConfirmatorySignFamily -Family P -FrozenIds @('N4D64/RAM') -ThresholdRows @() -PairRows $pairRows -Triplets 2 } 'Missing or invalid frozen'
+
 Write-Host 'All synthetic sign, Holm and median interval checks passed.'
