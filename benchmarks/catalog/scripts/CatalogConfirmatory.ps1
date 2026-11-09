@@ -17,7 +17,7 @@
 #   manifest; every cell and triplet complete with one run per arm
 #   (Test-CatalogSchedule); runs = cells x arms x triplets;
 # - completeness: every scheduled run has a runs.log entry in exactly one
-#   session, and no session has an entry for a run that is not scheduled.
+#   session, no session has an unscheduled run, and blocks are not split.
 #
 # A run that was started but is invalid by §7 (no report, a failed monitor,
 # missing job artifacts) is not missing data here: it stays in the analysis
@@ -124,8 +124,16 @@ function Test-CatalogConfirmatoryInputs {
             foreach ($line in Get-Content -LiteralPath (Join-Path $directory 'runs.log')) {
                 $lineNumber++
                 if ([string]::IsNullOrWhiteSpace($line)) { continue }
-                try { $name = [string]((ConvertFrom-Json -InputObject $line).name) }
+                try { $event = ConvertFrom-Json -InputObject $line -ErrorAction Stop }
                 catch { $problems.Add("$directory runs.log line $lineNumber is not readable"); continue }
+                $name = $null
+                if ($null -ne $event -and $null -ne $event.PSObject.Properties['name']) {
+                    $name = $event.PSObject.Properties['name'].Value
+                }
+                if ($name -isnot [string] -or [string]::IsNullOrWhiteSpace($name)) {
+                    $problems.Add("$directory runs.log line $lineNumber has no valid run name")
+                    continue
+                }
                 if (-not $entries.ContainsKey($name)) { $entries[$name] = New-Object System.Collections.Generic.List[string] }
                 $entries[$name].Add($directory)
             }
@@ -139,12 +147,22 @@ function Test-CatalogConfirmatoryInputs {
         $scheduleProblems = @(Test-CatalogSchedule -Schedule $schedule -Cells $cells -Arms $arms -Triplets $triplets)
         foreach ($p in $scheduleProblems) { $problems.Add("cell composition: $p") }
         $runs = New-Object System.Collections.Generic.List[object]
+        $blockSessions = @{}
         foreach ($planned in $schedule) {
             $name = [string]$planned.Name
             $where = @(if ($entries.ContainsKey($name)) { $entries[$name] })
             if ($where.Count -eq 0) { $problems.Add("missing data: run $name was never run (no runs.log entry in any session)") }
             elseif ($where.Count -gt 1) { $problems.Add("run $name has $($where.Count) runs.log entries ($($where -join ', '))") }
-            else { $runs.Add([pscustomobject]@{ Name = $name; Cell = $planned.Cell; Arm = $planned.Arm; Triplet = [int]$planned.Triplet; Directory = $where[0] }) }
+            else {
+                $runs.Add([pscustomobject]@{ Name = $name; Cell = $planned.Cell; Arm = $planned.Arm; Triplet = [int]$planned.Triplet; Directory = $where[0] })
+                $block = [int]$planned.Block
+                if (-not $blockSessions.ContainsKey($block)) { $blockSessions[$block] = @{} }
+                $blockSessions[$block][$where[0]] = $true
+            }
+        }
+        foreach ($block in @($blockSessions.Keys | Sort-Object)) {
+            $sessions = @($blockSessions[$block].Keys | Sort-Object)
+            if ($sessions.Count -gt 1) { $problems.Add("block $block is split across results directories: $($sessions -join ', ')") }
         }
         $scheduled = @{}
         foreach ($planned in $schedule) { $scheduled[[string]$planned.Name] = $true }

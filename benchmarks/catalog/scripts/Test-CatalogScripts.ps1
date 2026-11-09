@@ -680,6 +680,15 @@ try {
     # Runs counted twice or not scheduled; nested sessions.
     $again = New-Session 'again-session' $freeze $confirmSchedule ($block2 + $block1[0])
     Assert-ConfirmRefused 'a run in two sessions' (Test-Confirm @($session1, $again)) "run $($block1[0]) has 2 runs.log entries"
+    $splitFirst = New-Session 'split-first' $freeze $confirmSchedule @($block1[0])
+    $splitSecond = New-Session 'split-second' $freeze $confirmSchedule (@($block1 | Select-Object -Skip 1) + $block2)
+    Assert-ConfirmRefused 'a complete run set split within a block' (Test-Confirm @($splitFirst, $splitSecond)) 'block 1 is split across results directories'
+    $invalidLog = New-Session 'invalid-log' $freeze $confirmSchedule $block2
+    Add-Content -LiteralPath (Join-Path $invalidLog 'runs.log') -Value '{"name":["a-run"]}', '{}', 'not JSON'
+    $invalidLogResult = Test-Confirm @($session1, $invalidLog)
+    Assert-ConfirmRefused 'a non-string run name' $invalidLogResult 'runs.log line 7 has no valid run name'
+    Assert-ConfirmRefused 'a missing run name' $invalidLogResult 'runs.log line 8 has no valid run name'
+    Assert-ConfirmRefused 'an unreadable run log entry' $invalidLogResult 'runs.log line 9 is not readable'
     $extra = New-Session 'extra-session' $freeze $confirmSchedule ($block2 + 'r999-N8D256-A')
     Assert-ConfirmRefused 'a run that is not scheduled' (Test-Confirm @($session1, $extra)) 'run r999-N8D256-A is in runs.log but not in the frozen schedule'
     Assert-ConfirmRefused 'the same session twice' (Test-Confirm @($session1, $session1, $session2)) 'given more than once'
