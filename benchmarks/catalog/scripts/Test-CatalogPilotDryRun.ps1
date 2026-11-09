@@ -125,7 +125,7 @@ try {
     # --- 1. The dry run: 72 runs, written and checked, nothing started.
     $dry = Join-Path $root 'pilot-dry-run'
     $result = Invoke-DryRun -Output $dry -From $from
-    Assert-True 'dry run: exit 0' ($result.ExitCode -eq 0) $result.Output.Trim()
+    if ($result.ExitCode -ne 0) { throw "Initial dry run failed: $($result.Output.Trim())" }
     Assert-True 'dry run: reports that no app was started' (Test-Says $result 'No app was started.') $result.Output.Trim()
     foreach ($file in @('configuration.json', 'schedule.csv', 'manifest.json', 'README.md')) {
         Assert-True "dry run: $file written" (Test-Path -LiteralPath (Join-Path $dry $file))
@@ -214,6 +214,46 @@ try {
     $frozenSha = (Get-FileHash -LiteralPath $frozen -Algorithm SHA256).Hash.ToLowerInvariant()
     Assert-True 'freeze: the dry run printed the manifest SHA-256' (Test-Says $result $frozenSha)
     $freeze = @('-Manifest', $frozen, '-ManifestSha256', $frozenSha)
+    $directory = Join-Path $root 'preflight-missing'
+    $result = Invoke-DryRun -Output $directory -From $from -Extra @('-VerifyPilotFreeze')
+    Test-Refused -Name 'preflight needs all frozen inputs' -Result $result -Directory $directory -Expected 'requires manifest, protocol and schedule files'
+    $directory = Join-Path $root 'preflight-wrong-phase'
+    $result = Invoke-DryRun -Output $directory -From $from -Settings @{ Phase = 'Smoke' } -Extra @('-VerifyPilotFreeze')
+    Test-Refused -Name 'preflight cannot run under Smoke' -Result $result -Directory $directory -Expected 'requires -Phase Pilot and -DryRun'
+
+    $record.artifacts[2].sha256 = (Get-FileHash -LiteralPath (Join-Path $from 'bin/arm-C.exe') -Algorithm SHA256).Hash
+    $record | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $buildRecord -Encoding UTF8
+    $schedulePath = Join-Path $dry 'schedule.csv'
+    $scheduleHash = (Get-FileHash -LiteralPath $schedulePath -Algorithm SHA256).Hash
+    $rehearsalInputs = $protocolArgs + @('-BuildRecord', $buildRecord, '-ExpectedSchedule', $schedulePath)
+    $candidate = Join-Path $root 'preflight-candidate'
+    $candidateResult = Invoke-DryRun -Output $candidate -From $from -Extra $rehearsalInputs
+    Assert-True 'preflight candidate: dry run succeeds' ($candidateResult.ExitCode -eq 0) $candidateResult.Output
+    $candidatePath = Join-Path $candidate 'manifest.json'
+    $candidateHash = (Get-FileHash -LiteralPath $candidatePath -Algorithm SHA256).Hash
+    $candidateManifest = Get-Content -LiteralPath $candidatePath -Raw | ConvertFrom-Json
+    Assert-True 'preflight candidate: manifest binds the schedule file hash' ($candidateManifest.expectedScheduleSha256 -eq $scheduleHash)
+    $preflightArgs = $rehearsalInputs + @('-VerifyPilotFreeze', '-Manifest', $candidatePath, '-ManifestSha256', $candidateHash, '-ExpectedScheduleSha256')
+    $directory = Join-Path $root 'preflight-run'
+    $result = Invoke-DryRun -Output $directory -From $from -Extra ($preflightArgs + $scheduleHash)
+    if ($candidateManifest.gitDirty) {
+        Test-Refused -Name 'preflight with a dirty checkout' -Result $result -Directory $directory -Expected 'requires a clean scenario checkout'
+    }
+    else {
+        $wrongSchedule = Join-Path $root 'preflight-wrong-schedule'
+        $wrongResult = Invoke-DryRun -Output $wrongSchedule -From $from -Extra ($preflightArgs + ('0' * 64))
+        Test-Refused -Name 'preflight with wrong schedule hash' -Result $wrongResult -Directory $wrongSchedule -Expected 'does not match -ExpectedScheduleSha256'
+        if ($candidateManifest.os -notlike '*(build 26200)') {
+            Test-Refused -Name 'preflight on another Windows build' -Result $result -Directory $directory -Expected 'requires Windows build 26200'
+        }
+        elseif ($candidateManifest.webView2 -eq 'unknown') {
+            Test-Refused -Name 'preflight without WebView2 identity' -Result $result -Directory $directory -Expected 'requires a detected WebView2 version'
+        }
+        else {
+            Assert-True 'preflight: all frozen inputs match' ($result.ExitCode -eq 0) $result.Output
+            Test-NothingStarted -Name 'successful preflight' -Directory $directory
+        }
+    }
 
     $noPrebuilt = Join-Path $root 'frozen-without-prebuilt'
     $result = Invoke-Native -File $hostExe -Arguments (@(
@@ -297,16 +337,41 @@ try {
 
     # --- 5. Separate output directories.
     $result = Invoke-DryRun -Output $dry -From $from
-    Assert-True 'directories: a used results directory is refused' ($result.ExitCode -ne 0 -and (Test-Says $result 'already has configuration.json')) $result.Output.Trim()
+    Assert-True 'directories: a used results directory is refused' (
+        $result.ExitCode -ne 0 -and (Test-Says $result 'already has') -and (Test-Says $result 'configuration.json')
+    ) $result.Output.Trim()
     $nested = Join-Path $dry 'nested'
     $result = Invoke-DryRun -Output $nested -From $from
     Test-Refused -Name 'directories: a directory inside another results directory' -Result $result -Directory $nested -Expected 'inside another results directory'
     Assert-True 'directories: the first dry run is unchanged' ((Get-FileHash -LiteralPath (Join-Path $dry 'manifest.json') -Algorithm SHA256).Hash.ToLowerInvariant() -eq $frozenSha)
 
-    # --- 6. The pilot itself still refuses to start.
+    # --- 6. No actual pilot without a separate matching approval.
     $directory = Join-Path $root 'refused-pilot'
     $result = Invoke-DryRun -Output $directory -From $from -NoDryRun -Extra $freeze
     Test-Refused -Name 'pilot without -DryRun, even with a matching manifest' -Result $result -Directory $directory -Expected 'The pilot runs only after'
+    $approvalPath = Join-Path $root 'approval.json'
+    @{
+        kind = 'pilot-launch-approval'; pilotManifestSha256 = $candidateHash
+        smokeScenarioRevision = $candidateManifest.gitHead; nativeSmokeReportSha256 = ('a' * 64)
+    } | ConvertTo-Json | Set-Content -LiteralPath $approvalPath -Encoding UTF8
+    $approvalHash = (Get-FileHash -LiteralPath $approvalPath -Algorithm SHA256).Hash
+    $approvalInputs = @{ Path = $approvalPath; ExpectedSha256 = $approvalHash; ManifestSha256 = $candidateHash; ScenarioRevision = $candidateManifest.gitHead }
+    Assert-True 'approval helper: matching manifest and smoke revision accepted' ((Assert-CatalogPilotApproval @approvalInputs) -eq $approvalHash)
+    foreach ($field in 'ExpectedSha256', 'ManifestSha256', 'ScenarioRevision') {
+        $badApproval = $approvalInputs.Clone()
+        $badApproval[$field] = '0' * $badApproval[$field].Length
+        $rejected = $false
+        try { Assert-CatalogPilotApproval @badApproval | Out-Null } catch { $rejected = $_.Exception.Message -like '*pilot approval*' }
+        Assert-True "approval helper: changed $field refused" $rejected
+    }
+    if (-not $candidateManifest.gitDirty -and $candidateManifest.os -like '*(build 26200)' -and
+        $candidateManifest.webView2 -match '^[0-9]+(\.[0-9]+){3}$') {
+        $directory = Join-Path $root 'refused-pilot-wrong-approval'
+        $launchArgs = @($preflightArgs | Where-Object { $_ -ne '-VerifyPilotFreeze' }) + @(
+            $scheduleHash, '-PilotApprovalFile', $approvalPath, '-PilotApprovalSha256', ('0' * 64))
+        $result = Invoke-DryRun -Output $directory -From $from -Extra $launchArgs -NoDryRun
+        Test-Refused -Name 'real pilot with invalid approval hash' -Result $result -Directory $directory -Expected 'does not match -PilotApprovalSha256'
+    }
 }
 finally {
     if (-not $keep) { Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue }
