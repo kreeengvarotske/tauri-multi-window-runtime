@@ -1,6 +1,6 @@
 # Windows developer preview 0.1.0-preview.1
 
-Draft release notes for the Git tag `v0.1.0-preview.1`. The GitHub Release text states the tag's commit SHA. Check that it equals `git rev-parse v0.1.0-preview.1^{commit}`. This file names only the tag, because adding the SHA here would change the tagged commit. The crates are licensed under MIT or Apache-2.0, at your option. They are distributed through Git only and are not published to crates.io.
+Draft release notes for the Git tag `v0.1.0-preview.1`. The GitHub Release text states the tag's commit SHA. Check that it equals `git rev-parse --verify 'v0.1.0-preview.1^{commit}'`. Keep the quotes: without them, PowerShell passes `{commit}` as a separate argument. This file names only the tag, because adding the SHA here would change the tagged commit. The crates are licensed under MIT or Apache-2.0, at your option. They are distributed through Git only and are not published to crates.io.
 
 This preview adds a Rust runtime for sharing application data and work between windows in one Tauri v2 application. For example, two catalog windows can read bounded pages from one Rust catalog. The application decides which views to expose and which windows may call them.
 
