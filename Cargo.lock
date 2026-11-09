@@ -273,7 +273,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
- "shared-runtime",
+ "shared-runtime 0.1.0 (git+https://github.com/kreeengvarotske/tauri-multi-window-runtime.git?rev=2dac921fcccde1bbadd86da16dbb3136d00341da)",
  "tauri",
  "tauri-build",
 ]
@@ -2484,10 +2484,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtime-core"
+version = "0.1.0"
+source = "git+https://github.com/kreeengvarotske/tauri-multi-window-runtime.git?rev=2dac921fcccde1bbadd86da16dbb3136d00341da#2dac921fcccde1bbadd86da16dbb3136d00341da"
+dependencies = [
+ "tokio",
+]
+
+[[package]]
 name = "runtime-ipc"
 version = "0.1.0"
 dependencies = [
- "runtime-core",
+ "runtime-core 0.1.0",
  "serde",
  "serde_json",
  "tokio",
@@ -2783,7 +2791,16 @@ dependencies = [
 name = "shared-runtime"
 version = "0.1.0"
 dependencies = [
- "runtime-core",
+ "runtime-core 0.1.0",
+ "tokio",
+]
+
+[[package]]
+name = "shared-runtime"
+version = "0.1.0"
+source = "git+https://github.com/kreeengvarotske/tauri-multi-window-runtime.git?rev=2dac921fcccde1bbadd86da16dbb3136d00341da#2dac921fcccde1bbadd86da16dbb3136d00341da"
+dependencies = [
+ "runtime-core 0.1.0 (git+https://github.com/kreeengvarotske/tauri-multi-window-runtime.git?rev=2dac921fcccde1bbadd86da16dbb3136d00341da)",
  "tokio",
 ]
 
@@ -2932,7 +2949,7 @@ dependencies = [
 name = "symmetric-bench"
 version = "0.1.0"
 dependencies = [
- "runtime-core",
+ "runtime-core 0.1.0",
  "serde",
  "serde_json",
  "tauri",

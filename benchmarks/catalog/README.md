@@ -10,11 +10,19 @@ One source, one executable per arm. Only the data source differs:
 | **B** shared, hand-written | `shared` | one `Catalog` with its indexes, managed Tauri state; `catalog_page`, `catalog_aggregate`, `catalog_get` | one page (≤ 100 rows), the 32 totals or ≤ 20 records |
 | **C** framework | `framework` | the same `Catalog` and indexes as the cached output of one `Shared` operation (`catalog.load`, `CachePolicy::Forever`) in `shared-runtime`; pages, totals and records are `View`s that charge a `ResponseBudget` per item; the same three commands with the same request checks | as B |
 
-Arm C uses `shared-runtime` from #35 at `b65177d76fbea799e3afe6504ff255cec7c0da88`. That is the head Group 1 reviewed and accepted for arm C (#35 comment 6446126629). It is merged into this branch by merge commit `29aece3`, on top of `5be3846`. Nothing else in #35 is changed here. The runtime limits are set in `framework::runtime_config`:
+This preparation branch pins arm C to the local Windows Preview candidate `2dac921fcccde1bbadd86da16dbb3136d00341da`. The earlier #35 arm remains part of the historical benchmark evidence. A fresh build needs access to the pinned Git commit. A and B continue to build without the framework feature. The runtime limits are set in `framework::runtime_config`:
 - one execution slot and a queue of 4;
 - `N` concurrent projections;
 - a 10 s deadline and a 2 s shutdown grace;
 - a cache budget of 2 × `D` + 16 MiB.
+
+The runner records the resolved framework SHA for arm C and the SHA-256 of `Cargo.lock` in the manifest. To reuse executables in a real run, provide `-BuildRecord <build-record.json>` with `-ExecutablesFrom` or `-SkipBuild`. The record must contain `kind: "build-only"`, the exact `scenarioRevision`, `frameworkRevision`, `cargoLockSha256`, and one `artifacts` entry with `name` and `sha256` for each reused arm. The runner checks those inputs and hashes the record into the freeze. These checks catch stale or changed artifacts. Retain the original build log as evidence of how the executables were produced.
+
+Use `scripts/Build-CatalogArms.ps1 -OutputDirectory <new build directory>` from a clean checkout to generate the record and `bin/arm-*.exe` without running the workload. Keep the build directory outside the checkout or under an ignored path. `-Offline` uses cached npm and Cargo dependencies.
+
+When replaying a frozen manifest, supply prebuilt executables with either `-ExecutablesFrom` or `-SkipBuild`. The runner checks the source executable hashes and the frozen manifest before creating the output directories or copying binaries.
+
+If the protocol lives in a separate checkout, pass `-ProtocolFile <file> -ProtocolSha256 <hash>`. The runner checks the supplied file before preparing outputs, records its hash in the manifest and preserves a checked copy with the run. A pilot preparation for review should use the intended protocol revision rather than leaving this field empty.
 
 At startup, arm C loads the catalog into the runtime's cache before the windows open, as arms A and B generate it at startup. The runner still refuses `-Phase Pilot` (except a `-DryRun`, which starts no app; see Running) until there is a native smoke of all three arms and the frozen protocol has had its final check (#33 §10).
 
@@ -79,7 +87,8 @@ One run by hand: `catalog-bench.exe --data-mib 16 --windows 2 --report out.json`
 ```powershell
 # Pilot dry run (6 triplets x 4 cells x 3 arms = 72 runs), no app started:
 .\scripts\Run-CatalogTriplets.ps1 -Phase Pilot -DryRun -Triplets 6 -ScheduleSeed 1 -DataSeed 1 `
-  -ExecutablesFrom <smoke results> -MonitorScript <tmwr-pr43>\benchmarks\windows\Measure-ProcessTree.ps1 -OutputDirectory <new dir>
+  -ExecutablesFrom <build directory> -BuildRecord <build directory>\build-record.json `
+  -MonitorScript <tmwr-pr43>\benchmarks\windows\Measure-ProcessTree.ps1 -OutputDirectory <new dir>
 ```
 
 `Test-CatalogPilotDryRun.ps1` (Windows, CI in both PowerShell versions) runs that dry run with stand-in executables and a stub monitor that leaves a marker if started, checks the 72-run schedule and the manifest, freezes it, passes an unchanged invocation in a new directory (byte-identical manifest), and checks the refusals: another schedule seed, data seed, phase length, pause, step interval, triplet count or phase, an arm executable one byte longer, another monitor git head, a manifest edited after the freeze, a wrong, malformed or missing hash or file, a used or nested results directory, and `-Phase Pilot` without `-DryRun`.

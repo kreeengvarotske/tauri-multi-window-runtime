@@ -6,7 +6,7 @@ the process monitor (protocol: docs/benchmark/memory-pilot-protocol.md).
 .DESCRIPTION
 Arms: A = per-window JS copy (no feature), B = hand-written shared Rust
 service (--features shared), C = the same catalog through shared-runtime
-(--features framework; #35 at b65177d, merged in for arm C). -Phase Pilot
+(--features framework; Git revision pinned in Cargo.toml). -Phase Pilot
 still refuses to start (except with -DryRun, which starts no app): the pilot runs only after a native smoke of all
 three arms and the final check of the frozen protocol (#33 §10).
 
@@ -78,6 +78,9 @@ param(
     # Copy bin\arm-*.exe from an earlier results directory instead of building.
     [string]$ExecutablesFrom,
 
+    # Required when reusing executables for a real run. Optional for dry runs.
+    [string]$BuildRecord,
+
     # A schedule.csv written and reviewed before the run (plans\). The
     # runner stops before building if the schedule it would follow differs
     # from this file in any field or order.
@@ -93,7 +96,12 @@ param(
     # The runner refuses to start if the file's hash differs or if anything in
     # the manifest of this invocation differs from it.
     [string]$Manifest,
-    [string]$ManifestSha256
+    [string]$ManifestSha256,
+
+    # A protocol from a separate reviewed checkout and its expected hash.
+    [string]$ProtocolFile,
+    [ValidatePattern('^[0-9a-fA-F]{64}$')]
+    [string]$ProtocolSha256
 )
 
 Set-StrictMode -Version 2.0
@@ -104,7 +112,7 @@ $ErrorActionPreference = 'Stop'
 
 $benchRoot = Split-Path -Parent $PSScriptRoot
 $repoRoot = Split-Path -Parent (Split-Path -Parent $benchRoot)
-$protocolFile = Join-Path $repoRoot 'docs\benchmark\memory-pilot-protocol.md'
+$protocolPath = Join-Path $repoRoot 'docs\benchmark\memory-pilot-protocol.md'
 $sampleIntervalSeconds = 1
 
 if ($Phase -eq 'Pilot' -and -not $DryRun) {
@@ -112,8 +120,45 @@ if ($Phase -eq 'Pilot' -and -not $DryRun) {
 }
 if ($DryRun -and -not ($ExecutablesFrom -or $SkipBuild)) { throw '-DryRun builds nothing: give -ExecutablesFrom or -SkipBuild.' }
 if ([bool]$Manifest -ne [bool]$ManifestSha256) { throw '-Manifest and -ManifestSha256 go together.' }
+if ([bool]$ProtocolFile -ne [bool]$ProtocolSha256) { throw '-ProtocolFile and -ProtocolSha256 go together.' }
+if ($ProtocolFile) {
+    $protocolPath = (Resolve-Path -LiteralPath $ProtocolFile).Path
+}
+$protocolHash = if (Test-Path -LiteralPath $protocolPath -PathType Leaf) {
+    (Get-FileHash -LiteralPath $protocolPath -Algorithm SHA256).Hash
+} else { $null }
+if ($ProtocolSha256 -and $protocolHash -ne $ProtocolSha256) {
+    throw 'The protocol file does not match -ProtocolSha256.'
+}
+if ($ExecutablesFrom -and $SkipBuild) { throw 'Choose either -ExecutablesFrom or -SkipBuild.' }
+if ($Manifest -and -not ($ExecutablesFrom -or $SkipBuild)) { throw 'A frozen manifest requires prebuilt executables. Give -ExecutablesFrom or -SkipBuild.' }
+$OutputDirectory = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputDirectory)
 $directoryProblems = @(Test-CatalogResultsDirectory -Path $OutputDirectory)
 if ($directoryProblems.Count -gt 0) { throw "Use a new -OutputDirectory: $($directoryProblems -join '; ')" }
+$cargoLock = Join-Path $repoRoot 'Cargo.lock'
+$frameworkGitRevision = if ($Arms -contains 'C') {
+    Get-CatalogFrameworkRevision -ManifestPath (Join-Path $benchRoot 'src-tauri\Cargo.toml') -LockPath $cargoLock
+} else { $null }
+$scenarioRevision = ((& git -C $repoRoot rev-parse HEAD) | Out-String).Trim()
+if ($LASTEXITCODE -ne 0) { throw 'Could not resolve the scenario Git revision.' }
+$cargoLockSha256 = (Get-FileHash -LiteralPath $cargoLock -Algorithm SHA256).Hash
+$reusingExecutables = $ExecutablesFrom -or $SkipBuild
+if ($reusingExecutables -and -not $DryRun -and -not $BuildRecord) {
+    throw 'Reused executables require -BuildRecord before any app can start.'
+}
+if ($BuildRecord -and -not $reusingExecutables) {
+    throw '-BuildRecord requires -ExecutablesFrom or -SkipBuild.'
+}
+if ($BuildRecord -and -not $DryRun) {
+    $statusBeforeRun = & git -C $repoRoot status --porcelain
+    if ($LASTEXITCODE -ne 0 -or $statusBeforeRun) {
+        throw 'Reusing executables in a real run requires a clean scenario checkout.'
+    }
+}
+$buildRecordSha256 = if ($BuildRecord) {
+    $binaryRoot = if ($ExecutablesFrom) { $ExecutablesFrom } else { $OutputDirectory }
+    Assert-CatalogBuildRecord -RecordPath $BuildRecord -BinaryDirectory (Join-Path $binaryRoot 'bin') -Arms $Arms -ScenarioRevision $scenarioRevision -FrameworkRevision $frameworkGitRevision -CargoLockSha256 $cargoLockSha256
+} else { $null }
 
 $MonitorScript = (Resolve-Path -LiteralPath $MonitorScript).Path
 # Scenario M verifies the PrivatePageCount unit on a stable WebView2 child,
@@ -123,12 +168,9 @@ if (-not (Get-Command -Name $MonitorScript).Parameters.ContainsKey('UnitCheckReq
     throw "$MonitorScript has no -UnitCheckRequireChildName; scenario M needs the monitor from #43 (167a67d or later)."
 }
 $cellRows = @($Cells | ForEach-Object { ConvertFrom-CellName $_ })
-New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
-$OutputDirectory = (Resolve-Path -LiteralPath $OutputDirectory).Path
 $binDirectory = Join-Path $OutputDirectory 'bin'
 $runsDirectory = Join-Path $OutputDirectory 'runs'
 $profilesDirectory = Join-Path $OutputDirectory 'profiles'
-New-Item -ItemType Directory -Force -Path $binDirectory, $runsDirectory, $profilesDirectory | Out-Null
 
 $schedule = New-CatalogSchedule -Cells $Cells -Arms $Arms -Triplets $Triplets -Seed $ScheduleSeed -DataSeed $DataSeed
 $expectedScheduleSha256 = $null
@@ -172,10 +214,8 @@ $exe = [ordered]@{}
 foreach ($arm in $Arms) { $exe[$arm] = Join-Path $binDirectory "arm-$arm.exe" }
 $features = @{ A = @(); B = @('--features', 'shared'); C = @('--features', 'framework') }
 
-if ($ExecutablesFrom) {
-    foreach ($arm in $Arms) { Copy-Item -LiteralPath (Join-Path $ExecutablesFrom "bin\arm-$arm.exe") -Destination $exe[$arm] -Force }
-}
-elseif (-not $SkipBuild) {
+if (-not $reusingExecutables) {
+    New-Item -ItemType Directory -Force -Path $binDirectory | Out-Null
     Push-Location $benchRoot
     try {
         Invoke-Checked 'npm ci' { npm ci }
@@ -187,18 +227,18 @@ elseif (-not $SkipBuild) {
     }
     finally { Pop-Location }
 }
-foreach ($arm in $Arms) {
-    if (-not (Test-Path -LiteralPath $exe[$arm])) { throw "Missing $($exe[$arm]); run without -SkipBuild." }
-}
-
 $os = Get-CimInstance -ClassName Win32_OperatingSystem
 $cpu = @(Get-CimInstance -ClassName Win32_Processor)[0]
 $gitStatus = (& git -C $repoRoot status --porcelain) | Out-String
 $executables = [ordered]@{}
+$sourceExe = [ordered]@{}
 foreach ($arm in $Arms) {
+    $sourceExe[$arm] = if ($ExecutablesFrom) { Join-Path $ExecutablesFrom "bin\arm-$arm.exe" } else { $exe[$arm] }
+    $file = $sourceExe[$arm]
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Missing executable $file." }
     $executables[$arm] = [ordered]@{
-        sha256 = (Get-FileHash -LiteralPath $exe[$arm] -Algorithm SHA256).Hash
-        bytes  = (Get-Item -LiteralPath $exe[$arm]).Length
+        sha256 = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+        bytes  = (Get-Item -LiteralPath $file).Length
     }
 }
 $configuration = [ordered]@{
@@ -215,8 +255,11 @@ $configuration = [ordered]@{
     npm                   = Get-CommandVersion 'npm' @('--version')
     rustc                 = Get-CommandVersion 'rustc' @('--version')
     cargo                 = Get-CommandVersion 'cargo' @('--version')
-    gitHead               = ((& git -C $repoRoot rev-parse HEAD) | Out-String).Trim()
+    gitHead               = $scenarioRevision
     gitDirty              = -not [string]::IsNullOrWhiteSpace($gitStatus)
+    frameworkGitRevision  = $frameworkGitRevision
+    cargoLockSha256       = $cargoLockSha256
+    buildRecordSha256     = $buildRecordSha256
     gitStatus             = $gitStatus.Trim()
     monitorScript         = $MonitorScript
     monitorSha256         = (Get-FileHash -LiteralPath $MonitorScript -Algorithm SHA256).Hash
@@ -248,7 +291,7 @@ $configuration = [ordered]@{
     manifestScriptSha256  = (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'CatalogManifest.ps1') -Algorithm SHA256).Hash
     dryRun                = [bool]$DryRun
     readmeSha256          = (Get-FileHash -LiteralPath (Join-Path $benchRoot 'README.md') -Algorithm SHA256).Hash
-    protocolSha256        = if (Test-Path -LiteralPath $protocolFile) { (Get-FileHash -LiteralPath $protocolFile -Algorithm SHA256).Hash } else { $null }
+    protocolSha256        = $protocolHash
 }
 # The manifest of this invocation; with -Manifest, nothing is written or run
 # unless it equals the frozen one.
@@ -259,10 +302,29 @@ if ($Manifest) {
     $configuration['frozenManifest'] = (Resolve-Path -LiteralPath $Manifest).Path
     $configuration['frozenManifestSha256'] = $frozenManifestSha256
 }
+New-Item -ItemType Directory -Force -Path $binDirectory, $runsDirectory, $profilesDirectory | Out-Null
+if ($ExecutablesFrom) {
+    foreach ($arm in $Arms) {
+        Copy-Item -LiteralPath $sourceExe[$arm] -Destination $exe[$arm] -ErrorAction Stop
+        if ((Get-FileHash -LiteralPath $exe[$arm] -Algorithm SHA256).Hash -ne $executables[$arm].sha256) {
+            throw "Arm $arm changed while preparing the run."
+        }
+    }
+}
+if ($BuildRecord) {
+    $copiedRecordSha256 = Assert-CatalogBuildRecord -RecordPath $BuildRecord -BinaryDirectory $binDirectory -Arms $Arms -ScenarioRevision $scenarioRevision -FrameworkRevision $frameworkGitRevision -CargoLockSha256 $cargoLockSha256
+    if ($copiedRecordSha256 -ne $buildRecordSha256) { throw 'The build record changed while preparing the run.' }
+}
 $configuration | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'configuration.json') -Encoding UTF8
 $runManifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'manifest.json') -Encoding UTF8
 Copy-Item -LiteralPath (Join-Path $benchRoot 'README.md') -Destination (Join-Path $OutputDirectory 'README.md')
-if (Test-Path -LiteralPath $protocolFile) { Copy-Item -LiteralPath $protocolFile -Destination (Join-Path $OutputDirectory 'protocol.md') }
+if ($protocolHash) {
+    $protocolCopy = Join-Path $OutputDirectory 'protocol.md'
+    Copy-Item -LiteralPath $protocolPath -Destination $protocolCopy -ErrorAction Stop
+    if ((Get-FileHash -LiteralPath $protocolCopy -Algorithm SHA256).Hash -ne $protocolHash) {
+        throw 'The protocol changed while preparing the run.'
+    }
+}
 
 # The full order, written before the first run.
 $schedule | Export-Csv -LiteralPath (Join-Path $OutputDirectory 'schedule.csv') -NoTypeInformation -Encoding UTF8
@@ -318,14 +380,13 @@ foreach ($planned in $schedule) {
         -OnStarted {
             param($appPid)
             $arguments = @($monitorArguments | ForEach-Object { if ($_ -eq '{PID}') { $appPid } else { $_ } })
-            $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -PassThru -NoNewWindow -RedirectStandardOutput $monitorLog -RedirectStandardError "$monitorLog.err"
+            $process = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -PassThru -WindowStyle Hidden -RedirectStandardOutput $monitorLog -RedirectStandardError "$monitorLog.err"
             $null = $process.Handle
             $process
         }.GetNewClosure()
-    $monitor = $run.OnStartedResult
+    $monitorExit = Wait-CatalogMonitorExit -Process $run.OnStartedResult
     $exitCode = $run.ExitCode
     $timedOut = $run.TimedOut
-    if ($null -ne $monitor) { $monitor.WaitForExit() }
     $entry = [ordered]@{
         name              = $name
         seq               = $planned.Seq
@@ -344,7 +405,6 @@ foreach ($planned in $schedule) {
         jobTerminated     = $run.Terminated
         jobError          = $run.Error
         monitorExit       = $monitorExit
-        monitorCpuSeconds = $monitorCpuSeconds
         reportExists      = Test-Path -LiteralPath $report
         webView2Profile   = $webViewProfile
         profileCreated    = Test-Path -LiteralPath $webViewProfile

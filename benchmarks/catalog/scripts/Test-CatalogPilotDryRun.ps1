@@ -24,6 +24,7 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'CatalogSchedule.ps1')
 . (Join-Path $PSScriptRoot 'CatalogManifest.ps1')
+. (Join-Path $PSScriptRoot 'CatalogJobCpu.ps1')
 $failures = New-Object System.Collections.Generic.List[string]
 $runner = Join-Path $PSScriptRoot 'Run-CatalogTriplets.ps1'
 $hostExe = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
@@ -42,6 +43,16 @@ function Invoke-Native {
     try { $text = (& $File @Arguments 2>&1 | Out-String) } finally { $ErrorActionPreference = $saved }
     [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = $text }
 }
+
+$monitorStub = [pscustomobject]@{ ExitCode = 7; Waited = $false }
+$monitorStub | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value { $this.Waited = $true }
+Assert-True 'monitor exit is captured after waiting' ((Wait-CatalogMonitorExit -Process $monitorStub) -eq 7 -and $monitorStub.Waited)
+Assert-True 'missing monitor exit remains null' ($null -eq (Wait-CatalogMonitorExit -Process $null))
+$utcText = '2026-11-08T22:48:18.176Z'
+$utcValue = [DateTime]::SpecifyKind([DateTime]::new(2026, 11, 8, 22, 48, 18, 176), [DateTimeKind]::Utc)
+$typedTime = ConvertTo-CatalogTimestamp $utcValue
+$textTime = ConvertTo-CatalogTimestamp $utcText
+Assert-True 'typed and text timestamps preserve UTC and milliseconds' ($typedTime.UtcTicks -eq $textTime.UtcTicks -and $typedTime.Millisecond -eq 176 -and $typedTime.Offset -eq [TimeSpan]::Zero)
 
 function Invoke-DryRun {
     # The runner in its own process, as on the PC; a refusal is a non-zero exit.
@@ -77,6 +88,7 @@ function Test-Refused {
     param([string]$Name, [object]$Result, [string]$Directory, [string]$Expected)
     Assert-True "${Name}: refused (non-zero exit)" ($Result.ExitCode -ne 0) "exit $($Result.ExitCode)"
     Assert-True "${Name}: says why" (Test-Says $Result $Expected) "expected '$Expected' in: $($Result.Output.Trim())"
+    Assert-True "${Name}: output directory was not created" (-not (Test-Path -LiteralPath $Directory))
     foreach ($file in @('configuration.json', 'schedule.csv', 'manifest.json')) {
         Assert-True "${Name}: no $file written" (-not (Test-Path -LiteralPath (Join-Path $Directory $file)))
     }
@@ -128,6 +140,66 @@ try {
     $configuration = Get-Content -LiteralPath (Join-Path $dry 'configuration.json') -Raw | ConvertFrom-Json
     Assert-True 'dry run: configuration says Pilot, dry run, job CPU' ($configuration.phase -eq 'Pilot' -and $configuration.dryRun -eq $true -and $configuration.cpuSource -eq 'job')
     $manifest = Get-Content -LiteralPath (Join-Path $dry 'manifest.json') -Raw | ConvertFrom-Json
+    $repoRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
+    $cargoLock = Join-Path $repoRoot 'Cargo.lock'
+    Assert-True 'dry run records the preview framework SHA' ($manifest.frameworkGitRevision -eq '2dac921fcccde1bbadd86da16dbb3136d00341da')
+    Assert-True 'dry run freezes the Cargo lockfile hash' ($manifest.cargoLockSha256 -eq (Get-FileHash -LiteralPath $cargoLock -Algorithm SHA256).Hash)
+    $invalidLock = Join-Path $root 'wrong-pin.lock'
+    (Get-Content -LiteralPath $cargoLock -Raw).Replace($manifest.frameworkGitRevision, ('0' * 40)) |
+        Set-Content -LiteralPath $invalidLock -Encoding UTF8
+    $pinRejected = $false
+    try {
+        $null = Get-CatalogFrameworkRevision -ManifestPath (Join-Path $PSScriptRoot '..\src-tauri\Cargo.toml') -LockPath $invalidLock
+    } catch {
+        $pinRejected = $_.Exception.Message -like '*does not match Cargo.lock*'
+    }
+    Assert-True 'a lockfile pinned to a different revision is rejected' $pinRejected
+
+    $buildRecord = Join-Path $root 'build-record.json'
+    $record = [ordered]@{
+        kind = 'build-only'
+        scenarioRevision = $manifest.gitHead
+        frameworkRevision = $manifest.frameworkGitRevision
+        cargoLockSha256 = $manifest.cargoLockSha256
+        artifacts = @(foreach ($arm in 'A', 'B', 'C') {
+            $name = "arm-$arm.exe"
+            @{ name = $name; sha256 = (Get-FileHash -LiteralPath (Join-Path $from "bin\$name") -Algorithm SHA256).Hash }
+        })
+    }
+    $record | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $buildRecord -Encoding UTF8
+    $withRecord = Join-Path $root 'with-build-record'
+    $recordResult = Invoke-DryRun -Output $withRecord -From $from -Extra @('-BuildRecord', $buildRecord)
+    Assert-True 'matching build record is accepted' ($recordResult.ExitCode -eq 0) $recordResult.Output
+    if ($recordResult.ExitCode -eq 0) {
+        $recordManifest = Get-Content -LiteralPath (Join-Path $withRecord 'manifest.json') -Raw | ConvertFrom-Json
+        Assert-True 'the manifest freezes the build record hash' ($recordManifest.buildRecordSha256 -eq (Get-FileHash -LiteralPath $buildRecord -Algorithm SHA256).Hash)
+    }
+    Test-NothingStarted -Name 'with build record' -Directory $withRecord
+    $record.artifacts[2].sha256 = '0' * 64
+    $record | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $buildRecord -Encoding UTF8
+    $wrong = Join-Path $root 'wrong-build-record'
+    $recordResult = Invoke-DryRun -Output $wrong -From $from -Extra @('-BuildRecord', $buildRecord)
+    Test-Refused -Name 'build record with wrong binary hash' -Result $recordResult -Directory $wrong -Expected 'arm-C.exe does not match'
+    $missing = Join-Path $root 'missing-build-record'
+    $recordResult = Invoke-DryRun -Output $missing -From $from -Settings @{ Phase = 'Smoke' } -NoDryRun
+    Test-Refused -Name 'reused binaries without build record' -Result $recordResult -Directory $missing -Expected 'require -BuildRecord'
+
+    $externalProtocol = Join-Path $root 'draft-protocol.md'
+    Set-Content -LiteralPath $externalProtocol -Value '# Synthetic protocol' -Encoding ASCII
+    $protocolHash = (Get-FileHash -LiteralPath $externalProtocol -Algorithm SHA256).Hash
+    $protocolOutput = Join-Path $root 'with-protocol'
+    $protocolArgs = @('-ProtocolFile', $externalProtocol, '-ProtocolSha256', $protocolHash)
+    $protocolResult = Invoke-DryRun -Output $protocolOutput -From $from -Extra $protocolArgs
+    Assert-True 'explicit protocol file is accepted' ($protocolResult.ExitCode -eq 0) $protocolResult.Output
+    if ($protocolResult.ExitCode -eq 0) {
+        $protocolManifest = Get-Content -LiteralPath (Join-Path $protocolOutput 'manifest.json') -Raw | ConvertFrom-Json
+        Assert-True 'manifest records the explicit protocol hash' ($protocolManifest.protocolSha256 -eq $protocolHash)
+        Assert-True 'checked protocol copy matches the supplied file' ((Get-FileHash -LiteralPath (Join-Path $protocolOutput 'protocol.md') -Algorithm SHA256).Hash -eq $protocolHash)
+    }
+    Test-NothingStarted -Name 'with explicit protocol' -Directory $protocolOutput
+    $wrongProtocol = Join-Path $root 'wrong-protocol'
+    $protocolResult = Invoke-DryRun -Output $wrongProtocol -From $from -Extra @('-ProtocolFile', $externalProtocol, '-ProtocolSha256', ('0' * 64))
+    Test-Refused -Name 'wrong protocol hash' -Result $protocolResult -Directory $wrongProtocol -Expected 'does not match -ProtocolSha256'
     Assert-True 'dry run: manifest has 72 runs and the schedule content hash' ($manifest.runs -eq 72 -and $manifest.scheduleContentSha256 -eq (Get-CatalogScheduleSha256 -Schedule $schedule))
     Assert-True 'dry run: manifest has the phase, cells and triplets' ($manifest.phase -eq 'Pilot' -and (@($manifest.cells) -join ',') -eq ($pilotCells -join ',') -and $manifest.triplets -eq 6)
     Assert-True 'dry run: manifest has the monitor SHA and its git head' ($manifest.monitorSha256 -eq (Get-FileHash -LiteralPath $monitor -Algorithm SHA256).Hash -and $manifest.monitorGitHead -match '^[0-9a-f]{40}$')
@@ -142,6 +214,14 @@ try {
     $frozenSha = (Get-FileHash -LiteralPath $frozen -Algorithm SHA256).Hash.ToLowerInvariant()
     Assert-True 'freeze: the dry run printed the manifest SHA-256' (Test-Says $result $frozenSha)
     $freeze = @('-Manifest', $frozen, '-ManifestSha256', $frozenSha)
+
+    $noPrebuilt = Join-Path $root 'frozen-without-prebuilt'
+    $result = Invoke-Native -File $hostExe -Arguments (@(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $runner,
+        '-Phase', 'Smoke', '-MonitorScript', $monitor, '-OutputDirectory', $noPrebuilt
+    ) + $freeze)
+    $result | Add-Member -NotePropertyName Flat -NotePropertyValue ($result.Output -replace '\s', '')
+    Test-Refused -Name 'frozen manifest without prebuilt inputs' -Result $result -Directory $noPrebuilt -Expected 'requires prebuilt executables'
 
     # --- 3. The same invocation against the frozen manifest passes, in a new directory.
     $same = Join-Path $root 'pilot-same'
