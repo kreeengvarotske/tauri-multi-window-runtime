@@ -14,9 +14,12 @@
 #     exit messages. Membership of a monitor-tree process is checked against
 #     these messages (PID and time of creation), never against a PID list read
 #     at some moment, so a process that lives between two reads is not missed.
-#     The messages are complete only if their counts equal the job's own
-#     counters; otherwise membership is not verified and the run's job CPU is
-#     invalid.
+#     The new-process messages must number exactly the job's total count;
+#     otherwise membership is not verified and the run's job CPU is invalid.
+#     The end of the run is confirmed by the job's counters (no active
+#     process at the last row); exit and active-zero messages are kept as
+#     diagnostics, because their delivery to the port is not guaranteed
+#     (CompletionRule below; earlier results keep 'exit-messages').
 #
 # Dot-sourced by Run-CatalogTriplets.ps1 (native part, Windows only),
 # Summarize-CatalogRuns.ps1 and the tests (pure functions, any platform).
@@ -42,7 +45,17 @@ $script:CatalogJob = [ordered]@{
     # After the app exits, how long its other processes may take to exit before
     # the runner ends them by terminating its own job (the run is then invalid).
     ExitGraceSeconds      = 30
+    # How the end of the run is confirmed (protocol §7). 'accounting': by the
+    # job's own counters (no active process at the last row), with every
+    # NEW_PROCESS message present; exit and active-zero messages are
+    # diagnostics, because the completion port does not guarantee their
+    # delivery (#54 6790225378). 'exit-messages': the earlier rule, which also
+    # required one exit message per exited process and an active-zero message.
+    # Results whose configuration has no CompletionRule keep 'exit-messages'.
+    CompletionRule        = 'accounting'
 }
+
+$script:CatalogJobCompletionRules = @('accounting', 'exit-messages')
 
 # Job message ids (winnt.h).
 $script:CatalogJobMessage = @{ ActiveProcessZero = 4; NewProcess = 6; ExitProcess = 7; AbnormalExitProcess = 8 }
@@ -616,13 +629,19 @@ function Get-CatalogJobCpu {
     tree during the run. Returns RunCpuSeconds (job CPU at the end of the
     idle-after phase), StartupCpuSeconds and LoadCpuSeconds (diagnostic),
     membership and completeness counts, and Problems (empty = valid).
+    CompletionRule (or $Limits.CompletionRule; 'exit-messages' when neither
+    gives one) decides how the end of the run is confirmed; see
+    $script:CatalogJob.CompletionRule and protocol §7.
     #>
     param(
         [object[]]$Rows,
         [object[]]$Messages,
         [Parameter(Mandatory = $true)][object]$Phases,
         [string[]]$MonitorKeys = @(),
-        [System.Collections.IDictionary]$Limits = $script:CatalogJob
+        [System.Collections.IDictionary]$Limits = $script:CatalogJob,
+        # Overrides $Limits.CompletionRule; the summarizer passes the rule the
+        # runner recorded in configuration.json (jobLimits).
+        [string]$CompletionRule
     )
     $culture = [System.Globalization.CultureInfo]::InvariantCulture
     $problems = New-Object System.Collections.Generic.List[string]
@@ -631,6 +650,7 @@ function Get-CatalogJobCpu {
         RunCpuSeconds = $null; StartupCpuSeconds = $null; LoadCpuSeconds = $null; EndGapSeconds = $null
         JobProcesses = $null; JobActiveAtEnd = $null; MonitorProcesses = $MonitorKeys.Count; MonitorProcessesInJob = $null
         MonitorProcessesNotInJob = ''; JobProcessesNeverSeenByMonitor = $null; MaxRowIntervalSeconds = $null; MaxClockDriftSeconds = $null
+        CompletionRule = $null; JobExitMessages = $null; JobExitMessagesMissing = $null
         Problems = $problems; Notes = $notes
     }
     $parsed = @(ConvertFrom-CatalogJobRows $Rows)
@@ -680,13 +700,57 @@ function Get-CatalogJobCpu {
     $result.JobActiveAtEnd = $last.Active
     if ($last.Active -ne 0) { $problems.Add("$($last.Active) job process(es) still running at the last job row") }
 
-    # Messages are complete only if their counts equal the job's counters.
+    # Messages. Every process added to the job must have its NEW_PROCESS
+    # message: membership is decided from these messages only, so a lost one
+    # leaves membership unverified under either rule.
+    $rule = if ($PSBoundParameters.ContainsKey('CompletionRule')) { $CompletionRule }
+    elseif ($Limits.Contains('CompletionRule')) { [string]$Limits['CompletionRule'] }
+    else { 'exit-messages' }
+    if ($script:CatalogJobCompletionRules -notcontains $rule) { throw "Unknown job completion rule '$rule'." }
+    $result.CompletionRule = $rule
     $messageList = @($Messages)
     $new = @($messageList | Where-Object { [int]$_.Message -eq $script:CatalogJobMessage.NewProcess })
     $exits = @($messageList | Where-Object { [int]$_.Message -eq $script:CatalogJobMessage.ExitProcess -or [int]$_.Message -eq $script:CatalogJobMessage.AbnormalExitProcess })
     $zero = @($messageList | Where-Object { [int]$_.Message -eq $script:CatalogJobMessage.ActiveProcessZero })
-    $complete = $new.Count -eq $last.Total -and $exits.Count -eq ($last.Total - $last.Active) -and ($last.Active -ne 0 -or $zero.Count -ge 1)
-    if (-not $complete) { $problems.Add("job messages incomplete (new $($new.Count) of $($last.Total), exits $($exits.Count) of $($last.Total - $last.Active), active-zero $($zero.Count)); membership not verified") }
+    $exited = $last.Total - $last.Active
+    $result.JobExitMessages = $exits.Count
+    if ($rule -eq 'exit-messages') {
+        $complete = $new.Count -eq $last.Total -and $exits.Count -eq $exited -and ($last.Active -ne 0 -or $zero.Count -ge 1)
+        if (-not $complete) { $problems.Add("job messages incomplete (new $($new.Count) of $($last.Total), exits $($exits.Count) of $exited, active-zero $($zero.Count)); membership not verified") }
+    }
+    else {
+        if ($new.Count -ne $last.Total) { $problems.Add("job messages incomplete (new $($new.Count) of $($last.Total)); membership not verified") }
+        if ($exits.Count -gt $exited) { $problems.Add("more exit messages ($($exits.Count)) than exited job processes ($exited)") }
+        # Each message, in arrival order, must fit one process lifetime per PID:
+        # an exit only after a NEW_PROCESS for that PID, and a second
+        # NEW_PROCESS for a PID only after its exit. A PID reused without the
+        # exit message in between is ambiguous and is refused.
+        $open = @{}
+        # Arrival order: the order the reader thread took them from the port,
+        # which is the order of the messages file.
+        $sequence = @($messageList | Where-Object { [int]$_.Message -ne $script:CatalogJobMessage.ActiveProcessZero })
+        foreach ($message in $sequence) {
+            $processId = [long]$message.ProcessId
+            if ([int]$message.Message -eq $script:CatalogJobMessage.NewProcess) {
+                if ($open.ContainsKey($processId)) { $problems.Add("PID $processId has a second new-process message without an exit message in between"); break }
+                $open[$processId] = $true
+            }
+            else {
+                if (-not $open.ContainsKey($processId)) { $problems.Add("exit message for PID $processId without a new-process message before it"); break }
+                $open.Remove($processId)
+            }
+        }
+        # Diagnostics only: the job's counters, not these messages, confirm that
+        # every process has exited (ActiveProcesses = 0 at the last row, above).
+        if ($last.Active -eq 0) {
+            $missingExits = @($open.Keys | Sort-Object)
+            if ($exits.Count -lt $exited) {
+                $notes.Add("exit messages not delivered: $($exited - $exits.Count) of $exited (PID $($missingExits -join ', ')); completion from the job counters")
+            }
+            if ($zero.Count -eq 0) { $notes.Add('active-zero message not delivered; completion from the job counters') }
+        }
+    }
+    $result.JobExitMessagesMissing = [Math]::Max(0, $exited - $exits.Count)
 
     # Membership: every monitor-tree identity has a NEW_PROCESS message for its PID close to its creation time.
     $membership = Get-CatalogJobMembership -Messages $messageList -MonitorKeys $MonitorKeys -Limits $Limits
