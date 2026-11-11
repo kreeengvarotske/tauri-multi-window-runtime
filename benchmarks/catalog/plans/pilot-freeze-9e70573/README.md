@@ -4,6 +4,11 @@ The files in this directory are copied byte for byte from the checked
 72-position dry run. This candidate still requires written approval before
 any pilot launch.
 
+Rehearsal on 2026-11-11 was refused before output creation: WebView2 changed
+from the frozen 157.0.4341.42 to 157.0.4341.46. Keep this candidate as
+evidence of the checked environment. A launch on the newer environment
+requires a new native smoke and freeze.
+
 | Input | Frozen revision or SHA-256 |
 |---|---|
 | Runner | 9e705738acf0c9e0e6cef2d3d929fcc9c7d6e1a1 |
