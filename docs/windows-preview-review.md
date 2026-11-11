@@ -2,7 +2,17 @@
 
 The preview lets windows in one Tauri v2 application read bounded views of shared Rust data. The demo uses one catalog and exposes pages through typed commands with per-window Tauri capabilities.
 
-This review branch evaluates the selective integration on `main` at `4bf7da3`. It preserves the existing `runtime-ipc` source and adds the preview libraries, demo and adapter CI without importing Runtime Lab. The stacked PRs below record the source history and remain available as an alternative integration path.
+The selective preview integration landed on `main` through [#48](https://github.com/kreeengvarotske/tauri-multi-window-runtime/pull/48) and [#49](https://github.com/kreeengvarotske/tauri-multi-window-runtime/pull/49). The resulting commit is `089effeaa47099459d7f86954f526a6bb135f7d5`. The earlier stacked PRs below record the implementation history.
+
+Version `0.1.0-preview.1` and license `MIT OR Apache-2.0` are selected.
+The repository is private, so the Git preview requires repository read access.
+The release tag and GitHub Release are pending.
+
+## Current release evidence
+
+- Hosted Windows and Ubuntu checks passed for the integrated #49 head `f5c5301`. The merge commit `089effe` has the same source tree. A separate hosted run for that merge SHA was not listed at the last check.
+- A clean external consumer built in Release mode from Git revision `089effe` on Windows build 26200 with Rust 1.99.1 and Tauri 2.12.5. The self-test verified one catalog execution, one cache entry, refusal after shutdown and empty caches. [Recorded evidence](https://github.com/kreeengvarotske/tauri-multi-window-runtime/pull/49#issuecomment-6751799764).
+- The tag-aware consumer script at `0db99ac` passed missing-tag and mismatched-tag refusals in PowerShell 5.1 and 7. An isolated local annotated test tag resolved all three runtime packages to the same commit and passed the native Release self-test. This validates the tag installation path before testing the final remote release tag.
 
 ## Verification
 
@@ -24,15 +34,17 @@ The cache expiry optimization in `be2ad3b` was checked with an isolated Windows 
 
 ## Before publishing
 
-- [ ] Review and integrate the runtime and adapter stack, including the [IPC error fix](https://github.com/kreeengvarotske/tauri-multi-window-runtime/pull/42).
-- [ ] Agree on a repository license and apply it to the distributed crates. Proposed: MIT OR Apache-2.0, with `LICENSE-MIT`, `LICENSE-APACHE` and `license` metadata in every workspace crate. The repository owner decides.
-- [ ] Choose the preview version and source revision. Proposed: crate version `0.1.0-preview.1`, Git tag `v0.1.0-preview.1` on the commit on `main` that CI tested. `publish = false` until a crates.io release is decided. Verify that an account with the intended access can fetch the tag and that all examples pin it.
+- [x] Integrate the runtime and adapter stack, including the IPC error fix, through #48.
+- [x] Apply `MIT OR Apache-2.0`, license files and crate metadata through #49.
+- [x] Select version `0.1.0-preview.1` and Git tag `v0.1.0-preview.1`, with `publish = false`.
+- [ ] Select the final source revision after release-check changes, verify CI at that revision, and check that the remote tag resolves to it.
+- [ ] Verify that an account with the intended access can install through the tag.
 - [ ] Repeat the standalone Release build and native self-test on the selected release revision. Record the tested Windows and Rust versions. Document an MSRV only after validating it.
 - [ ] Review installation instructions, the scope of the preview, and the [draft release notes](windows-preview-release-notes.md). The preview covers sharing within a single app. The cross-app broker is a separate experiment.
 
-## Integration and release verification
+## Earlier integration review
 
-The preview branch is based on the reviewed adapter security revision. Integrate the prerequisite stack in dependency order, checking the base and required CI for each PR after its parent lands.
+The following table records the earlier stacked integration proposal. The selected integration is #48.
 
 | Order | PR | Reviewed head |
 | --- | --- | --- |
@@ -42,7 +54,7 @@ The preview branch is based on the reviewed adapter security revision. Integrate
 | 4 | [Operation error sanitization #39](https://github.com/kreeengvarotske/tauri-multi-window-runtime/pull/39) | `d4314b4` |
 | 5 | [Fixed adapter error envelopes #42](https://github.com/kreeengvarotske/tauri-multi-window-runtime/pull/42) | `eabf336` |
 
-Check #34's base against the intended integration branch before starting. After #42 lands, review the preview branch delta against the integrated stack and apply it without replaying the prerequisite PRs. Verify the final revision in a clean checkout with formatting, Clippy, Release tests and the native demo self-test. Repeat the external consumer check with the same final revision for the tracked demo and the Git dependencies. Retain `revisions.json`, `Cargo.lock` and `self-test.json` with the release evidence.
+For the final release revision, retain `revisions.json`, `Cargo.lock` and `self-test.json` from the external consumer check alongside the CI evidence.
 
 On November 8, 2026, all five PRs were open and their recorded head SHAs matched the table. GitHub Actions reported success on those heads. PRs #34, #35, #37 and #39 were drafts. PR #34 targeted `claude/project-thread-qzzw0x` at `772155d`, which was 21 commits ahead of `main` at `4bf7da3`. Review the Runtime Lab and core changes in that base before choosing which history to integrate. The local candidate `74ab576` already contains #42's head and the preceding stack in its history.
 
@@ -58,7 +70,7 @@ The scenario description in #36 identifies #35 as the framework source for arm C
 
 ## crates.io readiness
 
-The Git preview can use workspace paths. For a registry release, the dependency order is `runtime-core`, `shared-runtime`, then `shared-runtime-tauri`. The local dependency declarations now include matching `0.1.0` version requirements. Running `cargo package --offline --allow-dirty --no-verify -p runtime-core -p shared-runtime -p shared-runtime-tauri` produced all three archives.
+The Git preview uses workspace paths internally and exact `0.1.0-preview.1` requirements between runtime crates. A registry release requires a separate decision. The earlier packaging checks below used version `0.1.0`. For a registry release, the dependency order is `runtime-core`, `shared-runtime`, then `shared-runtime-tauri`. Running `cargo package --offline --allow-dirty --no-verify -p runtime-core -p shared-runtime -p shared-runtime-tauri` produced all three archives in that earlier check.
 
 Cargo 1.99.1's built-in package verification compiled the unpacked `runtime-core` archive, then stopped at `shared-runtime` because its temporary registry reported no hash for `runtime-core v0.1.0`. The same failure reproduced with a fresh target directory.
 
