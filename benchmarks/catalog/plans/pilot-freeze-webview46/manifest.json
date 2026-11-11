@@ -1,0 +1,70 @@
+{
+  "manifestVersion": 1,
+  "phase": "Pilot",
+  "machine": "HONORLAPTOP",
+  "os": "Майкрософт Windows 11 Домашняя 10.0.26200 (build 26200)",
+  "webView2": "157.0.4341.46",
+  "gitHead": "9e705738acf0c9e0e6cef2d3d929fcc9c7d6e1a1",
+  "gitDirty": false,
+  "monitorGitHead": "c5a4f16b54fb4c14dc79c21a2d52d227fc0dfff9",
+  "monitorSha256": "F5DD48C8249D943728D010B81B88B1750290CF0D78245B2453A25770B6CC11B4",
+  "monitorUnitCheckRequireChildName": "msedgewebview2.exe",
+  "frameworkGitRevision": "2dac921fcccde1bbadd86da16dbb3136d00341da",
+  "cargoLockSha256": "45B16B045635048ECD4B87AE797CC49764128B5CF787A20109AFE67E88603638",
+  "buildRecordSha256": "0C9526621B7AF6269252B6B0B4C13984BEA734B39481FBDDEA5202B28C89E004",
+  "cpuSource": "job",
+  "jobLimits": {
+    "SampleIntervalMs": 250,
+    "MaxBoundaryGapSeconds": 0.5,
+    "MaxRowIntervalSeconds": 1.0,
+    "MaxClockDriftSeconds": 0.1,
+    "MembershipSlackSeconds": 0.1,
+    "MembershipWindowSeconds": 5.0,
+    "ExitGraceSeconds": 30
+  },
+  "jobScriptSha256": "B95C9F1820428F36FA400306F4BFC42FD3306DC1934D5D152082952984C436D5",
+  "executables": {
+    "A": {
+      "sha256": "450EB5D15BEFBEBCA6AE7113A827381BF74E50A249AAF47520954342E5810E0A",
+      "bytes": 4388352
+    },
+    "B": {
+      "sha256": "8A31326E0845934EF41E693103EDCE79FBA99CE441DE7CC440B03873C14FA0E4",
+      "bytes": 4414976
+    },
+    "C": {
+      "sha256": "1FAE9C6C3B880032753FBC3736303E06A19236851FFB80C71B2374141628A1FA",
+      "bytes": 4534784
+    }
+  },
+  "sampleIntervalSeconds": 1,
+  "cells": [
+    "N2D0",
+    "N2D16",
+    "N2D64",
+    "N4D64"
+  ],
+  "arms": [
+    "A",
+    "B",
+    "C"
+  ],
+  "triplets": 6,
+  "scheduleSeed": 1,
+  "dataSeed": 1,
+  "idleBeforeSeconds": 20,
+  "warmupSeconds": 30,
+  "loadSeconds": 120,
+  "idleAfterSeconds": 30,
+  "pauseSeconds": 30,
+  "stepIntervalMs": 500,
+  "runScriptSha256": "EA5B736D09023FFAF71D5395C909A45B60C0CB2FA879741579093BF16ABD119E",
+  "scheduleScriptSha256": "7451F266FCBE14098D7C98D22ED646AD648D63C2B74AA9AA9408660279273FFC",
+  "summarizeScriptSha256": "98FB9621AF7D91BD595E334C8194EC04BBD566D1B0AF837B30FC0CED3702E6CE",
+  "manifestScriptSha256": "0D944EF0F2E031C2EA6216976030818790245287B1833E00E9CACD21D69B32E3",
+  "readmeSha256": "096BC432A440555A1A84000074594C5AE00CAEE02723F71FCADDCA8F569CAB9C",
+  "protocolSha256": "AC91077738A1B046CA5A5A67FC2C2D67A72BDDF91AA00EFE1B9DF31517C1B686",
+  "runs": 72,
+  "expectedScheduleSha256": "9DC8FB97AC8BCE7E3AA8146291A97CEC81AFC8BFD63744B21E1732E24A5608D1",
+  "scheduleContentSha256": "6e866007b237e883eb2b3c94d5d08729d02178f37d684c67ac7e9c721212876e"
+}
