@@ -54,4 +54,14 @@ To reproduce the external consumer check from the repository root, run the scrip
 
 For release verification, check out the release tag, pass its full commit SHA as `-Revision` and add `-RequireMatchingRevision`. The script checks the Git sources of all three runtime packages in the lockfile and requires the native catalog and shutdown evidence in this mode.
 
+Pass `-Tag v0.1.0-preview.1` as well to test the installation form shown
+above. The script resolves the remote tag to its commit, including annotated
+tags, and refuses a mismatch with `-Revision` before creating a consumer.
+It then verifies that Cargo resolved all three runtime crates through that
+tag to the expected commit.
+
+```powershell
+& ./examples/runtime-adapter-demo/Test-GitConsumer.ps1 -Revision (git rev-parse HEAD) -Tag v0.1.0-preview.1 -RequireMatchingRevision
+```
+
 The self-test checks integration behavior, including IPC and window lifecycle. Use a workload benchmark to measure memory savings. Sharing resources across separate applications is outside this example's scope.

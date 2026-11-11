@@ -4,6 +4,10 @@ param(
     [ValidatePattern('\A[0-9a-fA-F]{40}\z')]
     [string]$Revision,
 
+    # Resolve the public installation form and compare it to the expected SHA.
+    [ValidatePattern('\A[A-Za-z0-9][A-Za-z0-9._/-]*\z')]
+    [string]$Tag,
+
     [string]$OutputParent = [IO.Path]::GetTempPath(),
 
     [switch]$Offline,
@@ -20,6 +24,20 @@ if ($RequireMatchingRevision -and $demoRevision -ne $Revision) {
     throw "Release verification requires matching demo and dependency revisions. Demo: $demoRevision. Dependencies: $Revision."
 }
 $Revision = $Revision.ToLowerInvariant()
+if ($Tag) {
+    & git check-ref-format "refs/tags/$Tag"
+    if ($LASTEXITCODE -ne 0) { throw "Invalid tag '$Tag'." }
+    $remoteRefs = @(& git ls-remote --exit-code $source "refs/tags/$Tag" "refs/tags/$Tag^{}")
+    if ($LASTEXITCODE -ne 0) { throw "Could not resolve remote tag '$Tag'." }
+    $refs = @{}
+    foreach ($line in $remoteRefs) {
+        $parts = $line -split '\s+', 2
+        if ($parts.Count -eq 2) { $refs[$parts[1]] = $parts[0].ToLowerInvariant() }
+    }
+    $resolvedTag = $refs["refs/tags/$Tag^{}"]
+    if (-not $resolvedTag) { $resolvedTag = $refs["refs/tags/$Tag"] }
+    if ($resolvedTag -ne $Revision) { throw "Tag '$Tag' resolves to '$resolvedTag', expected '$Revision'." }
+}
 $output = Join-Path $OutputParent ('tmwr-' + [guid]::NewGuid().ToString('N').Substring(0, 12))
 $null = New-Item -ItemType Directory -Path $output
 $output = (Resolve-Path -LiteralPath $output).Path
@@ -38,7 +56,9 @@ foreach ($crate in @('shared-runtime', 'shared-runtime-tauri')) {
     if ([regex]::Matches($content, $pattern).Count -ne 1) {
         throw "Expected one workspace path dependency for $crate."
     }
-    $content = $content -replace $pattern, ('{0} = {{ git = "{1}", rev = "{2}" }}' -f $crate, $source, $Revision)
+    $selector = if ($Tag) { 'tag' } else { 'rev' }
+    $reference = if ($Tag) { $Tag } else { $Revision }
+    $content = $content -replace $pattern, ('{0} = {{ git = "{1}", {2} = "{3}" }}' -f $crate, $source, $selector, $reference)
 }
 [IO.File]::WriteAllText($manifest, "[workspace]`n`n$content", [Text.UTF8Encoding]::new($false))
 
@@ -49,6 +69,7 @@ $evidence = [ordered]@{
     demoRevision = $demoRevision
     dependencyRevision = $Revision
     dependencyRepository = $source
+    dependencyTag = $Tag
     offline = [bool]$Offline
 }
 $evidence | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $output 'revisions.json') -Encoding UTF8
@@ -57,7 +78,9 @@ try {
     & cargo generate-lockfile @networkArgs
     if ($LASTEXITCODE -ne 0) { throw 'Could not resolve consumer dependencies.' }
     $lock = Get-Content -LiteralPath 'Cargo.lock' -Raw
-    $expectedSource = 'git+{0}?rev={1}#{1}' -f $source, $Revision
+    $expectedSource = if ($Tag) {
+        'git+{0}?tag={1}#{2}' -f $source, [Uri]::EscapeDataString($Tag), $Revision
+    } else { 'git+{0}?rev={1}#{1}' -f $source, $Revision }
     foreach ($crate in @('runtime-core', 'shared-runtime', 'shared-runtime-tauri')) {
         $packagePattern = '(?m)^\[\[package\]\]\r?\nname = "' + [regex]::Escape($crate) + '"\r?\n(?<fields>(?:(?!^\[\[package\]\])[\s\S])*)'
         $package = [regex]::Matches($lock, $packagePattern)
