@@ -47,7 +47,10 @@ This is option O2 from the October ADR (#27, `02-architecture-adr.md`): a per-us
 1. **The broker hosts a `shared-runtime` `Runtime`, not a bare `CachedService`.** Budgets, deadlines, overload, shutdown and views then work as they do in-process, and they are already tested there.
 2. **Views run in the broker.** A client gets a bounded page or aggregate, not the whole output. This is what makes sharing pay: in the break-even model of `docs/cross-app/05-memory-methodology.md` (#27), the retained copy `T` per client must be much smaller than the dataset `D`. If a client copied the whole output, the saving per extra client would shrink to transient working memory only.
 
-The WebView never talks to the broker. It calls the application's own commands, as it does now. The broker never sees a window label or a value from JavaScript.
+The WebView calls the application's own commands. Rust validates request
+values before sending them to the broker. Those values may originate in
+JavaScript; they remain untrusted at the broker. Window identity stays in
+the local adapter and never serves as broker authentication evidence.
 
 ## 3. Contract for immutable resources
 
@@ -85,7 +88,7 @@ absent ─call─▶ building ─ok─▶ ready ─invalidate / TTL / evict─�
 | Owner-only DACL | The pipe's DACL allows only the current user (#29 replaced the default DACL, which also lets Everyone read). | #29 |
 | Remote clients refused | `PIPE_REJECT_REMOTE_CLIENTS`. | spike |
 | Peer user and session checked by the broker | Broker: the token SID of the client process equals its own, and `ProcessIdToSessionId(client)` equals its own session. | SID: #29. Session: **new**. |
-| Server checked by the client | The client compares the SID and executable path of `GetNamedPipeServerProcessId` with the expected broker, so a squatter running as the same user is detected. | **new** (threat T-3 in #27) |
+| Server checked by the client | The client checks the server's SID, session and executable path against the registered broker installation. It holds the server process handle while validating the peer. This detects an endpoint served by an unexpected executable; the same-user residual risk in §4.2 still applies. | **new** (threat T-3 in #27) |
 | Single instance | `FILE_FLAG_FIRST_PIPE_INSTANCE`. A second broker on the same endpoint fails loudly and exits. | spike |
 
 ### 4.2 Between applications (correctness boundary)
@@ -152,12 +155,20 @@ The broker's own memory is the cost side of the saving. It is reported, never hi
 | Broker crashes (including a panic, since `panic = "abort"` stays) | Every call in flight fails on the client with `brokerUnavailable`. The client then either retries once on a new instance (only for operations marked idempotent, which I-3 requires anyway) or runs the call in-process. Either way the WebView gets an answer, never a hang. |
 | Broker restarts | It starts empty. No state survives (I-8). A new `instanceId` is visible to clients. |
 | Broker crash loop | Circuit breaker in the client: after `k` failures within window `w`, the application stays in-process until it restarts. `k` and `w` are configuration. **New.** |
-| Starting the broker | The client starts it from a fixed install path next to its own executable, never from `PATH` or the working directory, and only if the executable at that path is the registered one. Exponential backoff on connect. Not in the spike yet (tests start the broker). |
+| Starting the broker | All participating apps use the same registered absolute broker path. It is resolved from trusted installation configuration, never from `PATH` or the working directory. Placing separate broker copies next to each app would conflict with the shared endpoint and server-path check. Exponential backoff on connect. Not in the spike yet (tests start the broker). |
 | A client crashes | Same as a disconnect (§7). |
 | An operation panics inside the broker | The broker aborts, and recovery proceeds as for a crash. This matches Group 1's v1 decision for the in-process runtime (#32 review 6424556662): panic profile unchanged, no `catch_unwind`, no isolation promise. A separate broker profile is Q6. |
 | Version skew after an update | Range negotiation in `hello`/`welcome`. With no common version, the client falls back to in-process and logs it. |
 
 **In-process fallback is a requirement, not an option.** Every remote operation is an ordinary `Operation` that the application also registers locally. It is the same code with the same results. That makes fallback correct, and the plain arm of the measurement is the same binary with the broker switched off.
+
+The original caller deadline covers connection, backoff, handshake, remote
+work, fallback, decoding and serialization. Each retry receives only the
+remaining budget. Cancellation, an elapsed deadline or local shutdown
+ends the request without starting fallback work. Application errors from
+an admitted operation are returned under the existing error contract;
+they do not trigger a transport retry. Tests must cover a broker failure
+just before the deadline and cancellation during reconnect.
 
 ## 9. Threats and their checks
 
@@ -185,16 +196,25 @@ Each row names the concrete check. **auto** means an automated test with real se
 | T-17 | Crash loop | A broker that aborts on start `k` times trips the circuit breaker, and the app stays in-process | auto | new |
 | T-18 | Version confusion | Old client against a new broker and the reverse: explicit `versionMismatch` or `unknownOperation`, then fallback | auto | exists (mismatch); fallback **new** |
 | T-19 | Malformed input to the frame decoder or params | Fuzz the frame decoder and every params type with cargo-fuzz, outside CI | fuzz | new |
+| T-20 | Reconnect or fallback starts a fresh deadline | Fail the broker just before the original deadline; the request expires without a new full timeout. Cancel during reconnect and verify that no local fallback operation starts. | auto | new |
+| T-21 | Two installed apps disagree about the broker location | Apps in different directories resolve one registered broker path, connect to the same instance and pass server identity checks. A peer in another session is rejected. | auto, native | new |
 
 ## 10. Connecting an existing Tauri application
 
 This is the path for an application already built on the preview (`shared-runtime` + `shared-runtime-tauri`), with the API changes from §11 in place. The application's commands, capabilities and frontend do not change.
 
-1. **Mark operations as cross-app capable.** Implement `CrossAppOperation` (A-1) for each shared operation: `VERSION`, `DATA_CLASS` (`Public` or `App`), serde for params and output. `PerWindow` operations stay local.
+1. **Mark operations as cross-app capable.** Implement `CrossAppOperation` (A-1) for each shared operation: `VERSION`, `DATA_CLASS` (`Public` or `App`), serde for params. Register the named views with serde request and response types. The full operation output stays in the broker. `PerWindow` operations stay local.
 2. **Build the runtime with a remote backend.** `RuntimeBuilder::remote(RemoteConfig { endpoint, app_id, fallback: Fallback::InProcess, breaker })` (A-2). Every operation is still registered locally, which is the fallback.
 3. **Register the application.** Add the `appId`, the executable path and the grants to the manifest at install time (Q2). An unregistered application gets `notRegistered` and runs in-process.
-4. **Ship the broker.** The broker binary is built from the same operation crates as the application (the registry is code, not configuration) and installed next to it. Several applications from one vendor share one broker build. Applications from different vendors would need a shared operation crate and a common broker version, which this design does not solve (Q10).
-5. **Commands stay as they are.** `SharedRuntime::view` and `SharedRuntime::call` route through the runtime. Whether a call ran locally or in the broker is invisible to the command and to the WebView, apart from timing and the diagnostic counters.
+4. **Ship the broker.** The broker binary is built from the shared operation crates (the registry is code). Participating applications register one common installation path and broker build. Applications from different vendors would need a shared operation crate and a common broker version, which this design does not solve (Q10).
+5. **Existing commands keep their typed contracts.** Remote execution applies to registered views. The broker retains the full operation output; clients receive only the bounded view response. Existing `SharedRuntime::call` commands stay local: their `respond` closure is arbitrary application code over `&O::Output` and cannot be sent to the broker. An application that wants that work shared implements a named view and opts that command into it.
+
+The client decodes a remote reply into the existing `V::Response` and
+uses the adapter's bounded serialization path. Keep the client projection
+slot through decoding and serialization. This preserves the current
+`ViewHandle::get_with` callback contract and bounds concurrent response
+copies. Forwarding serialized bytes directly would require a separate
+adapter API and review.
 
 What an application gets with no changes at all: nothing. Cross-app sharing is opt-in per operation, so the preview's behaviour is the default.
 
@@ -204,11 +224,11 @@ Each item needs its own agreement before code. "Additive" means existing code co
 
 | # | Change | Crate | Kind | Note |
 |---|---|---|---|---|
-| A-1 | `trait CrossAppOperation: Operation` with `const VERSION: u16`, `const DATA_CLASS: DataClass`, `Params: Serialize + DeserializeOwned`, `Output: Serialize + DeserializeOwned` | `shared-runtime` (behind a feature) or a new `shared-runtime-remote` | additive | A new crate keeps serde out of the core path. Recommended: new crate. |
+| A-1 | `trait CrossAppOperation: Operation` with `const VERSION: u16`, `const DATA_CLASS: DataClass`, `Params: Serialize + DeserializeOwned` | `shared-runtime` (behind a feature) or a new `shared-runtime-remote` | additive | The full `Output` stays in the broker and requires no wire serialization. A new crate keeps serde out of the core path. Recommended: new crate. |
 | A-2 | Remote backend on `RuntimeBuilder`: endpoint, `appId`, fallback policy, circuit breaker | new crate + a small hook in `shared-runtime` | additive | The hook is the only change inside `shared-runtime`. It must not change in-process behaviour (all existing tests unchanged). |
-| A-3 | `CrossAppView: View<O>` with `const VERSION: u16` and serde `Request`/`Response`; views run in the broker | same | additive | The point of §2. The broker returns the response already serialized, and the adapter forwards those bytes to the WebView without decoding them, after its size check. |
+| A-3 | `CrossAppView: View<O>` with `const VERSION: u16` and serde `Request`/`Response`; views run in the broker | same | additive | The broker sends a bounded serialized response. The client reconstructs `V::Response` under its projection limit and the adapter applies its existing bounded JSON encoding. Direct byte forwarding needs a separate API decision. |
 | A-4 | Broker failure surfaced to callers | `shared-runtime` | **breaking if a variant is added**: `CallError` is not `#[non_exhaustive]` | Option a (recommended for v1): no new variant. Fallback is mandatory, so callers never see the broker. Option b: add `#[non_exhaustive]` now, before a wider release, and add `Unavailable` later. |
-| A-5 | `PerWindow` + remote is a registration error | `shared-runtime` | additive (new `RegistryError` variant) | `RegistryError` is also not `#[non_exhaustive]`, so the same question applies. Alternative: make it a compile-time bound, since `CrossAppOperation` can require a `Shared` scope. |
+| A-5 | `PerWindow` + remote is a registration error | `shared-runtime` | breaking if a public `RegistryError` variant is added | The enum is not `#[non_exhaustive]`. Prototype validation should return a new remote configuration error type. A shared-scope type bound is another design option, but the existing scope is a runtime method and the bound needs a concrete API. |
 | A-6 | Per-scope quota inside an operation budget (a key-group sublimit in `CacheBudget`) | `runtime-core`, `shared-runtime` | additive | Needed for T-11. It also helps in-process (a per-window quota for `PerWindow`). |
 | A-7 | Remote counters in `OperationStats` (`remote_calls`, `fallbacks`, `broker_instance_changes`) | `shared-runtime` | additive to a public struct with public fields: breaking for code that builds the struct literally | The stats DTO is already a "separate step" in the #32 review. Keep it there. |
 | A-8 | IPC, adapter error codes, TS SDK, capabilities | `shared-runtime-tauri`, SDK | **no change** | The WebView sees the same commands, envelopes and codes. With option A-4a, no `SERVICE_UNAVAILABLE` code is needed. |
@@ -221,7 +241,7 @@ Scope, as one Draft PR on the spike branch (#29), still under `experiments/`:
 2. Identity per §5 on Windows: process handle held, creation-time check, session id in the pipe name and checked on both sides, and the client's server check.
 3. Per-app quota (A-6) inside the experiment, not in `runtime-core` yet.
 4. Fallback and circuit breaker in the client.
-5. Tests T-2a, T-3, T-9 (cross-process invalidate), T-11, T-12 (connections), T-13, T-16, T-17, T-18 fallback, plus all existing spike tests.
+5. Tests T-2a, T-3, T-9 (cross-process invalidate), T-11, T-12 (connections), T-13, T-16, T-17, T-18 fallback, T-20, T-21, plus all existing spike tests.
 6. A headless client with `--mode plain|shared` (the measurement build, G-X2 in `docs/cross-app/05-memory-methodology.md`, #27).
 
 **Out of scope for the prototype:** any change to `crates/`, a Tauri integration (A-2/A-3 against the real adapter), spawn-on-demand from an installer path, a manifest installer, macOS and Linux identity beyond what the spike has, and any measurement.
