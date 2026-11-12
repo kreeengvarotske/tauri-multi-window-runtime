@@ -728,7 +728,10 @@ function Get-CatalogJobCpu {
         $open = @{}
         # Arrival order: the order the reader thread took them from the port,
         # which is the order of the messages file.
-        $sequence = @($messageList | Where-Object { [int]$_.Message -ne $script:CatalogJobMessage.ActiveProcessZero })
+        # Only NEW_PROCESS and the two exit messages change a lifetime; other
+        # notifications (limits, active-zero) carry no lifetime event.
+        $lifetime = @($script:CatalogJobMessage.NewProcess, $script:CatalogJobMessage.ExitProcess, $script:CatalogJobMessage.AbnormalExitProcess)
+        $sequence = @($messageList | Where-Object { $lifetime -contains [int]$_.Message })
         foreach ($message in $sequence) {
             $processId = [long]$message.ProcessId
             if ([int]$message.Message -eq $script:CatalogJobMessage.NewProcess) {

@@ -860,6 +860,11 @@ $job = Get-CatalogJobCpu -Rows $f.Rows -Messages (@($head) + $reuse + @($tail)) 
 Assert-True 'job rule: a PID reused after its exit message is valid' ($job.Problems.Count -eq 0) (@($job.Problems) -join '; ')
 $job = Get-CatalogJobCpu -Rows $f.Rows -Messages (@($head) + @($reuse[1]) + @($tail)) -Phases $f.Phases -MonitorKeys $f.Keys -CompletionRule accounting
 Assert-True 'job rule: a PID reused without the exit message in between is refused' ((@($job.Problems) -join ';') -like '*PID 5006 has a second new-process message without an exit message in between*') (@($job.Problems) -join '; ')
+$limitNote = [pscustomobject][ordered]@{ Utc = ''; UtcTicks = $jobT0.AddSeconds(2.5).UtcTicks; Message = 9; ProcessId = 5006 }
+$job = Get-CatalogJobCpu -Rows $f.Rows -Messages (@($head) + $limitNote + @($reuse[1]) + @($tail)) -Phases $f.Phases -MonitorKeys $f.Keys -CompletionRule accounting
+Assert-True 'job rule: a non-lifetime notification does not hide a PID reused without its exit' ((@($job.Problems) -join ';') -like '*PID 5006 has a second new-process message without an exit message in between*') (@($job.Problems) -join '; ')
+$job = Get-CatalogJobCpu -Rows $f.Rows -Messages (@($head) + $limitNote + $reuse + @($tail)) -Phases $f.Phases -MonitorKeys $f.Keys -CompletionRule accounting
+Assert-True 'job rule: a non-lifetime notification does not break a correct lifetime' ($job.Problems.Count -eq 0) (@($job.Problems) -join '; ')
 $f = New-JobFixture8 $jobT0 -LostExitOrder 7
 $extra = [pscustomobject][ordered]@{ Utc = ''; UtcTicks = $jobT0.AddSeconds(36.9).UtcTicks; Message = 8; ProcessId = 6100 }
 $job = Get-CatalogJobCpu -Rows $f.Rows -Messages (@($f.Messages | Select-Object -First 15) + $extra + @($f.Messages | Select-Object -Skip 15)) -Phases $f.Phases -MonitorKeys $f.Keys -CompletionRule accounting
