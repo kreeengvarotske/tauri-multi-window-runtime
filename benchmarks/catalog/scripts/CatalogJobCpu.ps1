@@ -728,7 +728,13 @@ function Get-CatalogJobCpu {
         $open = @{}
         # Arrival order: the order the reader thread took them from the port,
         # which is the order of the messages file.
-        $sequence = @($messageList | Where-Object { [int]$_.Message -ne $script:CatalogJobMessage.ActiveProcessZero })
+        # Limit notifications may also carry a PID. Only lifetime events
+        # can open or close that PID's lifetime.
+        $sequence = @($messageList | Where-Object {
+            [int]$_.Message -eq $script:CatalogJobMessage.NewProcess -or
+            [int]$_.Message -eq $script:CatalogJobMessage.ExitProcess -or
+            [int]$_.Message -eq $script:CatalogJobMessage.AbnormalExitProcess
+        })
         foreach ($message in $sequence) {
             $processId = [long]$message.ProcessId
             if ([int]$message.Message -eq $script:CatalogJobMessage.NewProcess) {
