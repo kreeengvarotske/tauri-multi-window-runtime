@@ -196,6 +196,8 @@ Each row names the concrete check. **auto** means an automated test with real se
 | T-17 | Crash loop | A broker that aborts on start `k` times trips the circuit breaker, and the app stays in-process | auto | new |
 | T-18 | Version confusion | Old client against a new broker and the reverse: explicit `versionMismatch` or `unknownOperation`, then fallback | auto | exists (mismatch); fallback **new** |
 | T-19 | Malformed input to the frame decoder or params | Fuzz the frame decoder and every params type with cargo-fuzz, outside CI | fuzz | new |
+| T-20 | Reconnect or fallback starts a fresh deadline | Fail the broker just before the original deadline; the request expires without a new full timeout. Cancel during reconnect and verify that no local fallback operation starts. | auto | new |
+| T-21 | Two installed apps disagree about the broker location | Apps in different directories resolve one registered broker path, connect to the same instance and pass server identity checks. A peer in another session is rejected. | auto, native | new |
 
 ## 10. Connecting an existing Tauri application
 
@@ -239,7 +241,7 @@ Scope, as one Draft PR on the spike branch (#29), still under `experiments/`:
 2. Identity per §5 on Windows: process handle held, creation-time check, session id in the pipe name and checked on both sides, and the client's server check.
 3. Per-app quota (A-6) inside the experiment, not in `runtime-core` yet.
 4. Fallback and circuit breaker in the client.
-5. Tests T-2a, T-3, T-9 (cross-process invalidate), T-11, T-12 (connections), T-13, T-16, T-17, T-18 fallback, plus all existing spike tests.
+5. Tests T-2a, T-3, T-9 (cross-process invalidate), T-11, T-12 (connections), T-13, T-16, T-17, T-18 fallback, T-20, T-21, plus all existing spike tests.
 6. A headless client with `--mode plain|shared` (the measurement build, G-X2 in `docs/cross-app/05-memory-methodology.md`, #27).
 
 **Out of scope for the prototype:** any change to `crates/`, a Tauri integration (A-2/A-3 against the real adapter), spawn-on-demand from an installer path, a manifest installer, macOS and Linux identity beyond what the spike has, and any measurement.
