@@ -299,7 +299,10 @@ every process added, exit messages, active-zero).
   message for a reused PID requires an exit in between; otherwise the
   identity is ambiguous and CPU is invalid. More exit messages than exited
   job processes also invalidate CPU. Missing exit or active-zero messages
-  are reported as diagnostics, including affected PIDs where available.
+  are distinct from other notifications: only new-process and exit-process
+  events open or close a PID lifetime. Other notifications cannot close it.
+  Missing exit or active-zero messages are reported as diagnostics,
+  including affected PIDs where available.
   Windows does not guarantee delivery of these notifications. A monitor
   file without process identities leaves membership unverified.
 - **End of the run.** Every process of the job has exited at the last job
