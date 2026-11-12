@@ -6,9 +6,8 @@ the process monitor (protocol: docs/benchmark/memory-pilot-protocol.md).
 .DESCRIPTION
 Arms: A = per-window JS copy (no feature), B = hand-written shared Rust
 service (--features shared), C = the same catalog through shared-runtime
-(--features framework; Git revision pinned in Cargo.toml). -Phase Pilot
-still refuses to start (except with -DryRun, which starts no app): the pilot runs only after a native smoke of all
-three arms and the final check of the frozen protocol (#33 §10).
+(--features framework; Git revision pinned in Cargo.toml). A real pilot
+requires the frozen package and a separate approved launch record.
 
 The whole order is written to schedule.csv before the first run
 (CatalogSchedule.ps1: cells interleaved block by block, arm permutations
@@ -92,6 +91,15 @@ param(
     # Pilot, which otherwise still refuses to start.
     [switch]$DryRun,
 
+    # Rehearse all frozen inputs without starting the app or monitor.
+    [switch]$VerifyPilotFreeze,
+    [ValidatePattern('^[0-9a-fA-F]{64}$')]
+    [string]$ExpectedScheduleSha256,
+
+    [string]$PilotApprovalFile,
+    [ValidatePattern('^[0-9a-fA-F]{64}$')]
+    [string]$PilotApprovalSha256,
+
     # A manifest.json frozen from a dry run (protocol §10a) and its SHA-256.
     # The runner refuses to start if the file's hash differs or if anything in
     # the manifest of this invocation differs from it.
@@ -115,9 +123,23 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $benchRoot)
 $protocolPath = Join-Path $repoRoot 'docs\benchmark\memory-pilot-protocol.md'
 $sampleIntervalSeconds = 1
 
-if ($Phase -eq 'Pilot' -and -not $DryRun) {
-    throw 'The pilot runs only after a native smoke of arms A, B and C and the final check of the frozen protocol (docs/benchmark/memory-pilot-protocol.md §10, pilot gate).'
+$realPilot = $Phase -eq 'Pilot' -and -not $DryRun
+if ($realPilot -and -not ($PilotApprovalFile -and $PilotApprovalSha256)) {
+    throw 'The pilot runs only after a native smoke and written approval. Supply -PilotApprovalFile and -PilotApprovalSha256.'
 }
+if (-not $realPilot -and ($PilotApprovalFile -or $PilotApprovalSha256)) { throw 'Pilot approval inputs require a real pilot invocation.' }
+if ($VerifyPilotFreeze -and ($Phase -ne 'Pilot' -or -not $DryRun)) { throw '-VerifyPilotFreeze requires -Phase Pilot and -DryRun.' }
+$requirePilotFreeze = $VerifyPilotFreeze -or $realPilot
+if ($requirePilotFreeze) {
+    if (-not ($Manifest -and $ManifestSha256 -and $ProtocolFile -and $ProtocolSha256 -and
+        $ExpectedSchedule -and $ExpectedScheduleSha256 -and $BuildRecord -and $ExecutablesFrom)) {
+        throw 'Pilot freeze verification requires manifest, protocol and schedule files and SHA-256 values, -BuildRecord, and -ExecutablesFrom.'
+    }
+    if ($Triplets -ne 6 -or ($Cells -join ',') -ne 'N2D0,N2D16,N2D64,N4D64' -or ($Arms -join ',') -ne 'A,B,C') {
+        throw '-VerifyPilotFreeze requires the 72-run pilot matrix.'
+    }
+}
+elseif ($ExpectedScheduleSha256) { throw '-ExpectedScheduleSha256 requires -VerifyPilotFreeze or a real pilot.' }
 if ($DryRun -and -not ($ExecutablesFrom -or $SkipBuild)) { throw '-DryRun builds nothing: give -ExecutablesFrom or -SkipBuild.' }
 if ([bool]$Manifest -ne [bool]$ManifestSha256) { throw '-Manifest and -ManifestSha256 go together.' }
 if ([bool]$ProtocolFile -ne [bool]$ProtocolSha256) { throw '-ProtocolFile and -ProtocolSha256 go together.' }
@@ -149,10 +171,10 @@ if ($reusingExecutables -and -not $DryRun -and -not $BuildRecord) {
 if ($BuildRecord -and -not $reusingExecutables) {
     throw '-BuildRecord requires -ExecutablesFrom or -SkipBuild.'
 }
-if ($BuildRecord -and -not $DryRun) {
+if ($BuildRecord -and (-not $DryRun -or $requirePilotFreeze)) {
     $statusBeforeRun = & git -C $repoRoot status --porcelain
     if ($LASTEXITCODE -ne 0 -or $statusBeforeRun) {
-        throw 'Reusing executables in a real run requires a clean scenario checkout.'
+        throw 'Reusing executables in a real run or pilot freeze verification requires a clean scenario checkout.'
     }
 }
 $buildRecordSha256 = if ($BuildRecord) {
@@ -173,10 +195,13 @@ $runsDirectory = Join-Path $OutputDirectory 'runs'
 $profilesDirectory = Join-Path $OutputDirectory 'profiles'
 
 $schedule = New-CatalogSchedule -Cells $Cells -Arms $Arms -Triplets $Triplets -Seed $ScheduleSeed -DataSeed $DataSeed
-$expectedScheduleSha256 = $null
+$scheduleFileHash = $null
 if ($ExpectedSchedule) {
+    $scheduleFileHash = (Get-FileHash -LiteralPath $ExpectedSchedule -Algorithm SHA256).Hash
+    if ($requirePilotFreeze -and $scheduleFileHash -ne $ExpectedScheduleSha256) {
+        throw 'The schedule file does not match -ExpectedScheduleSha256.'
+    }
     if (-not (Test-CatalogScheduleMatchesFile -Schedule $schedule -Path $ExpectedSchedule)) { throw "The schedule for these parameters differs from $ExpectedSchedule; nothing was built or run." }
-    $expectedScheduleSha256 = (Get-FileHash -LiteralPath $ExpectedSchedule -Algorithm SHA256).Hash
 }
 
 function Invoke-Checked {
@@ -228,6 +253,11 @@ if (-not $reusingExecutables) {
     finally { Pop-Location }
 }
 $os = Get-CimInstance -ClassName Win32_OperatingSystem
+$webView2 = Get-WebView2Version
+if ($requirePilotFreeze) {
+    if ([string]$os.BuildNumber -ne '26200') { throw 'Pilot freeze verification requires Windows build 26200.' }
+    if ($webView2 -notmatch '^[0-9]+(\.[0-9]+){3}$') { throw 'Pilot freeze verification requires a detected WebView2 version.' }
+}
 $cpu = @(Get-CimInstance -ClassName Win32_Processor)[0]
 $gitStatus = (& git -C $repoRoot status --porcelain) | Out-String
 $executables = [ordered]@{}
@@ -249,7 +279,7 @@ $configuration = [ordered]@{
     cpu                   = "$($cpu.Name), $($cpu.NumberOfCores) cores, $($cpu.NumberOfLogicalProcessors) logical"
     memoryGb              = [Math]::Round($os.TotalVisibleMemorySize / 1MB, 1)
     powerPlan             = Get-PowerPlan
-    webView2              = Get-WebView2Version
+    webView2              = $webView2
     powershell            = $PSVersionTable.PSVersion.ToString()
     node                  = Get-CommandVersion 'node' @('--version')
     npm                   = Get-CommandVersion 'npm' @('--version')
@@ -269,7 +299,7 @@ $configuration = [ordered]@{
     jobLimits             = $script:CatalogJob
     jobScriptSha256       = (Get-FileHash -LiteralPath (Join-Path $PSScriptRoot 'CatalogJobCpu.ps1') -Algorithm SHA256).Hash
     expectedSchedule      = if ($ExpectedSchedule) { (Resolve-Path -LiteralPath $ExpectedSchedule).Path } else { $null }
-    expectedScheduleSha256 = $expectedScheduleSha256
+    expectedScheduleSha256 = $scheduleFileHash
     executables           = $executables
     phase                 = $Phase
     sampleIntervalSeconds = $sampleIntervalSeconds
@@ -301,6 +331,9 @@ if ($Manifest) {
     $frozenManifestSha256 = Assert-CatalogManifest -FrozenPath $Manifest -FrozenSha256 $ManifestSha256 -Current $runManifest
     $configuration['frozenManifest'] = (Resolve-Path -LiteralPath $Manifest).Path
     $configuration['frozenManifestSha256'] = $frozenManifestSha256
+}
+if ($realPilot) {
+    $configuration['pilotApprovalSha256'] = Assert-CatalogPilotApproval -Path $PilotApprovalFile -ExpectedSha256 $PilotApprovalSha256 -ManifestSha256 $frozenManifestSha256 -ScenarioRevision $scenarioRevision
 }
 New-Item -ItemType Directory -Force -Path $binDirectory, $runsDirectory, $profilesDirectory | Out-Null
 if ($ExecutablesFrom) {

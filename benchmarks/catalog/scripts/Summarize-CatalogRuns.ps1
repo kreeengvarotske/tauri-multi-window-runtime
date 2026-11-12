@@ -212,6 +212,11 @@ if ($checked -and ($nominalInterval -le 0 -or (Get-Property $configuration 'cpuS
 $cpuSource = [string](Get-Property $configuration 'cpuSource')
 if ([string]::IsNullOrEmpty($cpuSource)) { $cpuSource = 'legacy-monitor' }
 elseif ($cpuSource -ne 'job') { throw "$configurationFile has an unknown cpuSource '$cpuSource'." }
+# Use the completion rule frozen with the run, including multi-session input.
+$jobCompletionRule = 'exit-messages'
+$jobLimits = Get-Property $configuration 'jobLimits'
+if ($null -ne $jobLimits -and $null -ne (Get-Property $jobLimits 'CompletionRule')) { $jobCompletionRule = [string](Get-Property $jobLimits 'CompletionRule') }
+if ($cpuSource -eq 'job' -and $script:CatalogJobCompletionRules -notcontains $jobCompletionRule) { throw "$configurationFile has an unknown jobLimits.CompletionRule '$jobCompletionRule'." }
 $schedule = @(if ($checked) { $checked.Schedule } else { Import-Csv -LiteralPath $scheduleFile | Sort-Object { [int]$_.Seq } })
 if (-not $checked) {
     $runLog = Join-Path $ResultsDirectory 'runs.log'
@@ -464,7 +469,7 @@ foreach ($planned in $schedule) {
                 $missing = @(@($jobFile, $messagesFile) | Where-Object { -not (Test-Path -LiteralPath $_) } | ForEach-Object { Split-Path -Leaf $_ })
                 if ($missing.Count -gt 0) { $jobProblems.Add("missing job artifact(s): $($missing -join ', ')") }
                 else {
-                    $job = Get-CatalogJobCpu -Rows @(Import-Csv -LiteralPath $jobFile) -Messages @(Import-Csv -LiteralPath $messagesFile) -Phases $report.phases -MonitorKeys $monitorKeys
+                    $job = Get-CatalogJobCpu -Rows @(Import-Csv -LiteralPath $jobFile) -Messages @(Import-Csv -LiteralPath $messagesFile) -Phases $report.phases -MonitorKeys $monitorKeys -CompletionRule $jobCompletionRule
                     foreach ($problem in $job.Problems) { $jobProblems.Add($problem) }
                     $row.JobProcesses = $job.JobProcesses
                     $row.JobProcessesNeverSeenByMonitor = $job.JobProcessesNeverSeenByMonitor
