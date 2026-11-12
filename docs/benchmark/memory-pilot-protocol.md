@@ -298,8 +298,7 @@ every process added, exit messages, active-zero).
   must follow a new-process message for its PID. A second new-process
   message for a reused PID requires an exit in between; otherwise the
   identity is ambiguous and CPU is invalid. More exit messages than exited
-  job processes also invalidate CPU. Missing exit or active-zero messages
-  are distinct from other notifications: only new-process and exit-process
+  job processes also invalidate CPU. Only new-process and exit-process
   events open or close a PID lifetime. Other notifications cannot close it.
   Missing exit or active-zero messages are reported as diagnostics,
   including affected PIDs where available.
