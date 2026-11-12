@@ -880,6 +880,113 @@ $f.Rows[150].LimitTerminatedProcesses = 1
 $job = Get-CatalogJobCpu -Rows $f.Rows -Messages $f.Messages -Phases $f.Phases -MonitorKeys $f.Keys
 Assert-True 'job: a process terminated by a job limit is refused' ((@($job.Problems) -join ';') -like '*terminated by a job limit*') (@($job.Problems) -join '; ')
 
+# Completion rule (protocol §7, #54 6790225378). 'accounting' confirms the end
+# of the run by the job counters; exit and active-zero messages are diagnostics.
+# Eight processes in order of their new-process message (No. 1 = the app host).
+function New-JobFixture8 {
+    param([DateTimeOffset]$T0, [int[]]$LostExitOrder = @())
+    $rows = New-Object System.Collections.Generic.List[object]
+    for ($k = 0; $k -le 160; $k++) {
+        $t = $k * 0.25
+        $active = if ($t -ge 37) { 0 } else { 8 }
+        $rows.Add([pscustomobject][ordered]@{
+                Utc = $T0.AddSeconds($t).UtcDateTime.ToString('o', $culture); ElapsedSeconds = $t.ToString('F6', $culture)
+                UserTicks = [long](0.3 * $t * 1e7); KernelTicks = [long](0.1 * $t * 1e7); CpuSeconds = (0.4 * $t).ToString('F7', $culture)
+                TotalProcesses = 8; ActiveProcesses = $active; LimitTerminatedProcesses = 0
+            })
+    }
+    $message = { param($offset, $kind, $id) [pscustomobject][ordered]@{ Utc = $T0.AddSeconds($offset).UtcDateTime.ToString('o', $culture); UtcTicks = $T0.AddSeconds($offset).UtcTicks; Message = $kind; ProcessId = $id } }
+    $pids = @(4242, 5001, 5002, 5003, 5004, 5005, 5006, 5007)
+    $messages = New-Object System.Collections.Generic.List[object]
+    for ($n = 0; $n -lt 8; $n++) { $messages.Add((& $message (0.001 + 0.1 * $n) 6 $pids[$n])) }
+    for ($n = 7; $n -ge 0; $n--) { if ($LostExitOrder -notcontains ($n + 1)) { $messages.Add((& $message (36.6 + 0.05 * (7 - $n)) 7 $pids[$n])) } }
+    $messages.Add((& $message 37 4 0))
+    $phases = [pscustomobject][ordered]@{
+        idleBeforeStartedAt = $T0.AddSeconds(1).ToString('o'); warmupStartedAt = $T0.AddSeconds(5).ToString('o'); loadStartedAt = $T0.AddSeconds(10).ToString('o')
+        loadEndedAt = $T0.AddSeconds(30).ToString('o'); endedAt = $T0.AddSeconds(35).ToString('o')
+    }
+    [pscustomobject]@{ Rows = $rows; Messages = $messages; Phases = $phases; Keys = @("4242@$($T0.UtcTicks)"); Pids = $pids }
+}
+Assert-True 'job rule: the runner records the accounting rule in its job limits' ($script:CatalogJob.CompletionRule -eq 'accounting')
+# The four hosted CI failures, as compared from their artifacts (#54 6790225378):
+# artifact, arm, lost exits by new-process order.
+$ciCases = @(
+    @('13714404920 arm A', @(7)),
+    @('13707714616 arm A', @(5, 7)),
+    @('13710104700 arm C', @(7)),
+    @('13695597872 arm C', @(5))
+)
+foreach ($case in $ciCases) {
+    $f = New-JobFixture8 $jobT0 -LostExitOrder $case[1]
+    $lostPids = @($case[1] | ForEach-Object { $f.Pids[$_ - 1] } | Sort-Object)
+    $job = Get-CatalogJobCpu -Rows $f.Rows -Messages $f.Messages -Phases $f.Phases -MonitorKeys $f.Keys -CompletionRule accounting
+    Assert-True "job rule: CI case $($case[0]) is valid by the job counters" ($job.Problems.Count -eq 0 -and [Math]::Abs($job.RunCpuSeconds - 14.0) -lt 1e-6) (@($job.Problems) -join '; ')
+    Assert-True "job rule: CI case $($case[0]) names the undelivered exit messages" ((@($job.Notes) -join ';') -like "*exit messages not delivered: $($case[1].Count) of 8 (PID $($lostPids -join ', '))*" -and $job.JobExitMessagesMissing -eq $case[1].Count) (@($job.Notes) -join '; ')
+    $legacy = Get-CatalogJobCpu -Rows $f.Rows -Messages $f.Messages -Phases $f.Phases -MonitorKeys $f.Keys -CompletionRule exit-messages
+    Assert-True "job rule: CI case $($case[0]) stays invalid under the earlier rule" ((@($legacy.Problems) -join ';') -like "*job messages incomplete (new 8 of 8, exits $(8 - $case[1].Count) of 8, active-zero 1)*") (@($legacy.Problems) -join '; ')
+}
+$f = New-JobFixture8 $jobT0
+$job = Get-CatalogJobCpu -Rows $f.Rows -Messages $f.Messages -Phases $f.Phases -MonitorKeys $f.Keys -CompletionRule accounting
+Assert-True 'job rule: the successful CI repeat (8/8/1) is valid with no note' ($job.Problems.Count -eq 0 -and $job.Notes.Count -eq 0 -and $job.JobExitMessagesMissing -eq 0) ((@($job.Problems) + @($job.Notes)) -join '; ')
+$f = New-JobFixture8 $jobT0 -LostExitOrder 3
+$f.Messages = @($f.Messages | Where-Object { [int]$_.Message -ne 4 })
+$job = Get-CatalogJobCpu -Rows $f.Rows -Messages $f.Messages -Phases $f.Phases -MonitorKeys $f.Keys -CompletionRule accounting
+Assert-True 'job rule: a lost active-zero message is a note when the counters show no active process' ($job.Problems.Count -eq 0 -and (@($job.Notes) -join ';') -like '*active-zero message not delivered*') ((@($job.Problems) + @($job.Notes)) -join '; ')
+# What the accounting rule still refuses.
+$f = New-JobFixture8 $jobT0 -LostExitOrder 7
+$f.Messages = @($f.Messages | Where-Object { -not ([int]$_.Message -eq 6 -and [long]$_.ProcessId -eq 5003) })
+$job = Get-CatalogJobCpu -Rows $f.Rows -Messages $f.Messages -Phases $f.Phases -MonitorKeys $f.Keys -CompletionRule accounting
+Assert-True 'job rule: a lost new-process message is refused' ((@($job.Problems) -join ';') -like '*job messages incomplete (new 7 of 8); membership not verified*') (@($job.Problems) -join '; ')
+$f = New-JobFixture8 $jobT0 -LostExitOrder 7
+$foreign = "7000@$($jobT0.AddSeconds(3).UtcTicks)"
+$job = Get-CatalogJobCpu -Rows $f.Rows -Messages $f.Messages -Phases $f.Phases -MonitorKeys (@($f.Keys) + $foreign) -CompletionRule accounting
+Assert-True 'job rule: a foreign monitor-tree PID is refused' ((@($job.Problems) -join ';') -like "*without a job membership message: $foreign*") (@($job.Problems) -join '; ')
+$f = New-JobFixture8 $jobT0 -LostExitOrder 7
+foreach ($r in $f.Rows) { if ([int]$r.ActiveProcesses -eq 0) { $r.ActiveProcesses = 1 } }
+$f.Messages = @($f.Messages | Where-Object { [int]$_.Message -ne 4 })
+$job = Get-CatalogJobCpu -Rows $f.Rows -Messages $f.Messages -Phases $f.Phases -MonitorKeys $f.Keys -CompletionRule accounting
+Assert-True 'job rule: a process still active at the last row is refused' ((@($job.Problems) -join ';') -like '*1 job process(es) still running at the last job row*') (@($job.Problems) -join '; ')
+Assert-True 'job rule: no undelivered-exit note while a process is active' ((@($job.Notes) -join ';') -notlike '*not delivered*') (@($job.Notes) -join '; ')
+# A PID reused inside one run: valid with the exit message in between, refused without it.
+$f = New-JobFixture8 $jobT0
+$f.Messages = @($f.Messages | Where-Object { -not ([int]$_.Message -eq 6 -and [long]$_.ProcessId -eq 5007) -and -not ([int]$_.Message -eq 7 -and [long]$_.ProcessId -eq 5007) })
+$reuse = @(
+    [pscustomobject][ordered]@{ Utc = ''; UtcTicks = $jobT0.AddSeconds(2).UtcTicks; Message = 7; ProcessId = 5006 },
+    [pscustomobject][ordered]@{ Utc = ''; UtcTicks = $jobT0.AddSeconds(3).UtcTicks; Message = 6; ProcessId = 5006 }
+)
+$head = @($f.Messages | Where-Object { [int]$_.Message -eq 6 })
+$tail = @($f.Messages | Where-Object { [int]$_.Message -ne 6 })
+$job = Get-CatalogJobCpu -Rows $f.Rows -Messages (@($head) + $reuse + @($tail)) -Phases $f.Phases -MonitorKeys $f.Keys -CompletionRule accounting
+Assert-True 'job rule: a PID reused after its exit message is valid' ($job.Problems.Count -eq 0) (@($job.Problems) -join '; ')
+$job = Get-CatalogJobCpu -Rows $f.Rows -Messages (@($head) + @($reuse[1]) + @($tail)) -Phases $f.Phases -MonitorKeys $f.Keys -CompletionRule accounting
+Assert-True 'job rule: a PID reused without the exit message in between is refused' ((@($job.Problems) -join ';') -like '*PID 5006 has a second new-process message without an exit message in between*') (@($job.Problems) -join '; ')
+$limitNotice = [pscustomobject]@{ Utc = ''; UtcTicks = $jobT0.AddSeconds(2).UtcTicks; Message = 9; ProcessId = 5006 }
+$job = Get-CatalogJobCpu -Rows $f.Rows -Messages (@($head) + $limitNotice + @($reuse[1]) + @($tail)) -Phases $f.Phases -MonitorKeys $f.Keys -CompletionRule accounting
+Assert-True 'job rule: a non-exit notification cannot hide ambiguous PID reuse' (
+    (@($job.Problems) -join ';') -like '*PID 5006 has a second new-process message without an exit message in between*'
+) (@($job.Problems) -join '; ')
+$f = New-JobFixture8 $jobT0
+$job = Get-CatalogJobCpu -Rows $f.Rows -Messages (@($f.Messages | Select-Object -First 8) + $limitNotice + @($f.Messages | Select-Object -Skip 8)) -Phases $f.Phases -MonitorKeys $f.Keys -CompletionRule accounting
+Assert-True 'job rule: a non-exit notification leaves a valid lifetime open' ($job.Problems.Count -eq 0) (@($job.Problems) -join '; ')
+$f = New-JobFixture8 $jobT0 -LostExitOrder 7
+$extra = [pscustomobject][ordered]@{ Utc = ''; UtcTicks = $jobT0.AddSeconds(36.9).UtcTicks; Message = 8; ProcessId = 6100 }
+$job = Get-CatalogJobCpu -Rows $f.Rows -Messages (@($f.Messages | Select-Object -First 15) + $extra + @($f.Messages | Select-Object -Skip 15)) -Phases $f.Phases -MonitorKeys $f.Keys -CompletionRule accounting
+Assert-True 'job rule: an exit message for a PID that never joined is refused' ((@($job.Problems) -join ';') -like '*exit message for PID 6100 without a new-process message before it*') (@($job.Problems) -join '; ')
+$f = New-JobFixture8 $jobT0
+$doubled = New-Object System.Collections.Generic.List[object]
+foreach ($m in $f.Messages) { $doubled.Add($m) }
+$doubled.Insert(9, $f.Messages[8])
+$job = Get-CatalogJobCpu -Rows $f.Rows -Messages $doubled -Phases $f.Phases -MonitorKeys $f.Keys -CompletionRule accounting
+Assert-True 'job rule: more exit messages than exited processes is refused' ((@($job.Problems) -join ';') -like '*more exit messages (9) than exited job processes (8)*') (@($job.Problems) -join '; ')
+$threw = $false
+try { Get-CatalogJobCpu -Rows $f.Rows -Messages $f.Messages -Phases $f.Phases -MonitorKeys $f.Keys -CompletionRule lenient | Out-Null } catch { $threw = $_.Exception.Message -like "*Unknown job completion rule 'lenient'*" }
+Assert-True 'job rule: an unknown completion rule stops the check' $threw
+$f = New-JobFixture8 $jobT0 -LostExitOrder 7
+$olderLimits = [ordered]@{}
+foreach ($k in $script:CatalogJob.Keys) { if ($k -ne 'CompletionRule') { $olderLimits[$k] = $script:CatalogJob[$k] } }
+$job = Get-CatalogJobCpu -Rows $f.Rows -Messages $f.Messages -Phases $f.Phases -MonitorKeys $f.Keys -Limits $olderLimits
+Assert-True 'job rule: limits without CompletionRule (older results) keep the earlier rule' ($job.CompletionRule -eq 'exit-messages' -and (@($job.Problems) -join ';') -like '*job messages incomplete (new 8 of 8, exits 7 of 8*') (@($job.Problems) -join '; ')
+
 # Summarizer with cpuSource = job in configuration.json. Six runs:
 #   N2D0 A  : job complete; the monitor lost a child's CPU (ExitedUnread) -> valid, CPU from the job
 #   N2D0 B  : job complete; private memory missing in a load row          -> invalid for RAM only
@@ -953,6 +1060,26 @@ try {
     Assert-Near 'job summary: the monitor CPU of that run is still shown as a diagnostic' $byCase['N2D16B'].MonitorRunCpuSeconds 14.0 1e-6
     Assert-True 'job summary: a missing job messages file is invalid' ($byCase['N2D64A'].Valid -eq 'False' -and $byCase['N2D64A'].InvalidReason -like '*missing job artifact(s): *.job.messages.csv') $byCase['N2D64A'].InvalidReason
     Assert-True 'job summary: a complete run is valid' ($byCase['N2D64B'].Valid -eq 'True') $byCase['N2D64B'].InvalidReason
+    # An exit message lost from the complete run: the earlier results (no
+    # jobLimits.CompletionRule) keep the earlier rule; with the accounting rule
+    # recorded by the runner the run is valid and the loss is a note.
+    $lostName = $byCase['N2D64B'].Name
+    $lostFile = Join-Path $runsDir "$lostName.job.messages.csv"
+    @(Import-Csv -LiteralPath $lostFile | Where-Object { -not ([int]$_.Message -eq 7 -and [long]$_.ProcessId -eq 5000) }) | Export-Csv -LiteralPath $lostFile -NoTypeInformation -Encoding UTF8
+    & (Join-Path $PSScriptRoot 'Summarize-CatalogRuns.ps1') -ResultsDirectory $results -OutputDirectory (Join-Path $root 'analysis-legacy-rule') | Out-Null
+    $lostRow = @(Import-Csv -LiteralPath (Join-Path (Join-Path $root 'analysis-legacy-rule') 'runs.csv') | Where-Object { $_.Name -eq $lostName })[0]
+    Assert-True 'job summary: results without a recorded completion rule keep the earlier rule' ($lostRow.Valid -eq 'False' -and $lostRow.InvalidReason -like '*job messages incomplete (new 3 of 3, exits 2 of 3, active-zero 1)*') $lostRow.InvalidReason
+    $config = Get-Content -LiteralPath (Join-Path $results 'configuration.json') -Raw | ConvertFrom-Json
+    $config | Add-Member -NotePropertyName jobLimits -NotePropertyValue ([pscustomobject]@{ CompletionRule = 'accounting' }) -Force
+    $config | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $results 'configuration.json') -Encoding UTF8
+    & (Join-Path $PSScriptRoot 'Summarize-CatalogRuns.ps1') -ResultsDirectory $results -OutputDirectory (Join-Path $root 'analysis-accounting-rule') | Out-Null
+    $lostRow = @(Import-Csv -LiteralPath (Join-Path (Join-Path $root 'analysis-accounting-rule') 'runs.csv') | Where-Object { $_.Name -eq $lostName })[0]
+    Assert-True 'job summary: with the accounting rule recorded, a lost exit message is a note' ($lostRow.Valid -eq 'True' -and $lostRow.JobNotes -like '*exit messages not delivered: 1 of 3 (PID 5000)*') "$($lostRow.InvalidReason) / $($lostRow.JobNotes)"
+    $config | Add-Member -NotePropertyName jobLimits -NotePropertyValue ([pscustomobject]@{ CompletionRule = 'lenient' }) -Force
+    $config | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $results 'configuration.json') -Encoding UTF8
+    $threw = $false
+    try { & (Join-Path $PSScriptRoot 'Summarize-CatalogRuns.ps1') -ResultsDirectory $results -OutputDirectory (Join-Path $root 'analysis-lenient') | Out-Null } catch { $threw = $_.Exception.Message -like "*unknown jobLimits.CompletionRule 'lenient'*" }
+    Assert-True 'job summary: an unknown completion rule stops the summarizer' $threw
     $config = Get-Content -LiteralPath (Join-Path $results 'configuration.json') -Raw | ConvertFrom-Json
     $config | Add-Member -NotePropertyName cpuSource -NotePropertyValue 'other' -Force
     $config | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $results 'configuration.json') -Encoding UTF8
