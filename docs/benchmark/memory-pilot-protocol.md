@@ -1,5 +1,11 @@
 # Memory and CPU benchmark: pilot protocol (draft for review)
 
+Completion amendment for the next freeze: use the recorded
+`jobLimits.CompletionRule` to select the completion rule. This amendment
+uses `accounting`. The frozen #57 packet and its results keep their
+previous `exit-messages` rule. A future packet using this amendment
+requires its own native smoke and freeze.
+
 Status: **revision 3, Q1–Q8 decided, not yet frozen; two freezes (pilot, then confirmatory) per §10a** (roadmap Phase 4, `docs/ROADMAP.md`
 in #30). **12/12 valid in the Windows 11 build 26200 smoke; pilot blocked
 pending exact-revision evidence, freeze, and approval** (§10).
@@ -287,19 +293,28 @@ every process added, exit messages, active-zero).
   the tree (identity PID and creation time) has a new-process message from
   the job for its PID from 0.1 s before to 5 s after its creation time. A
   message for an earlier or later process with the same PID does not match.
-  No PID list read at one moment is used. The messages count only if they
-  are complete: as many new-process messages as the job's total count, as
-  many exit messages as exited processes, and an active-zero message. A
-  monitor file without process identities leaves membership unverified.
+  No PID list read at one moment is used. Every new-process message must
+  be present: their count equals the job's total process count. Each exit
+  must follow a new-process message for its PID. A second new-process
+  message for a reused PID requires an exit in between; otherwise the
+  identity is ambiguous and CPU is invalid. More exit messages than exited
+  job processes also invalidate CPU. Only new-process and exit-process
+  events open or close a PID lifetime. Other notifications cannot close it.
+  Missing exit or active-zero messages are reported as diagnostics,
+  including affected PIDs where available.
+  Windows does not guarantee delivery of these notifications. A monitor
+  file without process identities leaves membership unverified.
 - **End of the run.** Every process of the job has exited at the last job
-  row. If the app does not exit within the timeout, or processes of the app
+  row, confirmed by the kernel accounting counter ActiveProcesses = 0.
+  Exit messages are not the source of CPU accounting or proof of completion.
+  If the app does not exit within the timeout, or processes of the app
   are still running 30 s after it exited, the runner terminates its own job
   (never a process by name or PID) and the run is invalid.
 - **Failed assignment.** If the suspended app cannot be assigned to its
   job, the runner terminates it before it runs, records the error in
   `runs.log` (`jobError`) and the run is invalid.
 - **Gaps and missing data.** No job rows, a row gap over 1 s, a last row
-  more than 0.5 s before `endedAt`, incomplete messages, or a missing job
+  more than 0.5 s before `endedAt`, incomplete new-process messages, or a missing job
   CSV or messages file each make the run's CPU, and so the run, invalid.
   There is no fallback: the monitor's CPU sum never replaces a missing or
   invalid job value.
