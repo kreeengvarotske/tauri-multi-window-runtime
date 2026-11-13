@@ -1,7 +1,7 @@
 // The run report written by the main window: configuration, plan, phase
 // times for splitting monitor samples, and every window's report.
 
-import type { CatalogConfig, Plan, WindowReport } from "./window";
+import { scheduledLoadSteps, type CatalogConfig, type Plan, type WindowReport } from "./window";
 
 export interface RunReport {
   schemaVersion: 1;
@@ -60,11 +60,14 @@ export function buildRunReport(
     problems.push(`${failure.label}: did not finish: ${(failure as WindowFailure).error}`);
   }
   const all = received.filter(isComplete);
+  const expectedSteps = scheduledLoadSteps(plan, config.stepIntervalMs);
+  if (!Number.isSafeInteger(expectedSteps) || expectedSteps <= 0) problems.push("no valid load steps scheduled");
   for (const w of all) {
     const counters = [w.load.scheduledSteps, w.load.completedSteps, w.load.failures, w.load.mismatches,
       w.warmup.completedSteps, w.warmup.failures, w.warmup.mismatches];
     const consistent = counters.every((value) => Number.isSafeInteger(value) && value >= 0)
       && w.load.completedSteps === w.load.scheduledSteps
+      && w.load.scheduledSteps === expectedSteps
       && w.load.failures === 0 && w.load.mismatches === 0
       && w.warmup.failures === 0 && w.warmup.mismatches === 0 && w.firstError === null;
     if (!w.passed || !consistent) {

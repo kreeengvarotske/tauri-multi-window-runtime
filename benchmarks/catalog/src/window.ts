@@ -212,6 +212,12 @@ export async function runWindow(config: CatalogConfig, deps: WindowDeps, started
   return buildReport(config, deps.label, workload.windowIndex, setup, plan, result, samples);
 }
 
+/** Counts due times in load on the cadence anchored at warmup start. */
+export function scheduledLoadSteps(plan: Plan, intervalMs: number): number {
+  return Math.max(0, Math.ceil((plan.loadEndMs - plan.warmupAtMs) / intervalMs)
+    - Math.ceil((plan.loadAtMs - plan.warmupAtMs) / intervalMs));
+}
+
 export function buildReport(
   config: CatalogConfig,
   label: string,
@@ -221,7 +227,7 @@ export function buildReport(
   result: Awaited<ReturnType<typeof runWorkload>>,
   samples: HeapSample[],
 ): WindowReport {
-  const scheduledSteps = Math.ceil((plan.loadEndMs - plan.loadAtMs) / config.stepIntervalMs);
+  const scheduledSteps = scheduledLoadSteps(plan, config.stepIntervalMs);
   const failures = result.load.filter((s) => !s.ok).length;
   const mismatches = result.load.filter((s) => s.mismatch).length;
   const completed = result.load.filter((s) => s.ok).length;
@@ -253,6 +259,7 @@ export function buildReport(
     },
     firstError: result.firstError,
     passed:
+      scheduledSteps > 0 &&
       failures === 0 &&
       mismatches === 0 &&
       warmupFailures === 0 &&
