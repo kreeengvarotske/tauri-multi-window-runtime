@@ -10,6 +10,11 @@ pub trait View<O: Operation>: Send + Sync + 'static {
     type Response: Send;
 
     /// Parameters of the source operation this request reads.
+    ///
+    /// Called before waiting for projection admission, so a queued call can
+    /// register its invalidation identity without retaining a source output.
+    /// Keep this cheap: derive parameters only, without loading data. Cache
+    /// lookup and operation execution still happen after admission.
     fn source(&self, request: &Self::Request) -> O::Params;
 
     /// Most items one response may carry. The runtime refuses a larger
