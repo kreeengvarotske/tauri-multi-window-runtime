@@ -30,7 +30,7 @@ The queued-view lifecycle bug was reproduced after the checks above. [Fix #66](h
 | Memory/CPU claims | No general saving claim. The descriptive pilot is in #64; new daytime diagnostics were under competing game load and cannot validate a performance effect |
 | Registry and cross-app work | Separate later tracks; neither is required to finish this Git developer preview |
 
-No full Tauri build or native run of #66 has been performed locally while the operator is gaming. Unit checks remain useful for correctness; they do not replace the native/distribution checks above. Do not repeatedly dispatch CI while the known account restriction prevents jobs from starting.
+Initial #66 checks were limited to library tests while the operator was gaming. After CS2 was confirmed closed, the expanded Debug native queued close/reopen self-test passed on `11f2a31`; see the linked lifecycle record for exact evidence and the retained Chromium teardown diagnostic. This is functional evidence, not a performance comparison. The full Release and clean Git-consumer gates still require their own candidate evidence. Do not repeatedly dispatch CI while the known account restriction prevents jobs from starting.
 
 ## Verification
 

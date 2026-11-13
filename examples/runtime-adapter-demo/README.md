@@ -15,6 +15,12 @@ $demo = Join-Path $PWD 'target\release\runtime-adapter-demo.exe'
 
 Close the demo before running its self-test. Two real WebViews request different pages over IPC. The report records one catalog execution and one cached catalog entry, and checks window-specific access, cleanup, and shutdown. Use a new report path for each attempt.
 
+The lifecycle check also keeps an old window's view queued while the real
+window is destroyed and reopened under the same label. A passing report
+requires `queuedViewSeparated` and `queuedViewCacheStable`: the old call
+must not read or replace the reopened window's cached note. This is a
+functional check, not a measurement of application memory.
+
 ```powershell
 $report = Join-Path ([IO.Path]::GetTempPath()) "runtime-adapter-demo-$([guid]::NewGuid()).json"
 $run = Start-Process -FilePath $demo -ArgumentList @('--self-test', ('"{0}"' -f $report)) -PassThru -WindowStyle Hidden

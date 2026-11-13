@@ -70,6 +70,10 @@ On the collection Windows machine, the normal debug suites passed:
   with warnings denied. The cancellation regression also invalidates while
   two prepared callers share work, then cancels the initializer: the waiter
   restarts but still cannot cache its old-generation result.
+- Adapter verification now also passes: 23 unit tests (including queued
+  window close through `SharedRuntime::view` and serialization), three adapter
+  doctests, and adapter Clippy with warnings denied. The nine demo IPC tests
+  pass on Tauri's mock runtime, including capabilities and forged caller input.
 - Workspace formatting passed. No Tauri application or WebView was launched.
 
 Commands (offline, locked):
@@ -83,11 +87,39 @@ cargo doc --offline --locked -p runtime-core -p shared-runtime --no-deps
 ```
 
 The combined test log is retained locally under this checkout's
-`target/lifecycle-tests.log`. These unit checks establish behavior and state
-cleanup, not comparative performance. A current full Windows Release build,
-adapter/demo tests, external-consumer check and native close/reopen smoke
-remain to be run on an idle machine. The operator is using the laptop for
-gaming, so no such run was started. Hosted CI also needs a successful run:
+`target/lifecycle-tests.log`; adapter and mock-IPC logs are alongside it.
+These checks establish behavior and state cleanup, not comparative performance.
+
+## Native queued close/reopen evidence
+
+After a read-only process check confirmed that CS2 was no longer running,
+the expanded Debug self-test passed on source `11f2a310006577df481b3930d4f13fec38978069`,
+Windows build 26200 and WebView2 `157.0.4341.46`. This was a functional test,
+not a memory or CPU comparison. The app ran in its own kill-on-close Job
+Object with a new WebView2 profile; exit code was zero, no timeout or forced
+termination occurred, and zero processes remained in its job.
+
+The test occupies all projection slots, registers an old window's view,
+and verifies no source request happens before admission. It destroys the
+real `w1`, observes cache entries dropping from 2 to 1 through the plugin,
+then reopens `w1` and populates its new cache before releasing the slots.
+The old queued view returned note 4; the new window retained note 3.
+Both `queuedViewSeparated` and `queuedViewCacheStable` were true. Two WebViews
+still shared one catalog execution and cache entry; shutdown refused later
+calls and cleared the caches. Slot holders release on early returns too.
+
+Evidence: `target/native-queued-view-bbcf31ee/{inputs.json,runner.json,self-test.json}`.
+Debug executable SHA-256:
+`78bf41e421998dfdb15902760b1b7907df213aba68a6f10a351fda61afed9c05`.
+Chromium emitted `Failed to unregister class Chrome_WidgetWin_0. Error = 1412`
+during teardown. This diagnostic is retained; it did not prevent the stated
+checks or process cleanup. It is not a memory-leak measurement and should be
+checked again during final Release/native verification.
+
+A full Windows Release workspace check and a clean Git external consumer
+on the selected candidate remain pending. Subsequent evidence is recorded
+in PR #66 without implying that earlier native results cover a different
+code revision. Hosted CI also needs a successful run:
 the initial #66 run `43507493106` failed before any Ubuntu or Windows job
 steps. Its Windows annotation reports an account payment/spending-limit
 problem. Local checks do not replace CI.
