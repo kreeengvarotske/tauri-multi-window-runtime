@@ -1,6 +1,8 @@
 # Catalog memory investigation, 13 November 2026
 
-**Exploratory diagnosis: bounded DOM reuse did not reduce the observed renderer Private Bytes plateau.** It bounded the DOM-node count, while both implementations still reached approximately 90 MiB Private per renderer. These four short native checks are separate from the frozen [72-run pilot, PR #64](https://github.com/kreeengvarotske/tauri-multi-window-runtime/pull/64). They neither replace pilot results nor establish a population effect, equivalence, a library defect, or a successful RAM fix.
+**Exploratory diagnosis: a renderer Private Bytes plateau was observed with both original and bounded DOM renderers.** Node counts were bounded in the latter, while both implementations reached approximately 90 MiB Private per renderer. These four short native checks are separate from the frozen [72-run pilot, PR #64](https://github.com/kreeengvarotske/tauri-multi-window-runtime/pull/64). They neither replace pilot results nor establish a population effect, equivalence, a library defect, or a successful RAM fix.
+
+**Environment warning:** after these daytime diagnostics, the operator reported concurrently playing Counter-Strike. The overlap start is unknown. Treat every daytime diagnostic here as collected under uncontrolled competing RAM/CPU/GPU load. The app's correctness results and observed process/heap records remain available, but the numbers cannot establish a comparative performance effect or rule out one. Repeat comparisons on an idle machine before accepting or rejecting an optimization. The operator's statement concerns the daytime investigation; it is not evidence that the separate overnight pilot had the same conditions.
 
 ## Inputs and scope
 
@@ -27,6 +29,8 @@ Original executable: `.codex-worktrees/pilot-freeze-preflight/target/native-qual
 | `roles-reuse-cdp-94b543ae` | Yes | 90.44 | 160/160 |
 
 Every check reports `passed: true`, zero failures, checksum mismatches, and overruns. Every runner result has exit code 0, no timeout, no terminated job, and zero leftover processes. One observation per variant and instrumentation condition cannot estimate an optimization effect; the recorded checks give no evidence that DOM reuse removed the RAM plateau.
+
+An earlier sandboxed instrumentation attempt is preserved separately in `target/roles-original-5786a516`. Its CIM role collection failed because of access restrictions, so it supplies no role comparison. The successful original check above used the required native access. The failed instrumentation files were not deleted or substituted into the pilot.
 
 The original pilot also shows the phase pattern. Across its six C N2D16 runs, summed inferred-renderer Private medians were 51.0 / 162.0 / 179.0 / 89.4 MiB for idle-before / warmup / load / idle-after. A's corresponding values were 139.8 / 133.9 / 125.2 / 124.2 MiB. This is derived diagnostic context, not a replacement for the pilot's whole-tree primary measure. In pilot run `N2D16-t01-p1-C`, the two growing PIDs fell from approximately 89/90 MiB to 32/30 MiB about seven seconds after load ended; see its raw diagnostics lines 1368, 1369, 1433, and 1442.
 
@@ -57,7 +61,23 @@ These observations locate substantial transient allocation in the embedder GC he
 
 Pinned Tauri 2.12.5 uses a custom-protocol POST followed by `response.json()` (`scripts/ipc-protocol.js:37` and `:48`). Its callback registry explicitly unregisters successful/error callbacks (`scripts/core.js:84-90`). Wry 0.57.1 passes nonempty responses through `SHCreateMemStream` and `CreateWebResourceResponse` (`src/webview2/mod.rs:1226-1229`). This makes the fetch/body lifecycle a concrete candidate, but host-side response buffers alone cannot explain the renderer-local footprint.
 
-A targeted follow-up should attribute native/embedder allocations, or isolate the transport while preserving payload, checksum, cadence, and rendering. A postMessage comparison must account for Tauri's Channel response path, which can fetch data again unless `customProtocolIpcBlocked` is true. No transport effect is recorded here. A general transport rewrite, artificial idle/GC, or a changed primary measurement window is not justified by these checks.
+A transport isolation must account for Tauri's Channel response path, which can fetch data again unless `customProtocolIpcBlocked` is true. Additional diagnostic isolations are recorded below. A general transport rewrite, artificial idle/GC, or a changed primary measurement window is not justified by these checks.
+
+## Additional diagnostic isolations
+
+The separate JSON postMessage/eval reproducer and its two successful 160-step checks are preserved in [PR #65](https://github.com/kreeengvarotske/tauri-multi-window-runtime/pull/65). Its observed native-memory plateau also persisted. These uncontrolled daytime observations do not establish equivalence or exclude a transport effect.
+
+`target/roles-reuse-native-profile-b8dbb681` adds native allocation sampling (`Memory.startSampling` at a 32,768-byte interval and `Memory.getSamplingProfile`) to the bounded-renderer executable. It completed 160/160 data checks without failures, mismatches or overruns. Full sample stacks and module metadata are retained in `cdp.jsonl`. The returned stacks contain raw addresses rather than useful function symbols; this profile has not identified the owner of the large embedder allocation. Profiling overhead and competing game activity prevent performance conclusions.
+
+`target/roles-reuse-no-text-b3721391` is an explicit display-isolation probe. On its app-owned DevTools targets, `target/sample-no-text-cdp.mjs` temporarily replaces only the `Text.prototype.data` setter with a no-op while preserving its getter. Requests and checksum validation continue, but table field updates are intentionally disabled. Its 160/160 data checks passed; this is **not** a valid implementation of the displayed workload or a memory optimization. It is a lead for investigating repeated JS-to-DOM text conversion, which still requires an idle-machine reproduction. No GC or memory-pressure command was issued.
+
+Any bounded text canonicalization candidate must retain the same visible text and request/checksum workload, cap both entry count and estimated string payload, and be measured separately on a free machine before a RAM claim. Native diagnostic processes have ended; no additional heavy runs are scheduled while the operator is gaming.
+
+## Unit-tested candidate and remaining gates
+
+The current source adds a per-renderer LRU of displayed strings, limited to 8192 entries and a 1 MiB UTF-16 payload estimate. Oversized strings bypass retention. This estimate excludes engine/Map overhead, retained backing storage, DOM and OS memory; it is not a process RAM cap. The cache adds retention and lookup work, so it may also cost RAM or CPU. All 25 frontend tests and TypeScript checks pass, including eviction, exact budget boundaries, oversized strings, Unicode and unchanged displayed contents. No native executable containing this text cache has been built or measured yet. The earlier native binaries remain tied to their exact revisions above.
+
+Hosted CI is also blocked independently of code execution. Runs `43439842541` / `43439842514` on `678a3b7` and `43441113567` / `43441113785` on `e53357a` ended before any job steps ran. GitHub's check annotations report an account payment or spending-limit problem. Local passing checks are not a substitute for hosted CI; do not mark these PRs green or merge-ready until account access is restored and the required jobs run. No repeated workflow dispatches are scheduled while that condition remains.
 
 ## Preserved diagnostic evidence
 

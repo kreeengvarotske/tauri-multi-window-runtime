@@ -1,4 +1,5 @@
 import type { Response } from "./catalog";
+import { BoundedTextCache } from "./textcache";
 
 // The service returns at most 100 page rows, 32 totals or 20 records.
 const MAX_ROWS = 100;
@@ -17,6 +18,7 @@ interface Row {
 export function createRenderer(table: HTMLTableElement): (response: Response) => void {
   const document = table.ownerDocument;
   const rows: Row[] = [];
+  const textCache = new BoundedTextCache();
 
   function cell(row: Row, index: number, value: string): void {
     let target = row.cells[index];
@@ -29,7 +31,8 @@ export function createRenderer(table: HTMLTableElement): (response: Response) =>
       row.cells.push(target);
     }
     target.element.hidden = false;
-    if (target.text.data !== value) target.text.data = value;
+    const text = textCache.intern(value);
+    if (target.text.data !== text) target.text.data = text;
   }
 
   function clear(cells: Cell[], from: number): void {
