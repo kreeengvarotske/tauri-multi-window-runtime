@@ -62,18 +62,24 @@ savings.
 
 On the collection Windows machine, the normal debug suites passed:
 
-- `runtime-core`: 75 unit tests, including five prepared-call regressions.
+- `runtime-core`: 76 unit tests, including six prepared-call regressions.
 - `shared-runtime`: 35 integration tests, including queued window close,
   same-label reopen and clear regressions.
 - Clippy with `--all-targets -- -D warnings` for both crates passed.
+- The public prepared-call doctest passes; Rustdoc for both crates builds
+  with warnings denied. The cancellation regression also invalidates while
+  two prepared callers share work, then cancels the initializer: the waiter
+  restarts but still cannot cache its old-generation result.
 - Workspace formatting passed. No Tauri application or WebView was launched.
 
-Commands (offline, locked; the skip filter matched no tests in this run):
+Commands (offline, locked):
 
 ```text
-cargo test --offline --locked -p runtime-core -p shared-runtime -- --skip stress
+cargo test --offline --locked -p runtime-core -p shared-runtime
 cargo clippy --offline --locked -p runtime-core -p shared-runtime --all-targets -- -D warnings
 cargo fmt --all --check
+# With RUSTDOCFLAGS="-D warnings":
+cargo doc --offline --locked -p runtime-core -p shared-runtime --no-deps
 ```
 
 The combined test log is retained locally under this checkout's
@@ -81,6 +87,7 @@ The combined test log is retained locally under this checkout's
 cleanup, not comparative performance. A current full Windows Release build,
 adapter/demo tests, external-consumer check and native close/reopen smoke
 remain to be run on an idle machine. The operator is using the laptop for
-gaming, so no such run was started. Hosted CI also needs a successful run;
-earlier unrelated diagnostic jobs reported an account payment/spending-limit
-problem, and local checks do not replace CI.
+gaming, so no such run was started. Hosted CI also needs a successful run:
+the initial #66 run `43507493106` failed before any Ubuntu or Windows job
+steps. Its Windows annotation reports an account payment/spending-limit
+problem. Local checks do not replace CI.

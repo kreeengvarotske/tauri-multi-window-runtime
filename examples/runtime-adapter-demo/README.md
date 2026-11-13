@@ -34,6 +34,15 @@ See the [adapter guide](../../crates/shared-runtime-tauri/README.md), the [Rust 
 
 ### Use the preview from another project
 
+The `v0.1.0-preview.1` tag has not been published as of 13 November 2026.
+The tag-based dependency example below is the intended release form, not a
+currently available remote tag. To evaluate the source before publication,
+use a reviewed checkout and the build/self-test commands above. The
+[release review](../../docs/windows-preview-review.md) lists remaining
+checks, including the queued-window lifecycle fix in #66. Do not substitute
+an unverified candidate into release instructions or assume earlier native
+results cover a newer SHA.
+
 Add both crates to the Cargo manifest that builds your Tauri backend. Pin both to the same release tag. Cargo records the tag's commit SHA in your `Cargo.lock`. Check that SHA against the one stated in the GitHub Release for the tag.
 
 ```toml

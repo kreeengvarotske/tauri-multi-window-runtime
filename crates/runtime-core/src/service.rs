@@ -201,6 +201,19 @@ where
     /// Registers invalidation identity before an external admission wait.
     /// Does not look up, execute, or retain an output. The registration's
     /// metadata exists only while the returned prepared call is alive.
+    ///
+    /// ```
+    /// use runtime_core::{CachePolicy, CachedService};
+    /// # tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(async {
+    /// let service = CachedService::<u32, usize, ()>::new(CachePolicy::Forever);
+    /// let waiting = service.prepare_call(7);
+    /// // The caller may wait for its own admission slot here.
+    /// service.invalidate(&7);
+    /// let result = waiting.run_with_metadata(|| async { Ok(42) }).await;
+    /// assert_eq!(*result.result.unwrap(), 42);
+    /// assert_eq!(service.cached_entries(), 0); // The old call cannot recache.
+    /// # });
+    /// ```
     pub fn prepare_call(&self, key: K) -> PreparedServiceCall<'_, K, V, E> {
         let (global_version, key_version) = {
             let mut generation = self.generation.lock().unwrap_or_else(|p| p.into_inner());
@@ -641,6 +654,43 @@ mod tests {
         assert_eq!(
             (service.in_flight_keys(), service.in_flight_tasks()),
             (0, 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn prepared_waiter_restart_after_invalidation_and_initializer_cancel_does_not_cache() {
+        use std::{
+            future::Future,
+            task::{Context, Waker},
+        };
+        let service = CachedService::<u8, usize, String>::new(CachePolicy::Forever);
+        let mut first = Box::pin(
+            service
+                .prepare_call(1)
+                .run_with_metadata(std::future::pending),
+        );
+        let mut waiter = Box::pin(
+            service
+                .prepare_call(1)
+                .run_with_metadata(|| async { Ok(9) }),
+        );
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(first.as_mut().poll(&mut cx).is_pending());
+        assert!(waiter.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(service.in_flight_callers(), 2);
+        service.invalidate(&1);
+        drop(first);
+        let result = waiter.await;
+        assert_eq!(result.kind, ServiceRunKind::Executed);
+        assert_eq!(*result.result.unwrap(), 9);
+        assert_eq!(service.cached_entries(), 0);
+        assert_eq!(
+            (
+                service.in_flight_keys(),
+                service.in_flight_tasks(),
+                service.in_flight_callers()
+            ),
+            (0, 0, 0)
         );
     }
 
