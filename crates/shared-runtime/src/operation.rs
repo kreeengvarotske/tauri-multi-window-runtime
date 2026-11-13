@@ -105,7 +105,7 @@ pub enum CallError<E> {
     Operation(Arc<E>),
     /// This caller's deadline passed.
     DeadlineExceeded,
-    /// No execution slot and the queue was full.
+    /// No execution/admission slot and its queue was full.
     Overloaded,
     /// The runtime is shutting down.
     ShuttingDown,

@@ -139,6 +139,7 @@ mod tests {
             max_concurrent_operations: 4,
             max_queued_operations: 16,
             max_concurrent_projections: projections,
+            max_queued_projections: 16,
             default_deadline: Duration::from_secs(5),
             shutdown_grace: grace,
             cache_budget_bytes: 1 << 20,
@@ -346,6 +347,84 @@ mod tests {
                 .await
                 .is_ok()
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn full_projection_queue_maps_to_the_stable_overloaded_envelope() {
+        use std::{
+            future::Future,
+            task::{Context, Waker},
+        };
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let gate = Arc::new(Gate {
+            entered: Mutex::new(Some(entered_tx)),
+            release: Mutex::new(Some(release_rx)),
+        });
+        let runtime = Runtime::builder(RuntimeConfig {
+            max_queued_projections: 1,
+            ..config(1, Duration::from_millis(50))
+        })
+        .unwrap()
+        .register(
+            Strings(ScopeRule::Shared),
+            OperationConfig {
+                cache_budget_bytes: 1 << 20,
+            },
+        )
+        .unwrap()
+        .view::<Strings, _>(All { gate })
+        .unwrap()
+        .build();
+        let state = Arc::new(SharedRuntime::new(runtime, Duration::from_secs(1)));
+        let first = tokio::spawn({
+            let state = Arc::clone(&state);
+            async move {
+                state
+                    .view::<Strings, All>(&Caller::window("main"), 10, 1024, CallOptions::default())
+                    .await
+            }
+        });
+        tokio::task::spawn_blocking(move || entered_rx.recv().unwrap())
+            .await
+            .unwrap();
+        let caller = Caller::window("queued");
+        let mut queued =
+            Box::pin(state.view::<Strings, All>(&caller, 20, 1024, CallOptions::default()));
+        assert!(
+            queued
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        let excess = state
+            .view::<Strings, All>(&Caller::window("excess"), 30, 1024, CallOptions::default())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            serde_json::to_value(excess).unwrap(),
+            serde_json::json!({"code": "OVERLOADED", "message": "runtime overloaded"})
+        );
+        assert_eq!(
+            state
+                .runtime()
+                .stats()
+                .operation(Strings::NAME)
+                .unwrap()
+                .requests,
+            1
+        );
+        drop(queued);
+        assert_eq!(state.runtime().stats().queued_projections, 0);
+        release_tx.send(()).unwrap();
+        assert!(first.await.unwrap().is_ok());
+        assert!(
+            state
+                .view::<Strings, All>(&caller, 20, 1024, CallOptions::default())
+                .await
+                .is_ok()
+        );
+        assert_eq!(state.runtime().stats().active_projections, 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
