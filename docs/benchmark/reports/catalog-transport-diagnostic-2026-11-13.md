@@ -1,6 +1,8 @@
 # Catalog IPC transport diagnostic, 13 November 2026
 
-**Exploratory negative result:** the JSON postMessage/eval transport did not remove the renderer Private Bytes plateau. This is a diagnostic build, not a production transport proposal or a confirmatory experiment.
+**Exploratory observation:** a renderer Private Bytes plateau was also observed with JSON postMessage/eval transport. This is a diagnostic build, not a production transport proposal or a confirmatory experiment.
+
+**Environment warning:** the operator subsequently reported concurrently playing Counter-Strike, with an unknown overlap start. All daytime comparisons here have uncontrolled competing RAM/CPU/GPU load and cannot establish a performance effect or equivalence. Retain the successful correctness checks and raw observations, and repeat comparative measurements on an idle machine. This warning does not assert conditions for the separate overnight pilot.
 
 The opt-in `postmessage-ipc` feature at `1a4967e9be7da2f49bdaf07053f752c9a888f87b` uses the public Tauri 2.12.5 `Builder::invoke_system` hook. It changes request delivery and response serialization/delivery together. Existing backend integrity and capability checks remain in force. Binary inputs, channels and custom serializers are outside its scope. Normal arm builds do not enable it.
 
