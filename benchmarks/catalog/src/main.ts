@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import type { Response } from "./catalog";
+import { createRenderer } from "./renderer";
 import { type WindowFailure, buildRunReport } from "./report";
 import { type CatalogConfig, type Plan, type WindowDeps, type WindowReport, runWindow } from "./window";
 
@@ -12,32 +12,6 @@ const table = document.querySelector<HTMLTableElement>("#page")!;
 const label = getCurrentWebviewWindow().label;
 const show = (text: string) => (status.textContent = text);
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-
-function render(response: Response): void {
-  const rows: string[][] =
-    response.kind === "aggregate"
-      ? response.totals.map((t) => [String(t.category), String(t.count), (t.sumCents / 100).toFixed(2)])
-      : (response.kind === "page" ? response.page.rows : response.records).map((r) => [
-          String(r.id),
-          r.name,
-          String(r.category),
-          (r.priceCents / 100).toFixed(2),
-          r.note,
-        ]);
-  table.replaceChildren(
-    ...rows.map((cells) => {
-      const tr = document.createElement("tr");
-      tr.replaceChildren(
-        ...cells.map((text) => {
-          const td = document.createElement("td");
-          td.textContent = text;
-          return td;
-        }),
-      );
-      return tr;
-    }),
-  );
-}
 
 function jsHeapBytes(): number | null {
   const memory = (performance as Performance & { memory?: { usedJSHeapSize: number } }).memory;
@@ -69,6 +43,7 @@ async function collect(): Promise<Record<string, WindowReport | WindowFailure>> 
 
 async function start(): Promise<void> {
   const config = await invoke<CatalogConfig>("catalog_config");
+  const render = createRenderer(table, config.textCache === true);
   const describe = `arm ${config.arm} (${config.armName}) · D${config.dataMib} · N${config.windows} · ${label}`;
   document.title = `Catalog Bench ${describe}`;
   const deps: WindowDeps = {

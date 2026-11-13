@@ -1,7 +1,7 @@
 // The run report written by the main window: configuration, plan, phase
 // times for splitting monitor samples, and every window's report.
 
-import type { CatalogConfig, Plan, WindowReport } from "./window";
+import { scheduledLoadSteps, type CatalogConfig, type Plan, type WindowReport } from "./window";
 
 export interface RunReport {
   schemaVersion: 1;
@@ -49,12 +49,28 @@ export function buildRunReport(
   const problems: string[] = [];
   const received = Object.values(windows);
   if (received.length !== config.windows) problems.push(`expected ${config.windows} window reports, got ${received.length}`);
+  const labels = ["main", ...Array.from({ length: config.windows - 1 }, (_, index) => `w${index + 1}`)];
+  for (const [label, report] of Object.entries(windows)) {
+    if (!labels.includes(label) || report.label !== label
+      || (isComplete(report) && (report.windowIndex !== labels.indexOf(label) || report.arm !== config.arm))) {
+      problems.push(`${label}: window identity or arm mismatch`);
+    }
+  }
   for (const failure of received.filter((w) => !isComplete(w))) {
     problems.push(`${failure.label}: did not finish: ${(failure as WindowFailure).error}`);
   }
   const all = received.filter(isComplete);
+  const expectedSteps = scheduledLoadSteps(plan, config.stepIntervalMs);
+  if (!Number.isSafeInteger(expectedSteps) || expectedSteps <= 0) problems.push("no valid load steps scheduled");
   for (const w of all) {
-    if (!w.passed) {
+    const counters = [w.load.scheduledSteps, w.load.completedSteps, w.load.failures, w.load.mismatches,
+      w.warmup.completedSteps, w.warmup.failures, w.warmup.mismatches];
+    const consistent = counters.every((value) => Number.isSafeInteger(value) && value >= 0)
+      && w.load.completedSteps === w.load.scheduledSteps
+      && w.load.scheduledSteps === expectedSteps
+      && w.load.failures === 0 && w.load.mismatches === 0
+      && w.warmup.failures === 0 && w.warmup.mismatches === 0 && w.firstError === null;
+    if (!w.passed || !consistent) {
       problems.push(
         `${w.label}: completed ${w.load.completedSteps}/${w.load.scheduledSteps}, failures ${w.load.failures + w.warmup.failures}, ` +
           `mismatches ${w.load.mismatches + w.warmup.mismatches}${w.firstError ? `, first error: ${w.firstError}` : ""}`,

@@ -2,12 +2,12 @@ import { describe, expect, it } from "vitest";
 import { buildRunReport } from "./report";
 import type { CatalogConfig, Plan, WindowReport } from "./window";
 
-const config = { windows: 2 } as CatalogConfig;
+const config = { windows: 2, arm: "B", stepIntervalMs: 500 } as CatalogConfig;
 const plan: Plan = { idleBeforeAtMs: 0, warmupAtMs: 1000, loadAtMs: 2000, loadEndMs: 4000, idleAfterEndMs: 5000 };
 
 function window(label: string, overrides: Partial<WindowReport["load"]> = {}, passed = true): WindowReport {
   return {
-    label, windowIndex: 0, arm: "B",
+    label, windowIndex: label === "main" ? 0 : Number(label.slice(1)), arm: "B",
     setup: { timeToFirstPageMs: 10, loadMs: null, indexMs: null, records: null },
     load: { scheduledSteps: 4, completedSteps: 4, failures: 0, mismatches: 0, overruns: 0, latencyMs: { p50: 1, p95: 3, max: 4 }, latencyByKindMs: {}, ...overrides },
     warmup: { completedSteps: 2, failures: 0, mismatches: 0 },
@@ -18,6 +18,33 @@ function window(label: string, overrides: Partial<WindowReport["load"]> = {}, pa
 }
 
 describe("buildRunReport", () => {
+  it("rejects unknown windows, mismatched labels, duplicate indexes and mixed arms", () => {
+    expect(buildRunReport(config, plan, { main: window("main"), other: window("other") }).passed).toBe(false);
+    for (const change of [
+      (w: WindowReport) => { w.label = "main"; },
+      (w: WindowReport) => { w.windowIndex = 0; },
+      (w: WindowReport) => { w.arm = "C"; },
+    ]) {
+      const w = window("w1"); change(w);
+      expect(buildRunReport(config, plan, { main: window("main"), w1: w }).passed).toBe(false);
+    }
+  });
+  it("does not trust a pass flag when counters or errors contradict it", () => {
+    for (const change of [
+      (w: WindowReport) => { w.load.failures = 1; },
+      (w: WindowReport) => { w.warmup.mismatches = 1; },
+      (w: WindowReport) => { w.load.completedSteps = 3; },
+      (w: WindowReport) => { w.load.scheduledSteps = 0; w.load.completedSteps = 0; },
+      (w: WindowReport) => { w.load.scheduledSteps = 3; w.load.completedSteps = 3; },
+      (w: WindowReport) => { w.load.failures = -1; },
+      (w: WindowReport) => { w.load.completedSteps = Number.NaN; },
+      (w: WindowReport) => { w.firstError = "late error"; },
+    ]) {
+      const w = window("w1");
+      change(w);
+      expect(buildRunReport(config, plan, { main: window("main"), w1: w }).passed).toBe(false);
+    }
+  });
   it("passes when every window passed and sums the totals", () => {
     const report = buildRunReport(config, plan, { main: window("main"), w1: window("w1") });
     expect(report.passed).toBe(true);

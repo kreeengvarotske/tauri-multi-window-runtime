@@ -27,7 +27,7 @@ function clock(start = 1_000_000) {
 
 function config(arm: "A" | "B" | "C" = "B"): CatalogConfig {
   return {
-    scenario: "M", arm, armName: arm, dataMib: 0, seed: 1, windows: 2, stepIntervalMs: 500,
+    scenario: "M", arm, armName: arm, dataMib: 0, seed: 1, windows: 2, stepIntervalMs: 500, textCache: false,
     idleBeforeSeconds: 1, warmupSeconds: 1, loadSeconds: 2, idleAfterSeconds: 1, records: 0, rustDataBytes: 0, automated: true,
   };
 }
@@ -140,6 +140,16 @@ describe("setupSource", () => {
 });
 
 describe("runWindow", () => {
+  it.each([[500, 2], [700, 1], [1500, 1], [10000, 0]])("counts the warmup-anchored cadence at interval %s", async (interval, expected) => {
+    const c = clock(0);
+    const p = { ...plan(0), loadEndMs: 3000, idleAfterEndMs: 4000 };
+    const result = await runWorkload(source(c), workload, p, interval, c.deps());
+    const report = buildReport({ ...config(), stepIntervalMs: interval }, "main", 0,
+      { timeToFirstPageMs: 1, loadMs: null, indexMs: null, records: null }, p, result, []);
+    expect(result.load).toHaveLength(expected);
+    expect(report.load.scheduledSteps).toBe(expected);
+    expect(report.passed).toBe(expected > 0);
+  });
   it("reports ready, waits for the plan and reports the whole run", async () => {
     const c = clock();
     const p = plan(c.t + 1000);
