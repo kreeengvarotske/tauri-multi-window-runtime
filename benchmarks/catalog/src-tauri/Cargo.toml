@@ -17,6 +17,9 @@ shared = []
 # Arm C: the same catalog as an `Operation` of the pinned preview runtime, with
 # pages, totals and records as `View`s behind the same three commands.
 framework = ["dep:shared-runtime"]
+# Diagnostic only: bypass the custom-protocol fetch transport using Tauri's
+# JSON postMessage fallback. Not enabled in normal arm builds or pilot runs.
+postmessage-ipc = []
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

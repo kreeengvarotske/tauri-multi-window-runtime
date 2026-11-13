@@ -71,6 +71,8 @@ pub fn run() {
     let builder = builder.manage(shared);
     #[cfg(feature = "framework")]
     let builder = builder.manage(runtime);
+    #[cfg(feature = "postmessage-ipc")]
+    let builder = builder.invoke_system(include_str!("postmessage-ipc-diagnostic.js"));
 
     builder
         .setup(move |app| {
