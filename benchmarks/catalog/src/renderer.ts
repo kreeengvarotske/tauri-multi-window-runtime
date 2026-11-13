@@ -15,10 +15,10 @@ interface Row {
 }
 
 /** Keeps a bounded set of rows, cells and text nodes for every response. */
-export function createRenderer(table: HTMLTableElement): (response: Response) => void {
+export function createRenderer(table: HTMLTableElement, cacheText = false): (response: Response) => void {
   const document = table.ownerDocument;
   const rows: Row[] = [];
-  const textCache = new BoundedTextCache();
+  const textCache = cacheText ? new BoundedTextCache() : null;
 
   function cell(row: Row, index: number, value: string): void {
     let target = row.cells[index];
@@ -31,7 +31,7 @@ export function createRenderer(table: HTMLTableElement): (response: Response) =>
       row.cells.push(target);
     }
     target.element.hidden = false;
-    const text = textCache.intern(value);
+    const text = textCache ? textCache.intern(value) : value;
     if (target.text.data !== text) target.text.data = text;
   }
 

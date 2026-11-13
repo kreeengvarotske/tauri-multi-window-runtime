@@ -30,7 +30,7 @@ Everything else is the same in all arms: the frontend (`src/window.ts` runs one 
 
 The table renderer reuses a bounded pool of at most 100 rows, 500 cells and 500 text nodes. It updates text in place and clears hidden cells instead of replacing the whole table on each step. This applies equally to A, B and C. Rendering changes require new executables and separate measurement evidence; the frozen pilot at `9e70573` retains its original renderer and results. No garbage collection is forced.
 
-The investigation candidate also canonicalizes displayed strings in a per-window LRU cache, capped at 8192 entries and a 1 MiB estimate of UTF-16 string payload. Oversized strings are displayed without caching. The estimate excludes Map/engine overhead, shared string backing storage and DOM/native allocations; it is not a process RAM limit. This candidate has unit coverage only and requires an idle-machine native comparison: cache retention and lookup work may cost RAM or CPU. It is not a demonstrated memory-saving fix.
+The investigation candidate can canonicalize displayed strings in a per-window LRU cache, capped at 8192 entries and a 1 MiB estimate of UTF-16 string payload. It is **off by default**; use `--text-cache on` to opt in, or `--text-cache off` explicitly. Every report records `config.textCache`. Oversized strings are displayed without caching. The estimate excludes Map/engine overhead, shared string backing storage and DOM/native allocations; it is not a process RAM limit. This candidate has unit coverage only and requires an idle-machine native comparison: cache retention and lookup work may cost RAM or CPU. It is not a demonstrated memory-saving fix. The normal triplet runner does not enable this experimental option.
 
 ## Data set
 

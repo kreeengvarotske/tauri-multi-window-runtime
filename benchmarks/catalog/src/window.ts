@@ -37,6 +37,7 @@ export interface CatalogConfig {
   records: number;
   rustDataBytes: number;
   automated: boolean;
+  textCache: boolean;
 }
 
 export interface WindowDeps {

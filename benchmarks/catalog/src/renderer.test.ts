@@ -37,10 +37,10 @@ class TestDocument {
   }
 }
 
-function harness() {
+function createHarness(cacheText: boolean) {
   const document = new TestDocument();
   const table = document.createElement("table");
-  return { document, table, render: createRenderer(table as unknown as HTMLTableElement) };
+  return { document, table, render: createRenderer(table as unknown as HTMLTableElement, cacheText) };
 }
 
 function elements(parent: TestElement): TestElement[] {
@@ -61,7 +61,8 @@ function page(records: CatalogRecord[]): Response {
   return { kind: "page", page: { total: records.length, rows: records } };
 }
 
-describe("catalog renderer", () => {
+describe.each([false, true])("catalog renderer (text cache: %s)", (cacheText) => {
+  const harness = () => createHarness(cacheText);
   it("allocates no rows or cells for an initially empty response", () => {
     const { document, table, render } = harness();
     render(page([]));
