@@ -12,7 +12,6 @@ const table = document.querySelector<HTMLTableElement>("#page")!;
 const label = getCurrentWebviewWindow().label;
 const show = (text: string) => (status.textContent = text);
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-const render = createRenderer(table);
 
 function jsHeapBytes(): number | null {
   const memory = (performance as Performance & { memory?: { usedJSHeapSize: number } }).memory;
@@ -44,6 +43,7 @@ async function collect(): Promise<Record<string, WindowReport | WindowFailure>> 
 
 async function start(): Promise<void> {
   const config = await invoke<CatalogConfig>("catalog_config");
+  const render = createRenderer(table, config.textCache === true);
   const describe = `arm ${config.arm} (${config.armName}) · D${config.dataMib} · N${config.windows} · ${label}`;
   document.title = `Catalog Bench ${describe}`;
   const deps: WindowDeps = {

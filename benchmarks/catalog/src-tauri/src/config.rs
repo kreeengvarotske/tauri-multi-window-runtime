@@ -46,6 +46,8 @@ pub struct CatalogConfig {
     #[serde(skip)]
     pub report_path: Option<PathBuf>,
     pub automated: bool,
+    /// Experimental display text reuse; recorded in every run report.
+    pub text_cache: bool,
 }
 
 impl CatalogConfig {
@@ -67,6 +69,7 @@ impl CatalogConfig {
             rust_data_bytes: 0,
             report_path: None,
             automated: false,
+            text_cache: false,
         };
         let mut args = args.into_iter();
         while let Some(name) = args.next() {
@@ -83,6 +86,13 @@ impl CatalogConfig {
                 "--duration" => config.load_seconds = number(&name, &value, 1, 600)?,
                 "--idle-after" => config.idle_after_seconds = number(&name, &value, 0, 600)?,
                 "--report" => config.report_path = Some(PathBuf::from(value)),
+                "--text-cache" => {
+                    config.text_cache = match value.as_str() {
+                        "off" => false,
+                        "on" => true,
+                        _ => return Err("--text-cache must be off or on".to_owned()),
+                    }
+                }
                 other => return Err(format!("unknown option {other}")),
             }
         }
@@ -150,5 +160,20 @@ mod tests {
         assert!(parse(&["--step-interval-ms", "50"]).is_err());
         assert!(parse(&["--bogus", "1"]).is_err());
         assert!(parse(&["--duration"]).is_err());
+    }
+
+    #[test]
+    fn text_cache_is_explicit_and_recorded() {
+        let default = parse(&[]).unwrap();
+        assert!(!default.text_cache);
+        for (mode, enabled) in [("off", false), ("on", true)] {
+            let config = parse(&["--text-cache", mode]).unwrap();
+            assert_eq!(config.text_cache, enabled);
+            let report = serde_json::to_value(&config).unwrap();
+            assert_eq!(report["textCache"], enabled);
+        }
+        assert!(parse(&["--text-cache", "true"]).is_err());
+        assert!(parse(&["--text-cache", ""]).is_err());
+        assert!(parse(&["--text-cache"]).is_err());
     }
 }

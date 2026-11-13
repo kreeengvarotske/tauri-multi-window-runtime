@@ -27,7 +27,7 @@ function clock(start = 1_000_000) {
 
 function config(arm: "A" | "B" | "C" = "B"): CatalogConfig {
   return {
-    scenario: "M", arm, armName: arm, dataMib: 0, seed: 1, windows: 2, stepIntervalMs: 500,
+    scenario: "M", arm, armName: arm, dataMib: 0, seed: 1, windows: 2, stepIntervalMs: 500, textCache: false,
     idleBeforeSeconds: 1, warmupSeconds: 1, loadSeconds: 2, idleAfterSeconds: 1, records: 0, rustDataBytes: 0, automated: true,
   };
 }
