@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { buildRunReport } from "./report";
 import type { CatalogConfig, Plan, WindowReport } from "./window";
 
-const config = { windows: 2, arm: "B" } as CatalogConfig;
+const config = { windows: 2, arm: "B", stepIntervalMs: 500 } as CatalogConfig;
 const plan: Plan = { idleBeforeAtMs: 0, warmupAtMs: 1000, loadAtMs: 2000, loadEndMs: 4000, idleAfterEndMs: 5000 };
 
 function window(label: string, overrides: Partial<WindowReport["load"]> = {}, passed = true): WindowReport {
@@ -34,6 +34,8 @@ describe("buildRunReport", () => {
       (w: WindowReport) => { w.load.failures = 1; },
       (w: WindowReport) => { w.warmup.mismatches = 1; },
       (w: WindowReport) => { w.load.completedSteps = 3; },
+      (w: WindowReport) => { w.load.scheduledSteps = 0; w.load.completedSteps = 0; },
+      (w: WindowReport) => { w.load.scheduledSteps = 3; w.load.completedSteps = 3; },
       (w: WindowReport) => { w.load.failures = -1; },
       (w: WindowReport) => { w.load.completedSteps = Number.NaN; },
       (w: WindowReport) => { w.firstError = "late error"; },
