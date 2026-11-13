@@ -15,6 +15,12 @@ function reports(p) {
       config: { scenario: 'M', arm: 'C', windows, dataMib: windows === 2 ? 16 : 64,
         seed: 1, stepIntervalMs: 500, idleBeforeSeconds: 20, warmupSeconds: 30,
         loadSeconds: 120, idleAfterSeconds: 30, textCache: run.mode === 'on', automated: true },
+      windows: Object.fromEntries(Array.from({ length: windows }, (_, index) => {
+        const label = index === 0 ? 'main' : `w${index}`;
+        return [label, { label, windowIndex: index, arm: 'C', passed: true, firstError: null,
+          load: { scheduledSteps: 240, completedSteps: 240, failures: 0, mismatches: 0 },
+          warmup: { failures: 0, mismatches: 0 } }];
+      })),
       totals: { scheduledSteps: windows * 240, completedSteps: windows * 240, failures: 0, mismatches: 0, overruns: 0 } }];
   }));
 }
@@ -54,7 +60,25 @@ test('retains failed and incomplete application runs without replacing them', ()
   const audit = auditReports(p, r);
   assert.equal(audit.rows.length, 12);
   assert.equal(audit.rows.filter(row => !row.appPassed).length, 3);
-  assert.deepEqual(audit.rows[0].problems, ['checksum failure']);
+  assert.ok(audit.rows[0].problems.includes('checksum failure'));
+});
+
+test('does not accept successful totals with missing or contradictory window evidence', () => {
+  const p = plan();
+  for (const mutate of [
+    r => { delete r.windows.w1; },
+    r => { r.windows.w1.windowIndex = 0; },
+    r => { r.windows.w1.load.mismatches = 1; },
+    r => { r.windows.w1.warmup.failures = 1; },
+    r => { r.windows.w1.passed = false; },
+    r => { r.problems = ['unacknowledged failure']; },
+    r => { delete r.problems; },
+  ]) {
+    const r = reports(p); mutate(r[p.runs[0].name]);
+    const row = auditReports(p, r).rows[0];
+    assert.equal(row.appPassed, false);
+    assert.ok(row.problems.length > 0);
+  }
 });
 
 test('CLI never overwrites an output and rejects a modified plan before writing an audit', () => {

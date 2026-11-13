@@ -41,9 +41,23 @@ export function auditReports(plan, reports) {
     if (typeof report.passed !== 'boolean') throw new Error(`${run.name}: missing application pass flag`);
     const total = report.totals;
     const scheduled = windows * plan.loadSeconds * 1000 / plan.stepIntervalMs;
-    const appPassed = report.passed && total?.scheduledSteps === scheduled && total?.completedSteps === scheduled
+    const reasons = [];
+    if (!Array.isArray(report.problems) || report.problems.length) reasons.push('missing or nonempty application problems');
+    const labels = ['main', ...Array.from({ length: windows - 1 }, (_, index) => `w${index + 1}`)];
+    if (!isDeepStrictEqual(Object.keys(report.windows ?? {}).sort(), labels.slice().sort())) reasons.push('missing or unexpected windows');
+    for (const [index, label] of labels.entries()) {
+      const window = report.windows?.[label];
+      if (window?.label !== label || window?.windowIndex !== index || window?.arm !== 'C' || window?.passed !== true
+        || window?.firstError !== null || window?.load?.scheduledSteps !== scheduled / windows
+        || window?.load?.completedSteps !== scheduled / windows || window?.load?.failures !== 0
+        || window?.load?.mismatches !== 0 || window?.warmup?.failures !== 0 || window?.warmup?.mismatches !== 0) {
+        reasons.push(`${label}: incomplete, inconsistent or failed window report`);
+      }
+    }
+    const appPassed = reasons.length === 0 && report.passed && total?.scheduledSteps === scheduled && total?.completedSteps === scheduled
       && total?.failures === 0 && total?.mismatches === 0 && total?.overruns === 0;
-    return { ...run, appPassed, problems: Array.isArray(report.problems) ? report.problems : [] };
+    if (!appPassed && !reasons.length) reasons.push('failed application flag or inconsistent totals');
+    return { ...run, appPassed, problems: [...(Array.isArray(report.problems) ? report.problems : []), ...reasons] };
   });
   return { kind: 'text-cache-application-audit', scenarioRevision: plan.scenarioRevision,
     executableSha256: plan.executableSha256, rows,
