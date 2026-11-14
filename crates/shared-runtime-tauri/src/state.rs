@@ -350,6 +350,52 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn timed_out_shutdown_refuses_new_calls_and_can_resume_cleanup() {
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let mut state = shared(
+            1,
+            Arc::new(Gate {
+                entered: Mutex::new(Some(entered_tx)),
+                release: Mutex::new(Some(release_rx)),
+            }),
+        );
+        state.abort_wait = Duration::from_millis(20);
+        let state = Arc::new(state);
+        let first = tokio::spawn({
+            let state = Arc::clone(&state);
+            async move {
+                state
+                    .view::<Strings, All>(&Caller::window("main"), 10, 1024, CallOptions::default())
+                    .await
+            }
+        });
+        tokio::task::spawn_blocking(move || {
+            entered_rx.recv_timeout(Duration::from_secs(5)).unwrap()
+        })
+        .await
+        .unwrap();
+        // Synchronous serialization cannot be aborted. The adapter's outer
+        // timeout returns false while the runtime remains closed to new work.
+        assert!(!state.shutdown().await);
+        let late = state
+            .view::<Strings, All>(&Caller::window("late"), 10, 1024, CallOptions::default())
+            .await
+            .unwrap_err();
+        assert_eq!(late.code(), AdapterErrorCode::ShuttingDown);
+        release_tx.send(()).unwrap();
+        assert!(first.await.unwrap().is_ok());
+        assert!(
+            state.shutdown().await,
+            "retry must finish cleanup after serialization returns"
+        );
+        let stats = state.runtime().stats();
+        assert_eq!(stats.cache_weight_bytes(), 0);
+        assert_eq!(stats.active_projections, 0);
+        assert_eq!(stats.queued_projections, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn full_projection_queue_maps_to_the_stable_overloaded_envelope() {
         use std::{
             future::Future,
