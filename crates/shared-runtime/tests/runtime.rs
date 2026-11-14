@@ -1607,6 +1607,253 @@ mod projection_queue {
     }
 }
 
+mod preparation_lifecycle {
+    use super::*;
+    use std::{
+        hash::{Hash, Hasher},
+        sync::{Mutex, mpsc},
+    };
+
+    struct Pause {
+        entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: Mutex<Option<mpsc::Receiver<()>>>,
+    }
+
+    impl Pause {
+        fn wait_once(&self) {
+            // Never hold this mutex while waiting: the reopened caller must
+            // be able to prepare its own source before the old one resumes.
+            let receiver = self.release.lock().unwrap().take();
+            if let Some(receiver) = receiver {
+                self.entered
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap()
+                    .send(())
+                    .unwrap();
+                receiver
+                    .recv_timeout(LIMIT)
+                    .expect("test releases paused preparation");
+            }
+        }
+    }
+
+    fn pause() -> (
+        Arc<Pause>,
+        tokio::sync::oneshot::Receiver<()>,
+        mpsc::Sender<()>,
+    ) {
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let (release, receiver) = mpsc::channel();
+        (
+            Arc::new(Pause {
+                entered: Mutex::new(Some(entered)),
+                release: Mutex::new(Some(receiver)),
+            }),
+            ready,
+            release,
+        )
+    }
+
+    struct PausedLength(Arc<Pause>);
+
+    impl View<Load> for PausedLength {
+        const NAME: &'static str = "test.paused-length";
+        type Request = u32;
+        type Response = usize;
+        fn source(&self, request: &u32) -> u32 {
+            self.0.wait_once();
+            *request
+        }
+        fn max_items(&self) -> usize {
+            1
+        }
+        fn max_response_bytes(&self) -> usize {
+            size_of::<usize>()
+        }
+        fn project(
+            &self,
+            output: &Vec<u8>,
+            request: u32,
+            budget: &mut ResponseBudget,
+        ) -> Result<usize, ViewError> {
+            <LoadLength as View<Load>>::project(&LoadLength, output, request, budget)
+        }
+        fn items(_: &usize) -> usize {
+            1
+        }
+        fn response_bytes(_: &usize) -> usize {
+            size_of::<usize>()
+        }
+    }
+
+    enum Invalidation {
+        Window,
+        Runtime,
+        Operation,
+        Key,
+    }
+
+    async fn source_preparation_isolation(scope: ScopeRule, invalidation: Invalidation) {
+        let op = Load::new(scope);
+        let (pause, ready, release) = pause();
+        let runtime = Runtime::builder(config())
+            .unwrap()
+            .register(op.clone(), budget(1024))
+            .unwrap()
+            .view::<Load, _>(PausedLength(pause))
+            .unwrap()
+            .build();
+        let source = runtime.operation::<Load>().unwrap();
+        let view = runtime.view::<Load, PausedLength>().unwrap();
+        let old = tokio::spawn(async move { view.get(&window("w1"), 8, NO_OPTIONS).await });
+        tokio::time::timeout(LIMIT, ready).await.unwrap().unwrap();
+        match invalidation {
+            Invalidation::Window => {
+                assert_eq!(runtime.forget_window(&window("w1")), 0);
+            }
+            Invalidation::Runtime => runtime.clear(),
+            Invalidation::Operation => source.clear(),
+            Invalidation::Key => {
+                assert!(!source.invalidate(&8));
+            }
+        }
+        let reopened = source.get(&window("w1"), 8, NO_OPTIONS).await.unwrap();
+        assert_eq!(op.executions(), 1);
+        release.send(()).unwrap();
+        assert_eq!(
+            tokio::time::timeout(LIMIT, old)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            8
+        );
+        assert_eq!(
+            op.executions(),
+            2,
+            "old preparation consumed the newer cache generation"
+        );
+        let current = source.get(&window("w1"), 8, NO_OPTIONS).await.unwrap();
+        assert!(
+            Arc::ptr_eq(&current, &reopened),
+            "old preparation replaced the newer cache"
+        );
+        assert_eq!(stats(&runtime).cache_entries, 1);
+        assert_balanced(&stats(&runtime));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn destruction_during_source_derivation_keeps_reopened_cache_separate() {
+        source_preparation_isolation(ScopeRule::PerWindow, Invalidation::Window).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn runtime_clear_covers_source_derivation() {
+        source_preparation_isolation(ScopeRule::Shared, Invalidation::Runtime).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn operation_clear_covers_source_derivation() {
+        source_preparation_isolation(ScopeRule::Shared, Invalidation::Operation).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn key_invalidation_covers_source_derivation() {
+        source_preparation_isolation(ScopeRule::Shared, Invalidation::Key).await;
+    }
+
+    struct CloneInput {
+        id: u32,
+        pause: Arc<Pause>,
+    }
+    impl Clone for CloneInput {
+        fn clone(&self) -> Self {
+            self.pause.wait_once();
+            Self {
+                id: self.id,
+                pause: Arc::clone(&self.pause),
+            }
+        }
+    }
+    impl PartialEq for CloneInput {
+        fn eq(&self, other: &Self) -> bool {
+            self.id == other.id
+        }
+    }
+    impl Eq for CloneInput {}
+    impl Hash for CloneInput {
+        fn hash<H: Hasher>(&self, state: &mut H) {
+            self.id.hash(state);
+        }
+    }
+
+    struct CloneSource(Arc<AtomicUsize>);
+    impl Operation for CloneSource {
+        const NAME: &'static str = "test.clone-source";
+        type Params = CloneInput;
+        type Output = usize;
+        type Error = ();
+        fn policy(&self) -> CachePolicy {
+            CachePolicy::Forever
+        }
+        fn scope(&self) -> ScopeRule {
+            ScopeRule::PerWindow
+        }
+        fn weight(&self, _: &usize) -> usize {
+            size_of::<usize>()
+        }
+        async fn run(&self, _: OpContext, _: CloneInput) -> Result<usize, ()> {
+            Ok(self.0.fetch_add(1, Ordering::SeqCst) + 1)
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn destruction_during_direct_parameter_clone_keeps_reopened_cache_separate() {
+        let (pause, ready, release) = pause();
+        let runtime = Runtime::builder(config())
+            .unwrap()
+            .register(CloneSource(Arc::default()), budget(1024))
+            .unwrap()
+            .build();
+        let source = runtime.operation::<CloneSource>().unwrap();
+        let params = CloneInput {
+            id: 8,
+            pause: Arc::clone(&pause),
+        };
+        let old = tokio::spawn({
+            let source = source.clone();
+            async move { source.get(&window("w1"), params, NO_OPTIONS).await }
+        });
+        tokio::time::timeout(LIMIT, ready).await.unwrap().unwrap();
+        runtime.forget_window(&window("w1"));
+        let params = || CloneInput {
+            id: 8,
+            pause: Arc::clone(&pause),
+        };
+        let reopened = source
+            .get(&window("w1"), params(), NO_OPTIONS)
+            .await
+            .unwrap();
+        assert_eq!(*reopened, 1);
+        release.send(()).unwrap();
+        let old = tokio::time::timeout(LIMIT, old)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(*old, 2, "old direct call consumed the reopened cache");
+        let current = source
+            .get(&window("w1"), params(), NO_OPTIONS)
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(&current, &reopened));
+        assert_eq!(source.stats().cache_entries, 1);
+        assert_balanced(&source.stats());
+    }
+}
+
 #[tokio::test]
 async fn forgotten_window_queued_view_cannot_repopulate_its_cache() {
     use std::{

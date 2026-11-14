@@ -14,6 +14,9 @@ pub trait View<O: Operation>: Send + Sync + 'static {
     /// Called after reserving admission or a bounded queue position, before
     /// waiting for a projection slot, so a queued call can
     /// register its invalidation identity without retaining a source output.
+    /// The runtime captures scope invalidation before this method starts;
+    /// destroying a window or clearing while it runs cannot make its old
+    /// call consume a newer cache generation.
     /// Keep this cheap: derive parameters only, without loading data. Cache
     /// lookup and operation execution still happen after admission.
     fn source(&self, request: &Self::Request) -> O::Params;

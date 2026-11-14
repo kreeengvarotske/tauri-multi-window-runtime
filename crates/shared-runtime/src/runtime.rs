@@ -1,3 +1,4 @@
+use crate::preparation::{Epoch, Preparation, Preparations, Scope};
 use runtime_core::{CacheBudget, CachedService, PreparedServiceCall, ServiceRunKind};
 use std::{
     any::{Any, TypeId},
@@ -112,8 +113,8 @@ impl Shared {
 /// Which callers share a cached result.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum ScopeKey {
-    Shared,
-    Window(Arc<str>),
+    Current(Scope),
+    Discarded(Epoch),
 }
 
 /// Error stored by the core service: an operation error, or no slot.
@@ -159,6 +160,39 @@ struct OpEntry<O: Operation> {
     service: Service<O>,
     budget_bytes: usize,
     counters: Counters,
+    preparations: Preparations,
+}
+
+impl<O: Operation> OpEntry<O> {
+    fn begin_preparation(&self, caller: &Caller) -> Preparation<'_> {
+        let scope = match self.scope {
+            ScopeRule::Shared => Scope::Shared,
+            ScopeRule::PerWindow => Scope::Window(caller.window_key()),
+        };
+        self.preparations.enter(scope)
+    }
+
+    fn prepare(&self, registration: Preparation<'_>, params: &O::Params) -> Prepared<'_, O> {
+        // Key preparation invokes application Clone/Hash code without holding
+        // the scope registry lock. After this transfer the core owns invalidation.
+        let prepared = self.service.prepare_call((
+            ScopeKey::Current(registration.scope.clone()),
+            params.clone(),
+        ));
+        if !registration.invalidated() {
+            return prepared;
+        }
+        drop(prepared);
+        // Never invalidate the current key here: it may already belong to a
+        // reopened window. A private discarded key cannot read/join that work.
+        let key = (
+            ScopeKey::Discarded(registration.epoch.clone()),
+            params.clone(),
+        );
+        let prepared = self.service.prepare_call(key.clone());
+        self.service.invalidate(&key);
+        prepared
+    }
 }
 
 /// Type-erased access for stats, window lifecycle and shutdown.
@@ -193,14 +227,16 @@ impl<O: Operation> ErasedOp for OpEntry<O> {
     }
 
     fn clear(&self) {
+        self.preparations.invalidate_all();
         self.service.clear();
     }
 
     fn forget_window(&self, label: &str) -> usize {
+        self.preparations.forget_window(label);
         match self.scope {
             ScopeRule::Shared => 0,
             ScopeRule::PerWindow => self.service.invalidate_matching(
-                |(scope, _)| matches!(scope, ScopeKey::Window(window) if &**window == label),
+                |(scope, _)| matches!(scope, ScopeKey::Current(Scope::Window(window)) if &**window == label),
             ),
         }
     }
@@ -281,6 +317,7 @@ impl RuntimeBuilder {
             op,
             budget_bytes: config.cache_budget_bytes,
             counters: Counters::default(),
+            preparations: Preparations::default(),
         });
         self.erased.push(entry.clone());
         self.ops.insert(type_id, entry);
@@ -557,9 +594,13 @@ impl<O: Operation> OperationHandle<O> {
         options: CallOptions,
         prepared: Option<Prepared<'_, O>>,
     ) -> Result<Arc<O::Output>, CallError<O::Error>> {
+        let started = Instant::now();
         let entry = &*self.entry;
         let shared = &*self.shared;
         let counters = &entry.counters;
+        // Capture identity before the call is counted in flight and before
+        // any application-defined parameter cloning can run.
+        let registration = prepared.is_none().then(|| entry.begin_preparation(caller));
         bump(&counters.requests);
         // Enter before reading the phase so that `shutdown` never sees an
         // idle runtime while this call is about to start.
@@ -575,17 +616,17 @@ impl<O: Operation> OperationHandle<O> {
         }
 
         let deadline = options.deadline.unwrap_or(shared.config.default_deadline);
-        let started = Instant::now();
         if deadline.is_zero() {
             outcome.record(&counters.deadline_exceeded, true);
             return Err(CallError::DeadlineExceeded);
         }
 
-        let scope = match entry.scope {
-            ScopeRule::Shared => ScopeKey::Shared,
-            ScopeRule::PerWindow => ScopeKey::Window(caller.window_key()),
-        };
-        let key = prepared.is_none().then(|| (scope, params.clone()));
+        let prepared = prepared.unwrap_or_else(|| {
+            entry.prepare(
+                registration.expect("unprepared call has a registration"),
+                &params,
+            )
+        });
         let ctx = OpContext {
             phase: phase.clone(),
         };
@@ -610,17 +651,7 @@ impl<O: Operation> OperationHandle<O> {
                 .await
                 .map_err(|error| Failure::Op(Arc::new(error)))
         };
-        let run = async {
-            match prepared {
-                Some(call) => call.run_with_metadata(operation).await,
-                None => {
-                    entry
-                        .service
-                        .run_with_metadata(key.expect("unprepared call has a key"), operation)
-                        .await
-                }
-            }
-        };
+        let run = prepared.run_with_metadata(operation);
         let run = tokio::select! {
             biased;
             _ = phase.wait_for(|phase| *phase == Phase::Aborted) => {
@@ -663,12 +694,19 @@ impl<O: Operation> OperationHandle<O> {
     /// Drops the cached output for `params` in every scope, and keeps
     /// executions already in flight from caching theirs. Returns `true` if
     /// any cached entry existed.
+    ///
+    /// Calls still deriving or cloning parameters have no registered key;
+    /// these preparations are invalidated conservatively. Unrelated keys
+    /// already registered with the core keep their invalidation identity.
     pub fn invalidate(&self, params: &O::Params) -> bool {
         let entry = &*self.entry;
+        // A pending derivation has no parameter key yet. Conservatively
+        // invalidate those preparations; registered unrelated keys stay current.
+        entry.preparations.invalidate_all();
         match entry.scope {
             ScopeRule::Shared => entry
                 .service
-                .invalidate(&(ScopeKey::Shared, params.clone())),
+                .invalidate(&(ScopeKey::Current(Scope::Shared), params.clone())),
             ScopeRule::PerWindow => {
                 entry
                     .service
@@ -680,7 +718,7 @@ impl<O: Operation> OperationHandle<O> {
 
     /// Drops every cached output of this operation.
     pub fn clear(&self) {
-        self.entry.service.clear();
+        self.entry.clear();
     }
 
     pub fn stats(&self) -> OperationStats {
@@ -739,7 +777,9 @@ impl<O: Operation, V: View<O>> ViewHandle<O, V> {
         options: CallOptions,
         finish: impl FnOnce(V::Response) -> T,
     ) -> Result<T, ViewCallError<O::Error>> {
+        let started = Instant::now();
         let shared = &*self.source.shared;
+        let registration = self.source.entry.begin_preparation(caller);
         // The whole call is in flight, `finish` included, so that `shutdown`
         // does not return or clear the caches while a response is still
         // being built or serialized. Entered before reading the phase, as in
@@ -750,7 +790,6 @@ impl<O: Operation, V: View<O>> ViewHandle<O, V> {
             return Err(ViewCallError::Source(CallError::ShuttingDown));
         }
         let deadline = options.deadline.unwrap_or(shared.config.default_deadline);
-        let started = Instant::now();
         let remaining = || {
             let time = deadline.saturating_sub(started.elapsed());
             if time.is_zero() {
@@ -779,18 +818,9 @@ impl<O: Operation, V: View<O>> ViewHandle<O, V> {
             None
         };
         let params = self.view.source(&request);
-        let scope = match self.source.entry.scope {
-            ScopeRule::Shared => ScopeKey::Shared,
-            ScopeRule::PerWindow => ScopeKey::Window(caller.window_key()),
-        };
-        // Register invalidation identity before waiting, but retain no source
-        // output until projection admission. Closing a window or clearing the
-        // runtime during the wait must also invalidate this queued call.
-        let prepared = self
-            .source
-            .entry
-            .service
-            .prepare_call((scope, params.clone()));
+        // Transfer the pre-parameter identity to the core before waiting.
+        // Neither registration retains a source output.
+        let prepared = self.source.entry.prepare(registration, &params);
         let projection_wait = remaining()?;
         // Waiting for a slot ends at the caller's deadline or when the
         // shutdown grace ends, whichever comes first.
