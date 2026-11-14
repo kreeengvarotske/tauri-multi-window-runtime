@@ -1,9 +1,11 @@
 # MemoryInfra subsystem diagnosis
 
-Prepared, not run natively. This is a locating probe after the failed
+The two-snapshot collector passed native qualification on WebView2
+`157.0.4341.46`; the original ten-dump attempt failed with buffer loss.
+This is a locating probe after the failed
 text-cache and DOM-getter candidates, not a replacement pilot, confirmation
 or a claim of memory savings. The collector's protocol lifecycle has mock
-tests; compatibility with the pinned native WebView2 still needs validation.
+tests; other WebView2 versions still need their own validation.
 
 ## Scope and next execution
 
@@ -79,6 +81,9 @@ ordinary runs. No system-wide tracing or browser settings are changed.
   remains necessary for a product claim.
 
 ## Primary references
+
+Native records and the identified layout allocation types are described in
+[the qualification report](../../../../docs/benchmark/reports/catalog-memoryinfra-2026-11-14.md).
 
 - [Chromium MemoryInfra](https://chromium.googlesource.com/chromium/src/+/main/docs/memory-infra/README.md)
   describes subsystem accounting and overlapping size/effective-size values.
