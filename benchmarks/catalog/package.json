@@ -8,7 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "tauri": "tauri",
-    "test": "vitest run && node --test scripts/TextCacheDiagnostic.test.mjs"
+    "test": "vitest run && node --test scripts/TextCacheDiagnostic.test.mjs scripts/MemoryInfraDiagnostic.test.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2"
