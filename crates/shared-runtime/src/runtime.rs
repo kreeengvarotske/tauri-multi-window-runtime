@@ -41,7 +41,8 @@ pub enum RegistryError {
         view: &'static str,
         operation: &'static str,
     },
-    /// A handle was requested for a type that was never registered.
+    /// A handle was requested for an operation or source/view pairing that
+    /// was never registered.
     NotRegistered(&'static str),
     /// The runtime limits are invalid.
     Config(ConfigError),
@@ -205,13 +206,19 @@ impl<O: Operation> ErasedOp for OpEntry<O> {
     }
 }
 
+/// A view instance and the source operation selected at registration.
+struct RegisteredView {
+    source: TypeId,
+    value: Arc<dyn Any + Send + Sync>,
+}
+
 /// Builds a [`Runtime`]. Operations and views are registered once, at startup.
 pub struct RuntimeBuilder {
     shared: Arc<Shared>,
     names: HashSet<&'static str>,
     ops: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
     erased: Vec<Arc<dyn ErasedOp>>,
-    views: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
+    views: HashMap<TypeId, RegisteredView>,
     allocated_budget: usize,
 }
 
@@ -295,7 +302,13 @@ impl RuntimeBuilder {
         if !self.names.insert(V::NAME) {
             return Err(RegistryError::DuplicateName(V::NAME));
         }
-        self.views.insert(type_id, Arc::new(view));
+        self.views.insert(
+            type_id,
+            RegisteredView {
+                source: TypeId::of::<O>(),
+                value: Arc::new(view),
+            },
+        );
         Ok(self)
     }
 
@@ -314,7 +327,7 @@ pub struct Runtime {
     shared: Arc<Shared>,
     ops: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
     erased: Vec<Arc<dyn ErasedOp>>,
-    views: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
+    views: HashMap<TypeId, RegisteredView>,
 }
 
 impl Runtime {
@@ -339,8 +352,8 @@ impl Runtime {
         let view = self
             .views
             .get(&TypeId::of::<V>())
-            .cloned()
-            .and_then(|view| view.downcast::<V>().ok())
+            .filter(|view| view.source == TypeId::of::<O>())
+            .and_then(|view| Arc::clone(&view.value).downcast::<V>().ok())
             .ok_or(RegistryError::NotRegistered(V::NAME))?;
         Ok(ViewHandle {
             source: self.operation::<O>()?,

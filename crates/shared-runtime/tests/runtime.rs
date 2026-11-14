@@ -739,6 +739,57 @@ async fn views_are_bounded_and_share_one_source_output() {
 
 // --------------------------------------------------------------- registry
 
+// A downstream view type can implement the trait for multiple sources.
+impl View<Blob> for LoadLength {
+    const NAME: &'static str = "test.blob.length";
+    type Request = ();
+    type Response = usize;
+
+    fn source(&self, _: &()) {}
+    fn max_items(&self) -> usize {
+        1
+    }
+    fn max_response_bytes(&self) -> usize {
+        size_of::<usize>()
+    }
+    fn project(
+        &self,
+        output: &Vec<u8>,
+        _: (),
+        budget: &mut ResponseBudget,
+    ) -> Result<usize, ViewError> {
+        budget.take(size_of::<usize>())?;
+        Ok(output.len())
+    }
+    fn items(_: &usize) -> usize {
+        1
+    }
+    fn response_bytes(_: &usize) -> usize {
+        size_of::<usize>()
+    }
+}
+
+#[test]
+fn view_lookup_rejects_an_operation_pair_that_was_never_registered() {
+    let runtime = Runtime::builder(config())
+        .unwrap()
+        .register(Load::new(ScopeRule::Shared), budget(128))
+        .unwrap()
+        .register(Blob, budget(128))
+        .unwrap()
+        .view::<Load, _>(LoadLength)
+        .unwrap()
+        .build();
+    assert!(runtime.view::<Load, LoadLength>().is_ok());
+    assert!(
+        matches!(
+            runtime.view::<Blob, LoadLength>(),
+            Err(RegistryError::NotRegistered("test.blob.length"))
+        ),
+        "a registered view type must not authorize a different source pairing"
+    );
+}
+
 #[test]
 fn registry_rejects_duplicates_missing_sources_and_bad_limits() {
     let builder = || Runtime::builder(config()).unwrap();
@@ -1306,7 +1357,7 @@ mod projection_queue {
             request: u32,
             budget: &mut ResponseBudget,
         ) -> Result<usize, ViewError> {
-            LoadLength.project(output, request, budget)
+            <LoadLength as View<Load>>::project(&LoadLength, output, request, budget)
         }
         fn items(_: &usize) -> usize {
             1
