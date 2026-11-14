@@ -7,6 +7,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 const errorText = error => error instanceof Error ? error.message : String(error);
 const MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
+const DEFAULT_SAMPLES = 2;
 const ALLOWED_METHODS = new Set(['Tracing.start', 'Tracing.requestMemoryDump', 'Tracing.end']);
 
 export function browserSocket(raw, port) {
@@ -36,7 +37,7 @@ export function traceParameters() {
 
 /** The client owns only this fresh browser's CDP connection, never a global OS trace. */
 export async function collectMemoryInfra(client, {
-  samples = 10, intervalMs = 5000, write, shouldStop = () => false, sleep = delay,
+  samples = DEFAULT_SAMPLES, intervalMs = 5000, write, shouldStop = () => false, sleep = delay,
   completionTimeoutMs = 5000,
 } = {}) {
   if (!Number.isInteger(samples) || samples < 1 || samples > 12
@@ -211,7 +212,8 @@ async function main(args) {
   try {
     client = await connect(port);
     write({ kind: 'start', diagnosticOnly: true, version: client.version, port,
-      methods: [...ALLOWED_METHODS], forceGc: false, outputLimitBytes: MAX_OUTPUT_BYTES });
+      methods: [...ALLOWED_METHODS], forceGc: false, requestedSamples: DEFAULT_SAMPLES,
+      outputLimitBytes: MAX_OUTPUT_BYTES });
     summary = await collectMemoryInfra(client, { write, shouldStop: () => existsSync(stopFile) });
   } catch (error) { summary = { diagnosticOnly: true, success: false, errors: [errorText(error)] }; }
   finally { client?.close(); closeSync(fd); }

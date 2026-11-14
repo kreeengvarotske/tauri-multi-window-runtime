@@ -29,10 +29,15 @@ The collector discovers `/json/version` without redirects, accepts only a
 browser WebSocket on the same loopback port and sends three CDP methods:
 `Tracing.start`, `Tracing.requestMemoryDump` and `Tracing.end`. It requests
 memory-only Chrome tracing with an 8 MiB buffer, no automatic dump triggers,
-and ten manual detailed dumps approximately five seconds apart. Output is
+and two manual detailed dumps approximately five seconds apart. Output is
 capped at 32 MiB. Existing output and summary files are never overwritten.
 Native support for the requested trace configuration must be checked, not
 inferred from mocked protocol tests.
+
+The original ten-dump native attempt filled the buffer and reported data
+loss after five requests. It remains a failed attempt. The narrower probe
+retains the same limits and must be scheduled inside the app's load phase;
+it does not provide a complete multi-phase profile.
 
 Every dump explicitly uses `deterministic: false`. There is no forced GC,
 evaluation, heap snapshot, OS trace, memory-pressure notification or app
