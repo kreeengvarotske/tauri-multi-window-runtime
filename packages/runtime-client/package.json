@@ -13,8 +13,10 @@
   },
   "files": ["src", "README.md", "LICENSE-MIT", "LICENSE-APACHE"],
   "scripts": {
-    "test": "node --test test/client.test.mjs",
-    "typecheck": "tsc -p test/tsconfig.json"
+    "test": "node --test test/client.test.mjs test/demo.test.mjs",
+    "typecheck": "tsc -p test/tsconfig.json",
+    "sync-demo": "node scripts/sync-demo.mjs --write",
+    "check-demo": "node scripts/sync-demo.mjs --check"
   },
   "devDependencies": { "typescript": "6.0.3" }
 }

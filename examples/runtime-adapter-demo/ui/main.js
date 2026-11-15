@@ -1,17 +1,18 @@
-// Adapter commands take the request as UTF-8 JSON bytes and answer with
-// JSON bytes; errors arrive as { code, message }.
+import { createCommand, RuntimeCommandError } from './runtime-client.js';
+
 const { invoke } = window.__TAURI__.core;
 const encoder = new TextEncoder();
-const decoder = new TextDecoder();
 
-async function call(command, request) {
-  const body = request === undefined ? undefined : encoder.encode(JSON.stringify(request));
-  const bytes = await invoke(command, body);
-  return JSON.parse(decoder.decode(bytes));
+function call(command, request) {
+  return createCommand(invoke, command)(request);
 }
 
 const out = document.querySelector("#out");
-const show = (value) => (out.textContent = JSON.stringify(value, null, 2));
+function present(value) {
+  // Error.message is not enumerable; preserve the adapter's event/report shape.
+  return value instanceof RuntimeCommandError ? { code: value.code, message: value.message } : value;
+}
+const show = (value) => (out.textContent = JSON.stringify(present(value), null, 2));
 document.querySelector("#page").onclick = () => call("demo_catalog_page", { offset: 0, limit: 10 }).then(show, show);
 document.querySelector("#note").onclick = () => call("demo_window_note").then(show, show);
 
@@ -21,7 +22,7 @@ async function selfTest(role) {
     try {
       return { ok: await promise };
     } catch (error) {
-      return { error };
+      return { error: present(error) };
     }
   };
   if (role === "main") {
