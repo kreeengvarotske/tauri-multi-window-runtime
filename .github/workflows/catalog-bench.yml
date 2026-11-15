@@ -53,6 +53,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Test-CatalogJobCpu.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Diagnostic owned-memory reader, including native process ownership
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File scripts/Test-OwnedMemory.ps1 -Native
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Test-OwnedMemory.ps1 -Native
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Pilot dry run (72 runs, no app started), manifest freeze and refusals, PowerShell 7 and Windows PowerShell 5.1
         shell: pwsh
         run: |
