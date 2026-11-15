@@ -1,6 +1,10 @@
 # Project completion plan and audit snapshot
 Created: 2026-11-14 (Europe/Vienna)
 
+First-release priorities were superseded on 2026-11-15 by the
+[developer preview completion scope](2026-11-15-developer-preview-focus.md).
+The historical audit and measurement results below remain unchanged.
+
 ## Outcome and evidence boundary
 
 Deliver a usable Tauri v2 framework that shares Rust application data and work

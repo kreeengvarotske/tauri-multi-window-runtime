@@ -1,0 +1,45 @@
+name: Runtime frontend client
+
+on:
+  pull_request:
+    paths:
+      - 'packages/runtime-client/**'
+      - '.github/workflows/runtime-client.yml'
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  client:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: packages/runtime-client/package-lock.json
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+        working-directory: packages/runtime-client
+      - run: npm test && npm run typecheck
+        working-directory: packages/runtime-client
+      - name: Install and use the packed package in an independent project
+        shell: bash
+        run: |
+          artifact_dir="$RUNNER_TEMP/runtime-client-artifact"
+          consumer_dir="$RUNNER_TEMP/runtime-client-consumer"
+          mkdir "$artifact_dir" "$consumer_dir"
+          npm pack ./packages/runtime-client --ignore-scripts --pack-destination "$artifact_dir"
+          printf '{"private":true,"type":"module"}\n' > "$consumer_dir/package.json"
+          archives=("$artifact_dir"/*.tgz)
+          test "${#archives[@]}" -eq 1
+          npm install --prefix "$consumer_dir" "${archives[0]}" --ignore-scripts --no-audit --no-fund --offline
+          cp packages/runtime-client/test/packed-consumer.mjs "$consumer_dir/index.mjs"
+          cp packages/runtime-client/test/types.ts "$consumer_dir/types.ts"
+          cp packages/runtime-client/test/tsconfig.json "$consumer_dir/tsconfig.json"
+          node "$consumer_dir/index.mjs"
+          node packages/runtime-client/node_modules/typescript/bin/tsc -p "$consumer_dir/tsconfig.json"
