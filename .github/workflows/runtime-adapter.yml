@@ -19,6 +19,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # Tests and the demo's --self-test on a real window system. Hosted
   # runners are not a native Windows 10/11 machine; native runs are
