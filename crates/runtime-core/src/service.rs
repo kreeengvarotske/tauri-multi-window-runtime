@@ -573,6 +573,7 @@ mod tests {
         clones: Arc<AtomicUsize>,
         locked_drops: Arc<AtomicUsize>,
         panic_at: usize,
+        reenter_on_drop: bool,
     }
 
     impl Clone for ReentrantKey {
@@ -595,6 +596,7 @@ mod tests {
                 clones: Arc::clone(&self.clones),
                 locked_drops: Arc::clone(&self.locked_drops),
                 panic_at: self.panic_at,
+                reenter_on_drop: self.reenter_on_drop,
             }
         }
     }
@@ -611,10 +613,14 @@ mod tests {
     }
     impl Drop for ReentrantKey {
         fn drop(&mut self) {
-            if let Some(owner) = self.owner.upgrade()
-                && owner.generation.try_lock().is_err()
-            {
-                self.locked_drops.fetch_add(1, Ordering::Relaxed);
+            if let Some(owner) = self.owner.upgrade() {
+                let locked = owner.generation.try_lock().is_err();
+                if locked {
+                    // Record the regression without deadlocking or panicking in Drop.
+                    self.locked_drops.fetch_add(1, Ordering::Relaxed);
+                } else if self.reenter_on_drop {
+                    owner.clear();
+                }
             }
         }
     }
@@ -627,6 +633,7 @@ mod tests {
             clones: Arc::new(AtomicUsize::new(0)),
             locked_drops: Arc::clone(&locked_drops),
             panic_at: usize::MAX,
+            reenter_on_drop: false,
         };
         let result = if prepared {
             service
@@ -663,6 +670,7 @@ mod tests {
             clones: Arc::clone(&clones),
             locked_drops: Arc::clone(&locked_drops),
             panic_at: usize::MAX,
+            reenter_on_drop: false,
         };
         let first = service.prepare_call(key());
         let second = service.prepare_call(key());
@@ -680,6 +688,7 @@ mod tests {
             clones: Arc::new(AtomicUsize::new(1)),
             locked_drops: Arc::default(),
             panic_at: 2,
+            reenter_on_drop: false,
         };
         let executor = tokio::runtime::Builder::new_current_thread()
             .build()
@@ -689,6 +698,48 @@ mod tests {
         }));
         assert!(result.is_err());
         assert_eq!(service.in_flight_keys(), 0);
+    }
+
+    async fn rejected_key_drop_can_clear_service(overweight: bool) {
+        let service = Arc::new(if overweight {
+            CachedService::with_budget(
+                CachePolicy::Forever,
+                crate::CacheBudget::new(1, |_: &usize| 8),
+            )
+        } else {
+            CachedService::new(CachePolicy::NoStore)
+        });
+        let locked_drops = Arc::new(AtomicUsize::new(0));
+        let key = ReentrantKey {
+            owner: Arc::downgrade(&service),
+            clones: Arc::new(AtomicUsize::new(1)),
+            locked_drops: Arc::clone(&locked_drops),
+            panic_at: usize::MAX,
+            reenter_on_drop: true,
+        };
+        let value = if overweight {
+            service
+                .prepare_call(key)
+                .run_with_metadata(|| async { Ok(7) })
+                .await
+                .result
+        } else {
+            service.run(key, || async { Ok(7) }).await
+        };
+        assert_eq!(*value.unwrap(), 7);
+        assert_eq!(service.cached_entries(), 0);
+        assert_eq!(service.in_flight_keys(), 0);
+        assert_eq!(locked_drops.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn no_store_rejected_key_drops_outside_generation_lock() {
+        rejected_key_drop_can_clear_service(false).await;
+    }
+
+    #[tokio::test]
+    async fn overweight_rejected_key_from_prepared_call_drops_outside_generation_lock() {
+        rejected_key_drop_can_clear_service(true).await;
     }
 
     #[tokio::test]

@@ -289,6 +289,9 @@ where
     ) -> bool {
         let Some(weight) = weight else {
             self.invalidate_deferred(&key, removed);
+            // The service may still hold its generation lock. Application key
+            // destructors must wait for the caller to release that outer lock.
+            removed.push((key, Arc::clone(value)));
             return false;
         };
 
@@ -309,6 +312,7 @@ where
             let Some(total_weight) = entries.total_weight.checked_add(weight) else {
                 // Unreachable while the invariant above holds; refuse to store
                 // rather than let the total wrap.
+                removed.push((key, Arc::clone(value)));
                 return false;
             };
             entries.total_weight = total_weight;
