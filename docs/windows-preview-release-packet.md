@@ -1,5 +1,9 @@
 # Windows developer preview release packet
 
+> Current release: [v0.1.0-preview.1 completion record](windows-preview-release-record.md).
+> The pending actions and candidate statuses below are a historical pre-publication
+> snapshot; the completion record holds the final SHA, tag, CI and release receipts.
+
 Date: November 16, 2026. Status: candidate technically qualified under the
 adopted build/runtime policy. Dependency-ordered integration, preview tag and
 GitHub prerelease publication are authorized under the user's delegation of

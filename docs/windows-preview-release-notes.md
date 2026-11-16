@@ -1,5 +1,9 @@
 # Windows developer preview 0.1.0-preview.1
 
+> Current release: [v0.1.0-preview.1 completion record](windows-preview-release-record.md).
+> The pending actions and candidate statuses below are a historical pre-publication
+> snapshot; the completion record holds the final SHA, tag, CI and release receipts.
+
 Draft, updated November 16, 2026. Candidate `e0c09b0` is qualified under the
 adopted build/runtime policy. Dependency-ordered integration, tag
 `v0.1.0-preview.1` and GitHub prerelease publication are authorized and pending
