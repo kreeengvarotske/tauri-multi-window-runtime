@@ -95,6 +95,8 @@ where
 ///
 /// Errors are never cached. `invalidate` advances only the affected key's
 /// generation, while `clear` advances the service-wide generation.
+/// Key `Hash` and `Eq` implementations run under internal locks and must not
+/// reenter this service. Key cloning and destruction run outside those locks.
 ///
 /// Semantics for concurrent calls:
 ///
@@ -215,17 +217,25 @@ where
     /// # });
     /// ```
     pub fn prepare_call(&self, key: K) -> PreparedServiceCall<'_, K, V, E> {
+        let mut insertion_key = Some(key.clone());
         let (global_version, key_version) = {
             let mut generation = self.generation.lock().unwrap_or_else(|p| p.into_inner());
             let global_version = generation.global_version;
-            let state = generation.keys.entry(key.clone()).or_insert(KeyGeneration {
-                version: 0,
-                active_calls: 0,
-            });
+            let state = if let Some(state) = generation.keys.get_mut(&key) {
+                state
+            } else {
+                generation
+                    .keys
+                    .entry(insertion_key.take().unwrap())
+                    .or_insert(KeyGeneration {
+                        version: 0,
+                        active_calls: 0,
+                    })
+            };
             state.active_calls += 1;
             (global_version, state.version)
         };
-        PreparedServiceCall {
+        let prepared = PreparedServiceCall {
             service: self,
             guard: KeyCallGuard {
                 state: &self.generation,
@@ -233,7 +243,9 @@ where
             },
             global_version,
             key_version,
-        }
+        };
+        drop(insertion_key);
+        prepared
     }
 
     /// Creates a service using one cache policy for all keys.
@@ -283,6 +295,7 @@ where
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<V, E>>,
     {
+        let mut insertion_key = Some(key.clone());
         // Keep cache lookup, generation capture, and invalidation ordered by the
         // same mutex. Each in-flight call also keeps its key state alive.
         // Defer value destructors until after the generation lock is released.
@@ -309,7 +322,7 @@ where
                 key_state.version
             } else {
                 generations.keys.insert(
-                    key.clone(),
+                    insertion_key.take().unwrap(),
                     KeyGeneration {
                         version: 0,
                         active_calls: 1,
@@ -319,14 +332,20 @@ where
             };
             (global_version, key_version)
         };
-        let _key_call_guard = KeyCallGuard {
+        let key_call_guard = KeyCallGuard {
             state: &self.generation,
-            key: key.clone(),
+            key,
         };
+        drop(insertion_key);
         drop(removed);
 
-        self.execute_registered(key, global_version, key_version, operation)
-            .await
+        self.execute_registered(
+            key_call_guard.key.clone(),
+            global_version,
+            key_version,
+            operation,
+        )
+        .await
     }
 
     async fn execute_registered<F, Fut>(
@@ -548,6 +567,129 @@ mod tests {
         time::Duration,
     };
     use tokio::task::JoinSet;
+
+    struct ReentrantKey {
+        owner: std::sync::Weak<CachedService<ReentrantKey, usize, ()>>,
+        clones: Arc<AtomicUsize>,
+        locked_drops: Arc<AtomicUsize>,
+        panic_at: usize,
+    }
+
+    impl Clone for ReentrantKey {
+        fn clone(&self) -> Self {
+            let index = self.clones.fetch_add(1, Ordering::Relaxed);
+            assert_ne!(index, self.panic_at, "application key clone panicked");
+            if index == 0
+                && let Some(owner) = self.owner.upgrade()
+            {
+                // Fail immediately on the old implementation instead of hanging
+                // the test process in the reentrant clear below.
+                assert!(
+                    owner.generation.try_lock().is_ok(),
+                    "key cloned under generation lock"
+                );
+                owner.clear();
+            }
+            Self {
+                owner: self.owner.clone(),
+                clones: Arc::clone(&self.clones),
+                locked_drops: Arc::clone(&self.locked_drops),
+                panic_at: self.panic_at,
+            }
+        }
+    }
+    impl PartialEq for ReentrantKey {
+        fn eq(&self, _: &Self) -> bool {
+            true
+        }
+    }
+    impl Eq for ReentrantKey {}
+    impl std::hash::Hash for ReentrantKey {
+        fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+            std::hash::Hash::hash(&0u8, state);
+        }
+    }
+    impl Drop for ReentrantKey {
+        fn drop(&mut self) {
+            if let Some(owner) = self.owner.upgrade()
+                && owner.generation.try_lock().is_err()
+            {
+                self.locked_drops.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    async fn key_clone_can_clear_service(prepared: bool) {
+        let service = Arc::new(CachedService::new(CachePolicy::Forever));
+        let locked_drops = Arc::new(AtomicUsize::new(0));
+        let key = ReentrantKey {
+            owner: Arc::downgrade(&service),
+            clones: Arc::new(AtomicUsize::new(0)),
+            locked_drops: Arc::clone(&locked_drops),
+            panic_at: usize::MAX,
+        };
+        let result = if prepared {
+            service
+                .prepare_call(key)
+                .run_with_metadata(|| async { Ok(7) })
+                .await
+                .result
+        } else {
+            service.run(key, || async { Ok(7) }).await
+        };
+        assert_eq!(*result.unwrap(), 7);
+        assert_eq!(service.in_flight_keys(), 0);
+        service.clear();
+        assert_eq!(locked_drops.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn prepared_key_clone_can_clear_service_without_deadlock() {
+        key_clone_can_clear_service(true).await;
+    }
+
+    #[tokio::test]
+    async fn ordinary_key_clone_can_clear_service_without_deadlock() {
+        key_clone_can_clear_service(false).await;
+    }
+
+    #[test]
+    fn prepared_duplicate_key_drops_outside_generation_lock() {
+        let service = Arc::new(CachedService::new(CachePolicy::Forever));
+        let clones = Arc::new(AtomicUsize::new(1));
+        let locked_drops = Arc::new(AtomicUsize::new(0));
+        let key = || ReentrantKey {
+            owner: Arc::downgrade(&service),
+            clones: Arc::clone(&clones),
+            locked_drops: Arc::clone(&locked_drops),
+            panic_at: usize::MAX,
+        };
+        let first = service.prepare_call(key());
+        let second = service.prepare_call(key());
+        drop(second);
+        drop(first);
+        assert_eq!(service.in_flight_keys(), 0);
+        assert_eq!(locked_drops.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn panicking_guard_key_clone_releases_generation_registration() {
+        let service = Arc::new(CachedService::new(CachePolicy::Forever));
+        let key = ReentrantKey {
+            owner: Arc::downgrade(&service),
+            clones: Arc::new(AtomicUsize::new(1)),
+            locked_drops: Arc::default(),
+            panic_at: 2,
+        };
+        let executor = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            executor.block_on(service.run(key, || async { Ok(7) }))
+        }));
+        assert!(result.is_err());
+        assert_eq!(service.in_flight_keys(), 0);
+    }
 
     #[tokio::test]
     async fn prepared_call_cannot_read_or_replace_a_newer_generation() {

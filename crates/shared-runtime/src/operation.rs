@@ -12,6 +12,8 @@ pub trait Operation: Send + Sync + 'static {
     /// Unique name, e.g. `"catalog.load"`. Used in diagnostics.
     const NAME: &'static str;
     /// Already validated parameters; part of the cache key.
+    /// `Hash` and `Eq` run under internal locks and must not reenter the runtime.
+    /// `Clone` and `Drop` run outside those locks.
     type Params: Eq + Hash + Clone + Send + Sync + 'static;
     /// The result. It stays in the Rust process.
     type Output: Send + Sync + 'static;

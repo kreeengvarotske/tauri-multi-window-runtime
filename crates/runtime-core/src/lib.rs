@@ -82,6 +82,9 @@ where
 ///
 /// Callers are grouped only by key. Include any access context that affects
 /// the result in that key.
+///
+/// Key `Hash` and `Eq` implementations run under an internal lock and must not
+/// reenter this coalescer. Key cloning and destruction run outside that lock.
 pub struct TaskCoalescer<K, V, E> {
     tasks: Mutex<HashMap<K, Arc<TaskEntry<V, E>>>>,
 }
@@ -122,6 +125,7 @@ where
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<V, E>>,
     {
+        let mut insertion_key = Some(key.clone());
         let entry = {
             let mut tasks = self.tasks.lock().unwrap_or_else(|p| p.into_inner());
             #[cfg(test)]
@@ -135,7 +139,7 @@ where
                 Arc::clone(slot)
             } else {
                 let entry = TaskEntry::new_arc();
-                tasks.insert(key.clone(), Arc::clone(&entry));
+                tasks.insert(insertion_key.take().unwrap(), Arc::clone(&entry));
                 entry
             };
 
@@ -147,6 +151,8 @@ where
             key,
             entry: Arc::clone(&entry),
         };
+        // An unused application key may have a reentrant destructor.
+        drop(insertion_key);
 
         let initialized_by_this_call = AtomicBool::new(false);
         let initializer_flag = &initialized_by_this_call;
@@ -226,16 +232,28 @@ mod tests {
     use tokio::task::JoinSet;
 
     #[tokio::test]
-    async fn key_destructors_run_outside_the_task_lock() {
+    async fn key_clones_and_destructors_run_outside_the_task_lock() {
         use std::{
             hash::{Hash, Hasher},
             sync::Weak,
         };
 
-        #[derive(Clone)]
         struct Key {
             owner: Weak<TaskCoalescer<Key, usize, ()>>,
             locked_drops: Arc<AtomicUsize>,
+        }
+
+        impl Clone for Key {
+            fn clone(&self) -> Self {
+                if let Some(owner) = self.owner.upgrade() {
+                    assert!(owner.tasks.try_lock().is_ok(), "key cloned under task lock");
+                    let _ = owner.test_len();
+                }
+                Self {
+                    owner: self.owner.clone(),
+                    locked_drops: Arc::clone(&self.locked_drops),
+                }
+            }
         }
 
         impl PartialEq for Key {

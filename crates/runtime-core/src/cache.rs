@@ -174,6 +174,9 @@ impl<K: Eq + Hash, V> Entries<K, V> {
 }
 
 /// A key-value cache with per-entry policies and an optional weight budget.
+///
+/// Key `Hash` and `Eq` implementations run under an internal lock and must not
+/// reenter this cache. Removed keys and values are destroyed outside the lock.
 pub struct PolicyCache<K, V> {
     entries: Mutex<Entries<K, V>>,
     budget: Option<CacheBudget<V>>,
