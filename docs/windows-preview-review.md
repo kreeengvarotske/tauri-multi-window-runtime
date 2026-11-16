@@ -1,5 +1,9 @@
 # Windows developer preview review
 
+> Current release: [v0.1.0-preview.1 completion record](windows-preview-release-record.md).
+> The pending actions and candidate statuses below are a historical pre-publication
+> snapshot; the completion record holds the final SHA, tag, CI and release receipts.
+
 Updated November 16, 2026. The preview shares application-owned Rust data and
 coalesced work between windows in one Tauri v2 application. It includes bounded
 views, explicit cache/admission limits, window lifecycle handling, an optional

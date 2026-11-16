@@ -1,4 +1,9 @@
 # Developer preview completion scope
+
+> Current release: [v0.1.0-preview.1 completion record](../windows-preview-release-record.md).
+> The pending actions and candidate statuses below are a historical pre-publication
+> snapshot; the completion record holds the final SHA, tag, CI and release receipts.
+
 Date: 2026-11-15; ownership and release-status update 2026-11-16. Supersedes the
 first-release priorities in the November 14 completion plan; historical
 findings and measurement evidence stay unchanged.
