@@ -6,86 +6,108 @@ views, explicit cache/admission limits, window lifecycle handling, an optional
 [JavaScript/TypeScript command client](../packages/runtime-client/README.md),
 and [three runnable recipes](recipes.md).
 
-The repository is public. Anonymous Git access to exact candidate
-`3e132fa6833eedede4cc9ea9dc7122ad0b1669a1` was verified on November 16. Main
-remains `7244a5cbccbe37a96ac67c69f374d9de383eb2d5`; the dependent stack
+The repository is public. Anonymous Git installation and Release compilation
+were verified at `e0c09b0db5788a83bc89881b0df3682f36dac1fa` on November 16.
+Main before integration was `7244a5cbccbe37a96ac67c69f374d9de383eb2d5`.
+The dependency order is
 [#66](https://github.com/kreeengvarotske/tauri-multi-window-runtime/pull/66) →
 [#67](https://github.com/kreeengvarotske/tauri-multi-window-runtime/pull/67) →
 [#68](https://github.com/kreeengvarotske/tauri-multi-window-runtime/pull/68) →
 [#70](https://github.com/kreeengvarotske/tauri-multi-window-runtime/pull/70) →
 [#72](https://github.com/kreeengvarotske/tauri-multi-window-runtime/pull/72) →
 [#73](https://github.com/kreeengvarotske/tauri-multi-window-runtime/pull/73) →
-[#74](https://github.com/kreeengvarotske/tauri-multi-window-runtime/pull/74)
-is not merged. Version `0.1.0-preview.1` and license `MIT OR Apache-2.0` are
-selected. Tag `v0.1.0-preview.1` is absent; merge, tag and GitHub Release
-publication each require their separate decision. Git distribution is
-sufficient; crates.io and npm registry publication are outside this release.
+[#74](https://github.com/kreeengvarotske/tauri-multi-window-runtime/pull/74) →
+[#75](https://github.com/kreeengvarotske/tauri-multi-window-runtime/pull/75).
+Version `0.1.0-preview.1` and license `MIT OR Apache-2.0` are selected.
+Dependency-ordered merge, tag `v0.1.0-preview.1` and GitHub prerelease
+publication are authorized under the user's delegation of remaining decisions
+and actions. Execution and final main/tag identities are pending receipts;
+completion is not asserted here. Git distribution is sufficient; crates.io
+and npm registry publication are outside this release.
 
-## Current blockers and decisions
+After final-main CI passes, the release action creates an immutable annotated
+tag at that exact SHA. One fresh anonymous `-Tag` consumer whose resolved SHA
+matches main qualifies both final main source and the remote tag. Publication
+follows tag CI and that consumer's strict same-artifact application cleanup
+pass; a separate main consumer rebuild is not required.
+
+## Qualified candidate and adopted release policy
 
 Candidate `3e132fa` is superseded. A newly confirmed P2 defect allows a user
 key's `Drop` to run while generation state is locked in `NoStore` and
-overweight-result paths. The separate runtime-core fix is open as
+overweight-result paths. The separate runtime-core fix is recorded in
 [#74](https://github.com/kreeengvarotske/tauri-multi-window-runtime/pull/74) at
 `0267a775679f4f554151ca4997520d55dfb74082`. Both regressions failed before the
-fix; 82 core tests and one doctest passed after it. Local validation also passed
-171 default-profile (Debug) workspace unit/integration tests and four doctests,
-12 JS tests, strict TypeScript checking and the demo-sync check. Final Release
-checks, hosted CI and the fresh consumer remain pending. Their evidence must
-include #74; the older consumer cannot qualify the corrected source.
+fix; 82 core tests and one doctest passed after it. The corrected source is
+qualified in #75 at `e0c09b0`. Local checks passed 171 workspace unit/integration
+tests and four doctests in both Debug and Release, both Clippy profiles,
+formatting and Rustdoc with warnings denied, 12 JS tests, strict TypeScript,
+demo-sync, offline packed installation/import/call and all three recipes.
+Windows/Ubuntu [CI run 43967276469](https://github.com/kreeengvarotske/tauri-multi-window-runtime/actions/runs/43967276469)
+and the fresh external consumer passed their required technical checks under
+the adopted policy. The [#75 evidence receipt](https://github.com/kreeengvarotske/tauri-multi-window-runtime/pull/75#issuecomment-6931159120)
+records the exact source and results. No technical blocker remains in that
+candidate's review; integration and release actions remain pending execution.
 
 The November 16 compiler-helper finding establishes no SDK runtime cleanup
 defect. The same external consumer executable and lock passed an independent,
 strict application-only Job. The combined build/application Job still failed.
-Accepting a documented build-toolchain cleanup exception is a release-policy
-decision that remains pending. If complete combined cleanup is retained as a
-mandatory requirement, that requirement remains unresolved.
+On November 16, under the delegated authority, the release owner adopted the
+measured MSVC VCTIP build-only cleanup exception and separate strict
+application cleanup gate. This explicitly changes the original combined
+acceptance requirement. The raw combined result remains FAIL; the exception
+does not cover application leftovers or an unattributed future leftover.
 
 The [release packet](windows-preview-release-packet.md) records the finite
-integration checklist, final evidence fields and separate approval decisions.
+integration checklist, candidate evidence and separate release-action receipts.
 It replaces the earlier release checklist below as the current release index.
 The active session took over the remaining work on November 16 while the
 second group is unavailable for the next four days. Completion does not wait
 for that group's return.
 
-## Consumer evidence and proposed gate matrix
+## Qualified consumer and gate matrix
 
-These results apply only to superseded `3e132fa`. Retained local evidence is
-`target/consumer-verification-20261116.md`,
-`target/consumer-gate-20261116-5683b971`, and
-`target/native-queued-view-b0154930`. Local artifacts must accompany the final
-review packet; they are not a claim that evidence is published with this file.
+These results apply to `e0c09b0`, including #74. Retained local evidence is
+`target/preview-final-evidence.md`,
+`target/consumer-gate-20261116-23186edd` and
+`target/native-queued-view-d1097057`; the #75 receipt links the candidate
+qualification. The earlier `3e132fa` evidence remains historical in the release
+packet. This disposition updates policy without rewriting raw results.
 
-| Gate | November 16 result at `3e132fa` | Final release requirement |
+| Gate | November 16 result at `e0c09b0` | Disposition |
 |---|---|---|
-| Anonymous source and installation | Pass: exact-SHA anonymous fetch; fresh independent project, target, lock and profile | Repeat at the chosen fixed SHA through the public Git source |
-| Dependency identity and Release build | Pass: all three runtime packages resolve once to the exact Git SHA; Cargo finished in 6m54s | Retain final revisions, lock and executable hashes; download caches may be reused and must be disclosed |
-| Native application functionality | Pass: sharing, IPC validation/errors, capabilities, queued-window separation, queue bounds and shutdown | Repeat at the fixed SHA; also retain the focused key-drop regression results |
+| Anonymous source and installation | Pass: exact-SHA anonymous fetch; fresh independent project, target, lock and profile | Qualified source receipt retained |
+| Dependency identity and Release build | Pass: all three runtime packages resolve once to the exact Git SHA; Cargo finished in 5m59s | Lock and executable hashes retained; Git/registry download caches could be reused |
+| Native application functionality | Pass: sharing, IPC validation/errors, capabilities, queued-window separation, queue bounds and shutdown | Qualified with the key-drop fix included |
 | Strict application runtime cleanup | Pass: same consumer binary/lock, fresh profile, exit 0; 9 NEW / 9 EXIT / active-zero 1; no timeout, leftovers or forced cleanup | Require complete owned application Job accounting and natural cleanup |
-| Combined build/application cleanup | **Fail:** 557 NEW / 556 EXIT / active-zero 1; one leftover; owned Job forcibly cleaned | Preserve the failure. Decide explicitly whether the measured compiler-helper exception is accepted or a clean alternative build environment is required |
-| Final candidate CI and release packet | Pending for the fixed final SHA | Actual required CI success and reproducible installation/recipes; no unresolved P1/P2; complete final packet |
+| Combined build/application cleanup | **Fail:** 553 NEW / 552 EXIT / active-zero 1; one VCTIP leftover; owned Job forcibly cleaned | Raw failure preserved; measured build-toolchain exception adopted November 16 |
+| Candidate CI and release packet | Pass: exact-head Windows/Ubuntu CI, required local checks and reproducible installation/recipes | Final integrated/tagged identity, required CI and release-action receipts pending |
 
-Combined-job PID `14856@639304242795518695` was `vctip`, created early during
-compilation with parent `link.exe` PID 13308. Empty `rustc` compilation reproduced
-the installed MSVC VCTIP helper without Cargo, Tauri or the SDK. Its observed
-version was `14.51.36260.0`. Identity sampling was incomplete, and the helper's
-natural lifetime was not measured. Historical PID 17056 remains unidentified.
+The final combined-job leftover was `vctip`, identity
+`4000@639304639174276590`, parent `link.exe` PID 4376, observed during
+compilation before the application. That run retained name, creation and parent;
+it did not recapture the image path/hash. Earlier empty `rustc` compilation
+reproduced the installed MSVC helper without Cargo, Tauri or the SDK, version
+`14.51.36260.0`. Identity sampling was incomplete, and the helper's natural
+lifetime was not measured. Historical PID 17056 remains unidentified.
 Final active zero after forced cleanup does not convert the failed gate into
 a pass. System settings and installed binaries were not changed; no opt-out
 workaround was used. SDK code must not terminate compiler services.
 
 The final packet must retain this attribution and the failed observations.
-The proposed split between build-environment cleanup and application cleanup
-does not silently waive the original complete-cleanup acceptance requirement.
-No global-system repair or additional RAM research is required to make the
-release-policy decision.
+The adopted split between build-environment cleanup and application cleanup is
+the recorded release-policy change. It does not reclassify either raw combined
+failure. No global-system repair or additional RAM research is required.
 
 ## Support and scope
 
 The preview supports Windows with Tauri v2 and WebView2. The November 16 consumer
-used Windows build 26200, Rust/Cargo 1.99.1, Tauri 2.12.5 and WebView2
-157.0.4341.46. These are observed versions, not a broader compatibility or MSRV
-guarantee. Hosted Ubuntu checks do not establish a supported Linux GUI release.
+used Windows 10.0.26200.0, Rust 1.99.1, Tauri 2.12.6, tauri-build 2.7.5,
+tauri-utils 2.10.3, tauri-runtime-wry 2.12.4 and WebView2 157.0.4341.46.
+The independent consumer resolved compatible Tauri patches newer than the
+unchanged repository lock. These are observed versions, not a broader
+compatibility or MSRV guarantee. Hosted Ubuntu checks do not establish a
+supported Linux GUI release.
 
 No whole-application RAM or CPU saving is claimed. The frozen pilot remains
 historical evidence on its recorded SHA. Memory optimization, a production

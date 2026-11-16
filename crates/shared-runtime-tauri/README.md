@@ -14,9 +14,30 @@ behavior; ordinary `Start-Process` does not prove ownership or cleanup of the
 WebView process tree. Release process accounting requires a launcher that owns
 that tree through a Windows Job Object.
 
-The `v0.1.0-preview.1` tag has not been published. From a reviewed checkout whose
-commit is available from the repository, print the dependency entries for that
-exact SHA:
+For application use, prefer a verified published Git preview release. Once the
+[Windows preview release](https://github.com/kreeengvarotske/tauri-multi-window-runtime/releases/tag/v0.1.0-preview.1)
+is published, verify its tag against the qualified full commit SHA stated in
+the Release text. Then use the same tag for both backend dependencies:
+
+```toml
+shared-runtime = { git = "https://github.com/kreeengvarotske/tauri-multi-window-runtime.git", tag = "v0.1.0-preview.1" }
+shared-runtime-tauri = { git = "https://github.com/kreeengvarotske/tauri-multi-window-runtime.git", tag = "v0.1.0-preview.1" }
+```
+
+Check the remote identity before installing:
+
+```powershell
+git ls-remote https://github.com/kreeengvarotske/tauri-multi-window-runtime.git 'refs/tags/v0.1.0-preview.1' 'refs/tags/v0.1.0-preview.1^{}'
+```
+
+For an annotated tag, its peeled `^{}` line must match the Release's qualified
+commit SHA; for a lightweight tag, compare the tag line. If the release or tag
+is missing, use reviewed source for evaluation instead. Verify that both
+dependencies resolve to the qualified commit in your application's `Cargo.lock`.
+
+For development, or evaluation before publication, use a reviewed Git commit
+available from the repository. From that checkout, print the dependency entries
+for its exact SHA:
 
 ```powershell
 $sdkRevision = (& git rev-parse HEAD).Trim()

@@ -1,10 +1,11 @@
 # Windows developer preview 0.1.0-preview.1
 
-Draft, updated November 16, 2026. Tag `v0.1.0-preview.1` does not exist yet.
-The final source revision is pending integration of the runtime-core fix and
-final verification. Merge, tag creation and GitHub Release publication require
-separate decisions. The [release packet](windows-preview-release-packet.md)
-tracks these gates.
+Draft, updated November 16, 2026. Candidate `e0c09b0` is qualified under the
+adopted build/runtime policy. Dependency-ordered integration, tag
+`v0.1.0-preview.1` and GitHub prerelease publication are authorized and pending
+execution. The [release packet](windows-preview-release-packet.md) tracks the
+final integrated/tagged identity and completed release receipts. No published
+release is asserted here.
 
 The GitHub Release text must state the tag's commit SHA. Check that it equals
 `git rev-parse --verify 'v0.1.0-preview.1^{commit}'`. Keep the quotes: without
@@ -52,20 +53,34 @@ Minimum Rust versions found by building: 1.88 for `runtime-core` and `shared-run
 
 ## Verification status before publication
 
-The external consumer at superseded `3e132fa` passed anonymous source access,
-Release compilation and native assertions. Its exact executable and lock also
-passed a separate strict application Job with no leftovers or forced cleanup.
-The combined build/application Job **failed** cleanup because one measured
-MSVC VCTIP helper remained. Empty Rust compilation reproduced that helper
-without Cargo, Tauri or the SDK. Acceptance of this toolchain cleanup exception
-remains a separate release-policy decision; the failed result is preserved.
+The fresh consumer at `e0c09b0db5788a83bc89881b0df3682f36dac1fa` passed anonymous
+source access, independent installation, the Release build in 5m59s and native
+assertions. The unchanged executable and lock passed a separate strict
+application Job: 9 NEW / 9 EXIT / active-zero 1, with no timeout, leftovers or
+forced cleanup. The combined build/application cleanup remains **FAIL**:
+553 NEW / 552 EXIT, one VCTIP leftover and forced owned-Job cleanup.
 
-A newly confirmed P2 in `NoStore` and overweight-result key cleanup is fixed in
-open [PR #74](https://github.com/kreeengvarotske/tauri-multi-window-runtime/pull/74)
-at `0267a775679f4f554151ca4997520d55dfb74082`, pending integration. Both
-regressions failed before the fix; 82 core tests and one doctest passed after
-it. Local checks also passed 171 default-profile (Debug) workspace
-unit/integration tests and four doctests, 12 JS tests, strict TypeScript
-checking and the demo-sync check. Final Release checks, required CI and a fresh
-consumer including #74 remain pending. These draft notes do not declare the
-preview ready.
+The release policy adopted November 16 accepts this measured build-toolchain
+exception and requires strict application cleanup to pass. Earlier empty Rust
+compilation reproduced the MSVC VCTIP helper without Cargo, Tauri or the SDK.
+The final run retained process name/creation/parent, not a new image hash. Raw
+failed results and attribution limits remain unchanged; this exception adds
+no SDK workaround and permits no application leftover.
+
+The `NoStore` and overweight-result key-drop P2 is fixed in
+[PR #74](https://github.com/kreeengvarotske/tauri-multi-window-runtime/pull/74)
+at `0267a775679f4f554151ca4997520d55dfb74082` and qualified in the #75 candidate.
+Both regressions failed before the fix; 82 core tests and one doctest passed
+after it. Debug and Release each passed 171 workspace unit/integration tests
+and four doctests. Both Clippy profiles, formatting and Rustdoc with warnings
+denied passed, along with 12 JS tests, strict TypeScript, demo-sync, offline
+packed installation/import/call and all three recipes. Exact-head
+[Windows/Ubuntu CI](https://github.com/kreeengvarotske/tauri-multi-window-runtime/actions/runs/43967276469)
+passed. The [#75 evidence receipt](https://github.com/kreeengvarotske/tauri-multi-window-runtime/pull/75#issuecomment-6931159120)
+records these checks; final main/tag identities and release-action receipts
+remain pending execution.
+
+After final-main CI passes, an immutable annotated tag will identify that exact
+source. One anonymous tag consumer with a matching SHA will qualify both final
+main source and the remote tag. Prerelease publication follows tag CI and the
+tag consumer's strict application cleanup pass.

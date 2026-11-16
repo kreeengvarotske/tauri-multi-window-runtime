@@ -104,9 +104,31 @@ describes overload handling, counters and the limits of this protection.
 
 ### Use the preview from another project
 
-The `v0.1.0-preview.1` tag has not been published. Use a reviewed Git commit
-available from the repository rather than relying on a tag. From that reviewed
-checkout, resolve the full revision and print the two dependency entries:
+For application use, prefer a verified published Git preview release. Once the
+[Windows preview release](https://github.com/kreeengvarotske/tauri-multi-window-runtime/releases/tag/v0.1.0-preview.1)
+is published, verify that its tag resolves to the qualified commit stated in the
+Release text before using these entries under `[dependencies]`:
+
+```toml
+shared-runtime = { git = "https://github.com/kreeengvarotske/tauri-multi-window-runtime.git", tag = "v0.1.0-preview.1" }
+shared-runtime-tauri = { git = "https://github.com/kreeengvarotske/tauri-multi-window-runtime.git", tag = "v0.1.0-preview.1" }
+```
+
+Check the remote tag identity with:
+
+```powershell
+git ls-remote https://github.com/kreeengvarotske/tauri-multi-window-runtime.git 'refs/tags/v0.1.0-preview.1' 'refs/tags/v0.1.0-preview.1^{}'
+```
+
+For an annotated tag, compare the SHA on the `^{}` line; for a lightweight tag,
+compare the tag line's SHA. It must match the Release's qualified full commit
+SHA. A missing release or tag is not a verified release installation. Keep both
+dependencies on the same tag and check that their resolved Git sources in your
+application's `Cargo.lock` point to that commit.
+
+For development, or evaluation before a release is published, use one reviewed
+Git commit available from the repository. From that reviewed checkout, resolve
+the full revision and print the two dependency entries:
 
 ```powershell
 $sdkRevision = (& git rev-parse HEAD).Trim()
@@ -172,9 +194,16 @@ To reproduce the external consumer check from the repository root, run the scrip
 `-RequireMatchingRevision` requires the tracked demo and dependency SHA to match
 and checks the runtime Git sources plus native catalog, queue, lifecycle, and
 shutdown assertions. Retain the emitted consumer directory. The script's
-functional self-test is separate from owned-job process cleanup evidence. After
-a tag is actually published, its optional `-Tag` argument can also verify that
-the remote tag resolves to the same reviewed revision.
+functional self-test is separate from owned-job process cleanup evidence. Once
+a release tag is published, check out its qualified commit and verify the tag
+installation with:
+
+```powershell
+& ./examples/runtime-adapter-demo/Test-GitConsumer.ps1 -Revision (git rev-parse HEAD) -Tag v0.1.0-preview.1 -RequireMatchingRevision
+```
+
+The script checks that the remote tag resolves to the expected commit and that
+all three runtime Git packages in the consumer lockfile use that tag and SHA.
 
 These checks cover integration behavior, including IPC and window lifecycle.
 They do not set a whole-application OS RAM cap or establish RAM/CPU savings.
