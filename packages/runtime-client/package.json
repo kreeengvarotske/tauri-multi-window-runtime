@@ -1,0 +1,20 @@
+{
+  "name": "tmwr-runtime-client",
+  "version": "0.1.0-preview.1",
+  "private": true,
+  "description": "Optional JSON command client for the Tauri shared runtime preview",
+  "type": "module",
+  "license": "MIT OR Apache-2.0",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "import": "./src/index.js"
+    }
+  },
+  "files": ["src", "README.md", "LICENSE-MIT", "LICENSE-APACHE"],
+  "scripts": {
+    "test": "node --test test/client.test.mjs",
+    "typecheck": "tsc -p test/tsconfig.json"
+  },
+  "devDependencies": { "typescript": "6.0.3" }
+}
