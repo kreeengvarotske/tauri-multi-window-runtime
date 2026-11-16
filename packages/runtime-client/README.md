@@ -69,3 +69,10 @@ An IPC command name is not a runtime operation/window/scope selector.
 
 Development: `npm ci`, `npm test`, `npm run typecheck`. The package tests use
 Node's built-in runner; only the development type checker is installed.
+
+The real Tauri demo imports the same client from a distributed copy in its
+static assets, so it needs no frontend bundler or npm install to run. After
+editing `src/index.js`, run `npm run sync-demo` from this package. CI runs
+`npm run check-demo`; it rejects missing/stale copies and tolerates Git's
+LF/CRLF checkout conversion. The demo's native self-test exercises this copy
+through real WebView IPC, including JSON requests and unchanged error reports.
