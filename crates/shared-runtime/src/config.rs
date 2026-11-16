@@ -17,9 +17,15 @@ pub struct RuntimeConfig {
     /// View calls admitted at the same time, from source lookup through
     /// projection and any `ViewHandle::get_with` callback. Waiting views
     /// retain no source output. This also limits the number of responses
-    /// being built or serialized at once. Others wait up to their deadline.
+    /// being built or serialized at once. At most `max_queued_projections`
+    /// other calls wait, up to their own deadlines.
     /// Must be between 1 and `Semaphore::MAX_PERMITS`, inclusive.
     pub max_concurrent_projections: usize,
+    /// View calls that may wait for projection admission across the runtime.
+    /// A full queue returns `ViewCallError::Source(CallError::Overloaded)`.
+    /// Zero allows immediate admission only. This bounds the number of
+    /// waiting calls, not the bytes in their application-defined requests.
+    pub max_queued_projections: usize,
     /// How long a caller waits when the call sets no deadline of its own.
     pub default_deadline: Duration,
     /// How long `shutdown` lets calls in flight finish before ending them.

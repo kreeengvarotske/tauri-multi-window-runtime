@@ -21,6 +21,12 @@ requires `queuedViewSeparated` and `queuedViewCacheStable`: the old call
 must not read or replace the reopened window's cached note. This is a
 functional check, not a measurement of application memory.
 
+The demo explicitly allows four active projections and 32 waiting views.
+Its native check fills that queue, verifies that the next adapter call
+returns `OVERLOADED`, cancels the waiters, and checks that the queue and
+active slots are empty after shutdown. A passing report requires
+`projectionQueueBounded` and `projectionQueueEmptyAfterExit` too.
+
 ```powershell
 $report = Join-Path ([IO.Path]::GetTempPath()) "runtime-adapter-demo-$([guid]::NewGuid()).json"
 $run = Start-Process -FilePath $demo -ArgumentList @('--self-test', ('"{0}"' -f $report)) -PassThru -WindowStyle Hidden
@@ -37,6 +43,11 @@ $report
 3. Derive caller identity from the injected window. Charge the response budget before copying each item into the page and decode the bounded response in the frontend.
 
 See the [adapter guide](../../crates/shared-runtime-tauri/README.md), the [Rust integration](src/lib.rs), and the [frontend example](ui/main.js).
+
+The preview configuration now requires `max_queued_projections` in every
+`RuntimeConfig` literal. Pick an application-specific limit; the demo's
+32 positions are an example, not a framework default. The [queue guide](../../docs/projection-queue-review.md)
+describes overload handling, counters and the limits of this protection.
 
 ### Use the preview from another project
 

@@ -23,6 +23,7 @@ fn config() -> RuntimeConfig {
         max_concurrent_operations: 4,
         max_queued_operations: 16,
         max_concurrent_projections: 2,
+        max_queued_projections: 16,
         default_deadline: Duration::from_secs(30),
         shutdown_grace: Duration::from_secs(1),
         cache_budget_bytes: 4 << 20,
@@ -1272,6 +1273,286 @@ impl View<Load> for LoadLength {
     }
     fn response_bytes(_: &usize) -> usize {
         size_of::<usize>()
+    }
+}
+
+mod projection_queue {
+    use super::*;
+    use std::{
+        future::Future,
+        pin::Pin,
+        task::{Context, Poll, Waker},
+    };
+
+    struct TrackedLength(Arc<AtomicUsize>);
+
+    impl View<Load> for TrackedLength {
+        const NAME: &'static str = "test.tracked-length";
+        type Request = u32;
+        type Response = usize;
+        fn source(&self, request: &u32) -> u32 {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            *request
+        }
+        fn max_items(&self) -> usize {
+            1
+        }
+        fn max_response_bytes(&self) -> usize {
+            size_of::<usize>()
+        }
+        fn project(
+            &self,
+            output: &Vec<u8>,
+            request: u32,
+            budget: &mut ResponseBudget,
+        ) -> Result<usize, ViewError> {
+            LoadLength.project(output, request, budget)
+        }
+        fn items(_: &usize) -> usize {
+            1
+        }
+        fn response_bytes(_: &usize) -> usize {
+            size_of::<usize>()
+        }
+    }
+
+    fn setup(queue: usize) -> (Runtime, Load, Arc<Semaphore>, Arc<AtomicUsize>) {
+        let (op, gate) = Load::gated(ScopeRule::Shared);
+        let sources = Arc::new(AtomicUsize::new(0));
+        let runtime = Runtime::builder(RuntimeConfig {
+            max_concurrent_projections: 1,
+            max_queued_projections: queue,
+            ..config()
+        })
+        .unwrap()
+        .register(op.clone(), budget(1024))
+        .unwrap()
+        .view::<Load, _>(TrackedLength(Arc::clone(&sources)))
+        .unwrap()
+        .build();
+        (runtime, op, gate, sources)
+    }
+
+    fn poll<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {
+        future.poll(&mut Context::from_waker(Waker::noop()))
+    }
+
+    #[tokio::test]
+    async fn full_queue_refuses_before_source_derivation_and_cancellation_releases_capacity() {
+        let (runtime, op, gate, sources) = setup(1);
+        let view = runtime.view::<Load, TrackedLength>().unwrap();
+        let caller = window("main");
+        let mut first = Box::pin(view.get(&caller, 1, NO_OPTIONS));
+        let mut queued = Box::pin(view.get(&caller, 2, NO_OPTIONS));
+        let mut excess = Box::pin(view.get(&caller, 3, NO_OPTIONS));
+        assert!(poll(first.as_mut()).is_pending());
+        assert!(poll(queued.as_mut()).is_pending());
+        assert!(
+            matches!(
+                poll(excess.as_mut()),
+                Poll::Ready(Err(ViewCallError::Source(CallError::Overloaded)))
+            ),
+            "a full projection queue must reject immediately, not wait for a deadline"
+        );
+        let snapshot = runtime.stats();
+        assert_eq!(
+            (
+                snapshot.active_projections,
+                snapshot.queued_projections,
+                snapshot.projection_overloads
+            ),
+            (1, 1, 1)
+        );
+        assert_eq!(
+            sources.load(Ordering::SeqCst),
+            2,
+            "refused calls must not derive source parameters"
+        );
+        assert_eq!(op.executions(), 1);
+        assert_eq!(stats(&runtime).requests, 1);
+
+        drop(queued);
+        assert_eq!(runtime.stats().queued_projections, 0);
+        let mut replacement = Box::pin(view.get(&caller, 4, NO_OPTIONS));
+        assert!(
+            poll(replacement.as_mut()).is_pending(),
+            "cancelled queue seat must be reusable"
+        );
+        drop(first);
+        gate.add_permits(1);
+        assert_eq!(replacement.await.unwrap(), 4);
+        let snapshot = runtime.stats();
+        assert_eq!(
+            (
+                snapshot.active_projections,
+                snapshot.queued_projections,
+                snapshot.projection_overloads
+            ),
+            (0, 0, 1)
+        );
+        // Cancellation after the semaphore assigned a permit, before the
+        // waiter is polled again, must release both admission and its seat.
+        let mut holder = Box::pin(view.get(&caller, 5, NO_OPTIONS));
+        let mut waking = Box::pin(view.get(&caller, 6, NO_OPTIONS));
+        assert!(poll(holder.as_mut()).is_pending());
+        assert!(poll(waking.as_mut()).is_pending());
+        drop(holder);
+        drop(waking);
+        assert_eq!(runtime.stats().active_projections, 0);
+        assert_eq!(runtime.stats().queued_projections, 0);
+        gate.add_permits(1);
+        assert_eq!(view.get(&caller, 7, NO_OPTIONS).await.unwrap(), 7);
+        assert_balanced(&stats(&runtime));
+    }
+
+    #[tokio::test]
+    async fn zero_queue_allows_immediate_calls_and_refuses_waiting_calls() {
+        let (runtime, _, gate, sources) = setup(0);
+        let view = runtime.view::<Load, TrackedLength>().unwrap();
+        let caller = window("main");
+        let mut first = Box::pin(view.get(&caller, 1, NO_OPTIONS));
+        assert!(poll(first.as_mut()).is_pending());
+        assert!(matches!(
+            view.get(&caller, 2, NO_OPTIONS).await,
+            Err(ViewCallError::Source(CallError::Overloaded))
+        ));
+        assert_eq!(sources.load(Ordering::SeqCst), 1);
+        gate.add_permits(1);
+        assert_eq!(first.await.unwrap(), 1);
+        assert_eq!(
+            view.get(&caller, 1, NO_OPTIONS).await.unwrap(),
+            1,
+            "cache hits still need only immediate admission"
+        );
+        assert_eq!(runtime.stats().queued_projections, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn queue_deadline_releases_capacity_without_requesting_a_source() {
+        let (runtime, _, _, _) = setup(1);
+        let view = runtime.view::<Load, TrackedLength>().unwrap();
+        let caller = window("main");
+        let mut first = Box::pin(view.get(&caller, 1, NO_OPTIONS));
+        let mut queued = Box::pin(view.get(
+            &caller,
+            2,
+            CallOptions {
+                deadline: Some(Duration::from_millis(10)),
+            },
+        ));
+        assert!(poll(first.as_mut()).is_pending());
+        assert!(poll(queued.as_mut()).is_pending());
+        tokio::time::advance(Duration::from_millis(10)).await;
+        assert!(matches!(queued.await, Err(ViewCallError::DeadlineExceeded)));
+        assert_eq!(runtime.stats().queued_projections, 0);
+        assert_eq!(stats(&runtime).requests, 1);
+        let mut replacement = Box::pin(view.get(&caller, 3, NO_OPTIONS));
+        assert!(poll(replacement.as_mut()).is_pending());
+        assert_eq!(runtime.stats().queued_projections, 1);
+        drop(replacement);
+        drop(first);
+        assert_eq!(runtime.stats().active_projections, 0);
+        assert_eq!(runtime.stats().queued_projections, 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_releases_full_projection_queue_and_admission() {
+        let (runtime, _, _, _) = setup(1);
+        let view = runtime.view::<Load, TrackedLength>().unwrap();
+        let caller = window("main");
+        let mut first = Box::pin(view.get(&caller, 1, NO_OPTIONS));
+        let mut queued = Box::pin(view.get(&caller, 2, NO_OPTIONS));
+        assert!(poll(first.as_mut()).is_pending());
+        assert!(poll(queued.as_mut()).is_pending());
+        let (_, first, queued) = tokio::join!(runtime.shutdown(), first, queued);
+        assert!(matches!(
+            first,
+            Err(ViewCallError::Source(CallError::ShuttingDown))
+        ));
+        assert!(matches!(
+            queued,
+            Err(ViewCallError::Source(CallError::ShuttingDown))
+        ));
+        let snapshot = runtime.stats();
+        assert_eq!(
+            (snapshot.active_projections, snapshot.queued_projections),
+            (0, 0)
+        );
+        assert!(matches!(
+            view.get(&caller, 3, NO_OPTIONS).await,
+            Err(ViewCallError::Source(CallError::ShuttingDown))
+        ));
+        assert_balanced(&stats(&runtime));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn contending_windows_never_admit_more_than_the_queue_limit() {
+        const CALLS: u32 = 64;
+        const QUEUE: usize = 3;
+        let (runtime, op, gate, sources) = setup(QUEUE);
+        let runtime = Arc::new(runtime);
+        let view = runtime.view::<Load, TrackedLength>().unwrap();
+        let caller = window("holder");
+        let mut first = Box::pin(view.get(&caller, 1, NO_OPTIONS));
+        assert!(poll(first.as_mut()).is_pending());
+        let started = Arc::new(Semaphore::new(0));
+        let resume = Arc::new(Semaphore::new(0));
+        let mut workers = Vec::new();
+        for index in 0..CALLS {
+            let view = view.clone();
+            let started = Arc::clone(&started);
+            let resume = Arc::clone(&resume);
+            workers.push(tokio::spawn(async move {
+                let caller = window(&format!("w{index}"));
+                let mut future = Box::pin(view.get(&caller, index + 2, NO_OPTIONS));
+                let initial =
+                    std::future::poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx))).await;
+                started.add_permits(1);
+                match initial {
+                    Poll::Ready(result) => result,
+                    Poll::Pending => {
+                        resume.acquire().await.unwrap().forget();
+                        future.await
+                    }
+                }
+            }));
+        }
+        tokio::time::timeout(LIMIT, started.acquire_many(CALLS))
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+        let snapshot = runtime.stats();
+        assert_eq!(
+            (
+                snapshot.active_projections,
+                snapshot.queued_projections,
+                snapshot.projection_overloads
+            ),
+            (1, QUEUE, u64::from(CALLS) - QUEUE as u64)
+        );
+        assert_eq!(sources.load(Ordering::SeqCst), QUEUE + 1);
+        assert_eq!(op.executions(), 1);
+        gate.add_permits(QUEUE + 1);
+        resume.add_permits(CALLS as usize);
+        assert_eq!(first.await.unwrap(), 1);
+        let mut admitted = 0;
+        let mut refused = 0;
+        for worker in workers {
+            match tokio::time::timeout(LIMIT, worker).await.unwrap().unwrap() {
+                Ok(_) => admitted += 1,
+                Err(ViewCallError::Source(CallError::Overloaded)) => refused += 1,
+                other => panic!("unexpected outcome: {other:?}"),
+            }
+        }
+        assert_eq!((admitted, refused), (QUEUE, CALLS as usize - QUEUE));
+        let snapshot = runtime.stats();
+        assert_eq!(
+            (snapshot.active_projections, snapshot.queued_projections),
+            (0, 0)
+        );
+        assert_eq!(op.executions(), QUEUE + 1);
+        assert_balanced(&stats(&runtime));
     }
 }
 

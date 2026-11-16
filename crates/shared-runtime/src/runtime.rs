@@ -87,6 +87,8 @@ struct Shared {
     slots: Arc<Semaphore>,
     queued: AtomicUsize,
     projections: Semaphore,
+    queued_projections: AtomicUsize,
+    projection_overloads: AtomicU64,
     phase: watch::Sender<Phase>,
     in_flight: AtomicUsize,
     idle: Notify,
@@ -224,6 +226,8 @@ impl RuntimeBuilder {
                 projections: Semaphore::new(config.max_concurrent_projections),
                 config,
                 queued: AtomicUsize::new(0),
+                queued_projections: AtomicUsize::new(0),
+                projection_overloads: AtomicU64::new(0),
                 phase,
                 in_flight: AtomicUsize::new(0),
                 idle: Notify::new(),
@@ -353,6 +357,10 @@ impl Runtime {
         RuntimeStats {
             operations: self.erased.iter().map(|op| op.stats()).collect(),
             cache_budget_bytes: self.shared.config.cache_budget_bytes,
+            active_projections: self.shared.config.max_concurrent_projections
+                - self.shared.projections.available_permits(),
+            queued_projections: self.shared.queued_projections.load(Ordering::SeqCst),
+            projection_overloads: self.shared.projection_overloads.load(Ordering::Relaxed),
         }
     }
 
@@ -471,6 +479,26 @@ impl Drop for Outcome<'_> {
 /// Releases a queue position when the waiting execution gets a slot or is
 /// dropped.
 struct QueueSlot<'a>(&'a AtomicUsize);
+
+impl<'a> QueueSlot<'a> {
+    fn try_enter(counter: &'a AtomicUsize, limit: usize) -> Option<Self> {
+        let mut queued = counter.load(Ordering::SeqCst);
+        loop {
+            if queued >= limit {
+                return None;
+            }
+            match counter.compare_exchange_weak(
+                queued,
+                queued + 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return Some(Self(counter)),
+                Err(current) => queued = current,
+            }
+        }
+    }
+}
 
 impl Drop for QueueSlot<'_> {
     fn drop(&mut self) {
@@ -686,8 +714,10 @@ impl<O: Operation, V: View<O>> ViewHandle<O, V> {
     /// `Source(CallError::ShuttingDown)` once the shutdown grace has passed;
     /// the call's deadline covers admission and source lookup. A projection
     /// or `finish` already running is not interrupted. Admission precedes
-    /// source lookup so queued views do not retain source outputs. Parameter
-    /// derivation and invalidation registration happen before admission, so
+    /// source lookup so queued views do not retain source outputs. A full
+    /// projection queue returns `Source(CallError::Overloaded)` before
+    /// deriving source parameters. Parameter derivation and invalidation
+    /// registration happen before waiting for admission, so
     /// `forget_window`, `invalidate` and `clear` also cover waiting views.
     pub async fn get_with<T>(
         &self,
@@ -717,6 +747,24 @@ impl<O: Operation, V: View<O>> ViewHandle<O, V> {
             }
         };
         remaining()?;
+        // Reserve either immediate admission or one bounded queue position
+        // before deriving/retaining source parameters. The semaphore preserves
+        // FIFO admission; try_acquire does not bypass already waiting calls.
+        let immediate = shared.projections.try_acquire().ok();
+        let queued = if immediate.is_none() {
+            Some(
+                QueueSlot::try_enter(
+                    &shared.queued_projections,
+                    shared.config.max_queued_projections,
+                )
+                .ok_or_else(|| {
+                    bump(&shared.projection_overloads);
+                    ViewCallError::Source(CallError::Overloaded)
+                })?,
+            )
+        } else {
+            None
+        };
         let params = self.view.source(&request);
         let scope = match self.source.entry.scope {
             ScopeRule::Shared => ScopeKey::Shared,
@@ -733,14 +781,18 @@ impl<O: Operation, V: View<O>> ViewHandle<O, V> {
         let projection_wait = remaining()?;
         // Waiting for a slot ends at the caller's deadline or when the
         // shutdown grace ends, whichever comes first.
-        let _slot = tokio::select! {
-            slot = tokio::time::timeout(projection_wait, shared.projections.acquire()) => slot
-                .map_err(|_| ViewCallError::DeadlineExceeded)?
-                .expect("the projection semaphore is never closed"),
-            _ = phase.wait_for(|phase| *phase == Phase::Aborted) => {
-                return Err(ViewCallError::Source(CallError::ShuttingDown));
-            }
+        let _slot = match immediate {
+            Some(slot) => slot,
+            None => tokio::select! {
+                slot = tokio::time::timeout(projection_wait, shared.projections.acquire()) => slot
+                    .map_err(|_| ViewCallError::DeadlineExceeded)?
+                    .expect("the projection semaphore is never closed"),
+                _ = phase.wait_for(|phase| *phase == Phase::Aborted) => {
+                    return Err(ViewCallError::Source(CallError::ShuttingDown));
+                }
+            },
         };
+        drop(queued);
         if *phase.borrow() != Phase::Running {
             return Err(ViewCallError::Source(CallError::ShuttingDown));
         }

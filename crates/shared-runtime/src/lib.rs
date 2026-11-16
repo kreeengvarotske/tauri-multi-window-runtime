@@ -24,6 +24,10 @@
 //!   charge before building, as `View::project` requires. The runtime
 //!   cannot stop a view from allocating: one that builds first is refused
 //!   by a check after the allocation, which is not a bound on peak memory;
+//! - waiting views: `RuntimeConfig::max_queued_projections` calls may wait
+//!   for admission. Excess calls return `CallError::Overloaded` before
+//!   source parameter derivation. This is a count bound; requests, caller
+//!   futures and IPC transport buffers need their own application limits;
 //! - per-window outputs: dropped by [`Runtime::forget_window`] when the
 //!   window closes; the runtime keeps no list of window labels;
 //! - request and serialized response bytes on the IPC boundary: enforced by

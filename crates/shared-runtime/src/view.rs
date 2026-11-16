@@ -11,7 +11,8 @@ pub trait View<O: Operation>: Send + Sync + 'static {
 
     /// Parameters of the source operation this request reads.
     ///
-    /// Called before waiting for projection admission, so a queued call can
+    /// Called after reserving admission or a bounded queue position, before
+    /// waiting for a projection slot, so a queued call can
     /// register its invalidation identity without retaining a source output.
     /// Keep this cheap: derive parameters only, without loading data. Cache
     /// lookup and operation execution still happen after admission.

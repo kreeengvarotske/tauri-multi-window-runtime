@@ -51,11 +51,22 @@ impl OperationStats {
 /// Memory bound: `cache_weight_bytes() <= allocated_budget_bytes() <=
 /// cache_budget_bytes`, because each operation's cached weight stays within
 /// its own budget and the budgets were reserved from the runtime total.
+/// Projection gauges are separate observations, not an atomic snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeStats {
     pub operations: Vec<OperationStats>,
     /// `RuntimeConfig::cache_budget_bytes`.
     pub cache_budget_bytes: usize,
+    /// Projection slots in use or assigned to a waking waiter, through
+    /// source lookup, projection and `get_with` serialization. At most
+    /// `max_concurrent_projections`.
+    pub active_projections: usize,
+    /// View calls reserving/waiting for admission. At most
+    /// `RuntimeConfig::max_queued_projections`; cancellation releases the seat.
+    pub queued_projections: usize,
+    /// View calls refused because the projection queue was full. They never
+    /// request a source, so they are not in `OperationStats` request counters.
+    pub projection_overloads: u64,
 }
 
 impl RuntimeStats {

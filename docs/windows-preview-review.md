@@ -23,6 +23,7 @@ The queued-view lifecycle bug was reproduced after the checks above. [Fix #66](h
 |---|---|
 | Shared data, bounded views, adapter and typed capabilities | Implemented on main; earlier exact-SHA integration evidence above |
 | Queued-window cleanup | #66 in review; local core/runtime tests pass; inspect generation separation and `View::source` timing |
+| Bounded view queue | Separate follow-up based on #66; explicit `max_queued_projections`, existing `OVERLOADED` envelope and admission gauges; see [migration and validation](projection-queue-review.md). Requires its own exact-SHA checks |
 | Final candidate verification | After review, record the chosen SHA and run full Release workspace tests/Clippy, native close/reopen with queued views, and a clean external consumer on that SHA |
 | Hosted CI for final candidate | Must actually pass. #66 run 43507493106 never started job steps; its Windows annotation reports account payment/spending-limit problems |
 | Tag and GitHub Release | Pending a separate publication decision after candidate checks; then verify remote peeled SHA, tag consumer and tag CI |

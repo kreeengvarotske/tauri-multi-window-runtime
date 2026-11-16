@@ -46,6 +46,7 @@ impl Default for DemoConfig {
                 max_concurrent_operations: 4,
                 max_queued_operations: 64,
                 max_concurrent_projections: 4,
+                max_queued_projections: 32,
                 default_deadline: Duration::from_secs(10),
                 shutdown_grace: Duration::from_secs(2),
                 cache_budget_bytes: 16 << 20,
@@ -354,7 +355,7 @@ pub mod self_test {
     use super::{Catalog, CatalogPage, NoteValue, PageRequest, WindowNote};
     use serde::Serialize;
     use shared_runtime::{CallError, CallOptions, Caller};
-    use shared_runtime_tauri::SharedRuntime;
+    use shared_runtime_tauri::{AdapterErrorCode, SharedRuntime};
     use std::{
         path::PathBuf,
         sync::Mutex,
@@ -380,6 +381,8 @@ pub mod self_test {
         pub queued_view_old_note: Option<u64>,
         pub queued_view_separated: bool,
         pub queued_view_cache_stable: bool,
+        pub projection_queue_bounded: bool,
+        pub projection_queue_empty_after_exit: bool,
         pub refused_after_exit: bool,
         pub caches_empty_after_exit: bool,
         pub error: Option<String>,
@@ -599,6 +602,68 @@ pub mod self_test {
             .map_err(|e| e.to_string())?
             .stats()
             .requests;
+        // Saturate the configured queue while the real app's slots are held.
+        // Cancellation must release every queue seat without fetching notes.
+        let queue_limit = shared.runtime().config().max_queued_projections;
+        if queue_limit == 0 {
+            return Err("queued lifecycle self-test requires at least one queue position".into());
+        }
+        let mut waiting = Vec::new();
+        for _ in 0..queue_limit {
+            use std::{
+                future::Future,
+                task::{Context, Waker},
+            };
+            let mut call = Box::pin(shared.view::<WindowNote, NoteValue>(
+                &old_caller,
+                (),
+                super::NOTE_MAX_RESPONSE_BYTES,
+                CallOptions {
+                    deadline: Some(Duration::from_secs(30)),
+                },
+            ));
+            if !call
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+            {
+                return Err("projection queue refused a configured position".into());
+            }
+            waiting.push(call);
+        }
+        let excess = shared
+            .view::<WindowNote, NoteValue>(
+                &old_caller,
+                (),
+                super::NOTE_MAX_RESPONSE_BYTES,
+                CallOptions::default(),
+            )
+            .await;
+        let full = shared.runtime().stats();
+        let refused =
+            matches!(excess, Err(ref error) if error.code() == AdapterErrorCode::Overloaded);
+        drop(waiting);
+        let after_cancel = shared.runtime().stats();
+        let source_unchanged = shared
+            .runtime()
+            .operation::<WindowNote>()
+            .map_err(|e| e.to_string())?
+            .stats()
+            .requests
+            == requests;
+        let queue_bounded = refused
+            && full.queued_projections == queue_limit
+            && full.projection_overloads == 1
+            && after_cancel.queued_projections == 0
+            && source_unchanged;
+        if !queue_bounded {
+            return Err("projection queue overload or cancellation cleanup failed".into());
+        }
+        app.state::<Progress>()
+            .0
+            .lock()
+            .unwrap()
+            .projection_queue_bounded = true;
         let mut queued = Box::pin(view.get(
             &old_caller,
             (),
@@ -706,10 +771,15 @@ pub mod self_test {
         let mut report = progress.0.lock().unwrap();
         report.refused_after_exit = matches!(after, Err(CallError::ShuttingDown));
         report.caches_empty_after_exit = shared.runtime().stats().cache_weight_bytes() == 0;
+        let stats = shared.runtime().stats();
+        report.projection_queue_empty_after_exit =
+            stats.queued_projections == 0 && stats.active_projections == 0;
         report.passed = report.error.is_none()
             && report.entries_after_destroy.is_some()
             && report.queued_view_separated
             && report.queued_view_cache_stable
+            && report.projection_queue_bounded
+            && report.projection_queue_empty_after_exit
             && report.refused_after_exit
             && report.caches_empty_after_exit;
         let text = serde_json::to_string_pretty(&*report).expect("report serializes");
