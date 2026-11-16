@@ -4,7 +4,7 @@ pub mod service;
 
 pub use cache::{CacheBudget, CacheStats, PolicyCache};
 pub use cache_policy::CachePolicy;
-pub use service::{CachedService, ServiceRunKind, ServiceRunOutcome};
+pub use service::{CachedService, PreparedServiceCall, ServiceRunKind, ServiceRunOutcome};
 use std::{
     collections::HashMap,
     future::Future,

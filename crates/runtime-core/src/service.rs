@@ -120,6 +120,9 @@ where
 /// - The cache key is the only identity. The caller's access context is not
 ///   part of it, so per-user or private results must not share a service
 ///   key (V6).
+/// - `prepare_call` captures invalidation identity without looking up a value.
+///   Its deferred lookup can use a current cache entry only if no matching
+///   invalidation happened since preparation; it never snapshots an output.
 pub struct CachedService<K, V, E> {
     cache: PolicyCache<K, V>,
     coalescer: TaskCoalescer<(K, u64, u64), CachedValue<V>, E>,
@@ -127,10 +130,112 @@ pub struct CachedService<K, V, E> {
     generation: Mutex<GenerationState<K>>,
 }
 
+/// A call's invalidation registration, without retaining a cached output.
+///
+/// Prepared calls may wait for external admission before looking up the cache.
+/// Invalidation during that wait separates them from newer calls and prevents
+/// them from reading or repopulating the newer cache. Dropping a prepared call
+/// releases its key registration, including when admission is cancelled.
+#[must_use = "keep the registration until admission, then run it or drop it to cancel"]
+pub struct PreparedServiceCall<'a, K: Eq + Hash, V, E> {
+    service: &'a CachedService<K, V, E>,
+    guard: KeyCallGuard<'a, K>,
+    global_version: u64,
+    key_version: u64,
+}
+
+impl<K: Eq + Hash + Clone, V, E> PreparedServiceCall<'_, K, V, E> {
+    /// Looks up the cache only after the caller has acquired admission.
+    /// Stale registrations still execute and return their result, but cannot
+    /// consume a newer cached value or store their result after invalidation.
+    pub async fn run_with_metadata<F, Fut>(self, operation: F) -> ServiceRunOutcome<V, E>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<V, E>>,
+    {
+        let mut removed = Vec::new();
+        let cached = {
+            let generation = self
+                .service
+                .generation
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if generation.global_version == self.global_version
+                && generation
+                    .keys
+                    .get(&self.guard.key)
+                    .is_some_and(|state| state.version == self.key_version)
+            {
+                self.service
+                    .cache
+                    .get_deferred(&self.guard.key, &mut removed)
+            } else {
+                None
+            }
+        };
+        drop(removed);
+        let result = if let Some(value) = cached {
+            ServiceRunOutcome {
+                result: Ok(value),
+                kind: ServiceRunKind::CacheHit,
+            }
+        } else {
+            self.service
+                .execute_registered(
+                    self.guard.key.clone(),
+                    self.global_version,
+                    self.key_version,
+                    operation,
+                )
+                .await
+        };
+        drop(self);
+        result
+    }
+}
+
 impl<K, V, E> CachedService<K, V, E>
 where
     K: Eq + Hash + Clone,
 {
+    /// Registers invalidation identity before an external admission wait.
+    /// Does not look up, execute, or retain an output. The registration's
+    /// metadata exists only while the returned prepared call is alive.
+    ///
+    /// ```
+    /// use runtime_core::{CachePolicy, CachedService};
+    /// # tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(async {
+    /// let service = CachedService::<u32, usize, ()>::new(CachePolicy::Forever);
+    /// let waiting = service.prepare_call(7);
+    /// // The caller may wait for its own admission slot here.
+    /// service.invalidate(&7);
+    /// let result = waiting.run_with_metadata(|| async { Ok(42) }).await;
+    /// assert_eq!(*result.result.unwrap(), 42);
+    /// assert_eq!(service.cached_entries(), 0); // The old call cannot recache.
+    /// # });
+    /// ```
+    pub fn prepare_call(&self, key: K) -> PreparedServiceCall<'_, K, V, E> {
+        let (global_version, key_version) = {
+            let mut generation = self.generation.lock().unwrap_or_else(|p| p.into_inner());
+            let global_version = generation.global_version;
+            let state = generation.keys.entry(key.clone()).or_insert(KeyGeneration {
+                version: 0,
+                active_calls: 0,
+            });
+            state.active_calls += 1;
+            (global_version, state.version)
+        };
+        PreparedServiceCall {
+            service: self,
+            guard: KeyCallGuard {
+                state: &self.generation,
+                key,
+            },
+            global_version,
+            key_version,
+        }
+    }
+
     /// Creates a service using one cache policy for all keys.
     pub fn new(policy: CachePolicy) -> Self {
         Self {
@@ -220,6 +325,21 @@ where
         };
         drop(removed);
 
+        self.execute_registered(key, global_version, key_version, operation)
+            .await
+    }
+
+    async fn execute_registered<F, Fut>(
+        &self,
+        key: K,
+        global_version: u64,
+        key_version: u64,
+        operation: F,
+    ) -> ServiceRunOutcome<V, E>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<V, E>>,
+    {
         let cache = &self.cache;
         let generation_gate = &self.generation;
         let policy = self.policy;
@@ -428,6 +548,151 @@ mod tests {
         time::Duration,
     };
     use tokio::task::JoinSet;
+
+    #[tokio::test]
+    async fn prepared_call_cannot_read_or_replace_a_newer_generation() {
+        let service = CachedService::<u8, usize, String>::new(CachePolicy::Forever);
+        let old = service.prepare_call(1);
+        service.invalidate(&1);
+        assert_eq!(*service.run(1, || async { Ok(2) }).await.unwrap(), 2);
+        let result = old.run_with_metadata(|| async { Ok(1) }).await;
+        assert_eq!(result.kind, ServiceRunKind::Executed);
+        assert_eq!(*result.result.unwrap(), 1);
+        assert_eq!(*service.run(1, || async { Ok(99) }).await.unwrap(), 2);
+        assert_eq!(service.in_flight_keys(), 0);
+    }
+
+    #[tokio::test]
+    async fn prepared_call_retains_no_output_and_clear_prevents_insertion() {
+        let service = CachedService::<u8, usize, String>::new(CachePolicy::Forever);
+        let value = service.run(1, || async { Ok(7) }).await.unwrap();
+        let weak = Arc::downgrade(&value);
+        let prepared = service.prepare_call(1);
+        drop(value);
+        service.clear();
+        assert!(
+            weak.upgrade().is_none(),
+            "a queued registration retained a cached value"
+        );
+        assert_eq!(
+            *prepared
+                .run_with_metadata(|| async { Ok(8) })
+                .await
+                .result
+                .unwrap(),
+            8
+        );
+        assert_eq!(service.cached_entries(), 0);
+        assert_eq!(service.in_flight_keys(), 0);
+    }
+
+    #[tokio::test]
+    async fn prepared_calls_clean_up_on_drop_and_future_cancellation() {
+        use std::{
+            future::Future,
+            task::{Context, Waker},
+        };
+        let service = CachedService::<u8, usize, String>::new(CachePolicy::Forever);
+        let prepared = service.prepare_call(1);
+        assert_eq!(service.in_flight_keys(), 1);
+        drop(prepared);
+        assert_eq!(service.in_flight_keys(), 0);
+        let mut call = Box::pin(
+            service
+                .prepare_call(1)
+                .run_with_metadata(std::future::pending),
+        );
+        assert!(
+            call.as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        assert_eq!(service.in_flight_tasks(), 1);
+        drop(call);
+        assert_eq!(
+            (service.in_flight_keys(), service.in_flight_tasks()),
+            (0, 0)
+        );
+        assert_eq!(service.cached_entries(), 0);
+    }
+
+    #[tokio::test]
+    async fn prepared_call_reads_a_current_cache_entry_after_admission() {
+        let service = CachedService::<u8, usize, String>::new(CachePolicy::Forever);
+        let prepared = service.prepare_call(1);
+        service.run(1, || async { Ok(7) }).await.unwrap();
+        let result = prepared
+            .run_with_metadata(|| async { panic!("cache hit must not execute") })
+            .await;
+        assert_eq!(result.kind, ServiceRunKind::CacheHit);
+        assert_eq!(*result.result.unwrap(), 7);
+        assert_eq!(service.in_flight_keys(), 0);
+    }
+
+    #[tokio::test]
+    async fn prepared_and_ordinary_calls_coalesce_in_the_same_generation() {
+        use std::{
+            future::Future,
+            task::{Context, Waker},
+        };
+        let service = CachedService::<u8, usize, String>::new(CachePolicy::Forever);
+        let gate = tokio::sync::Notify::new();
+        let mut first = Box::pin(service.prepare_call(1).run_with_metadata(|| async {
+            gate.notified().await;
+            Ok(7)
+        }));
+        let mut second = Box::pin(service.run_with_metadata(1, || async { Ok(9) }));
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(first.as_mut().poll(&mut cx).is_pending());
+        assert!(second.as_mut().poll(&mut cx).is_pending());
+        gate.notify_one();
+        let (first, second) = tokio::join!(first, second);
+        assert_eq!(first.kind, ServiceRunKind::Executed);
+        assert_eq!(second.kind, ServiceRunKind::Coalesced);
+        assert!(Arc::ptr_eq(&first.result.unwrap(), &second.result.unwrap()));
+        assert_eq!(service.cached_entries(), 1);
+        assert_eq!(
+            (service.in_flight_keys(), service.in_flight_tasks()),
+            (0, 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn prepared_waiter_restart_after_invalidation_and_initializer_cancel_does_not_cache() {
+        use std::{
+            future::Future,
+            task::{Context, Waker},
+        };
+        let service = CachedService::<u8, usize, String>::new(CachePolicy::Forever);
+        let mut first = Box::pin(
+            service
+                .prepare_call(1)
+                .run_with_metadata(std::future::pending),
+        );
+        let mut waiter = Box::pin(
+            service
+                .prepare_call(1)
+                .run_with_metadata(|| async { Ok(9) }),
+        );
+        let mut cx = Context::from_waker(Waker::noop());
+        assert!(first.as_mut().poll(&mut cx).is_pending());
+        assert!(waiter.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(service.in_flight_callers(), 2);
+        service.invalidate(&1);
+        drop(first);
+        let result = waiter.await;
+        assert_eq!(result.kind, ServiceRunKind::Executed);
+        assert_eq!(*result.result.unwrap(), 9);
+        assert_eq!(service.cached_entries(), 0);
+        assert_eq!(
+            (
+                service.in_flight_keys(),
+                service.in_flight_tasks(),
+                service.in_flight_callers()
+            ),
+            (0, 0, 0)
+        );
+    }
 
     #[tokio::test]
     async fn caches_successful_results() {

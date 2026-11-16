@@ -106,6 +106,7 @@ try {
     }
     if ($RequireMatchingRevision -and
         ($result.catalogExecutions -ne 1 -or $result.catalogCacheEntries -ne 1 -or
+         $result.queuedViewSeparated -ne $true -or $result.queuedViewCacheStable -ne $true -or
          $result.refusedAfterExit -ne $true -or $result.cachesEmptyAfterExit -ne $true)) {
         throw "Consumer self-test is missing release evidence. Report: $report"
     }

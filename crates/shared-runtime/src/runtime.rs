@@ -1,4 +1,4 @@
-use runtime_core::{CacheBudget, CachedService, ServiceRunKind};
+use runtime_core::{CacheBudget, CachedService, PreparedServiceCall, ServiceRunKind};
 use std::{
     any::{Any, TypeId},
     collections::{HashMap, HashSet},
@@ -138,6 +138,13 @@ fn bump(counter: &AtomicU64) {
 }
 
 type Service<O> = CachedService<
+    (ScopeKey, <O as Operation>::Params),
+    <O as Operation>::Output,
+    Failure<<O as Operation>::Error>,
+>;
+
+type Prepared<'a, O> = PreparedServiceCall<
+    'a,
     (ScopeKey, <O as Operation>::Params),
     <O as Operation>::Output,
     Failure<<O as Operation>::Error>,
@@ -499,6 +506,16 @@ impl<O: Operation> OperationHandle<O> {
         params: O::Params,
         options: CallOptions,
     ) -> Result<Arc<O::Output>, CallError<O::Error>> {
+        self.get_prepared(caller, params, options, None).await
+    }
+
+    async fn get_prepared(
+        &self,
+        caller: &Caller,
+        params: O::Params,
+        options: CallOptions,
+        prepared: Option<Prepared<'_, O>>,
+    ) -> Result<Arc<O::Output>, CallError<O::Error>> {
         let entry = &*self.entry;
         let shared = &*self.shared;
         let counters = &entry.counters;
@@ -527,32 +544,42 @@ impl<O: Operation> OperationHandle<O> {
             ScopeRule::Shared => ScopeKey::Shared,
             ScopeRule::PerWindow => ScopeKey::Window(caller.window_key()),
         };
+        let key = prepared.is_none().then(|| (scope, params.clone()));
         let ctx = OpContext {
             phase: phase.clone(),
         };
         let op = &entry.op;
-        let run = entry
-            .service
-            .run_with_metadata((scope, params.clone()), || async move {
-                let _permit = match Arc::clone(&shared.slots).try_acquire_owned() {
-                    Ok(permit) => permit,
-                    Err(_) => {
-                        let max = shared.config.max_queued_operations;
-                        if shared.queued.fetch_add(1, Ordering::SeqCst) >= max {
-                            shared.queued.fetch_sub(1, Ordering::SeqCst);
-                            return Err(Failure::Overloaded);
-                        }
-                        let _slot = QueueSlot(&shared.queued);
-                        Arc::clone(&shared.slots)
-                            .acquire_owned()
-                            .await
-                            .expect("the slot semaphore is never closed")
+        let operation = || async move {
+            let _permit = match Arc::clone(&shared.slots).try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => {
+                    let max = shared.config.max_queued_operations;
+                    if shared.queued.fetch_add(1, Ordering::SeqCst) >= max {
+                        shared.queued.fetch_sub(1, Ordering::SeqCst);
+                        return Err(Failure::Overloaded);
                     }
-                };
-                op.run(ctx, params)
-                    .await
-                    .map_err(|error| Failure::Op(Arc::new(error)))
-            });
+                    let _slot = QueueSlot(&shared.queued);
+                    Arc::clone(&shared.slots)
+                        .acquire_owned()
+                        .await
+                        .expect("the slot semaphore is never closed")
+                }
+            };
+            op.run(ctx, params)
+                .await
+                .map_err(|error| Failure::Op(Arc::new(error)))
+        };
+        let run = async {
+            match prepared {
+                Some(call) => call.run_with_metadata(operation).await,
+                None => {
+                    entry
+                        .service
+                        .run_with_metadata(key.expect("unprepared call has a key"), operation)
+                        .await
+                }
+            }
+        };
         let run = tokio::select! {
             biased;
             _ = phase.wait_for(|phase| *phase == Phase::Aborted) => {
@@ -659,7 +686,9 @@ impl<O: Operation, V: View<O>> ViewHandle<O, V> {
     /// `Source(CallError::ShuttingDown)` once the shutdown grace has passed;
     /// the call's deadline covers admission and source lookup. A projection
     /// or `finish` already running is not interrupted. Admission precedes
-    /// source lookup so queued views do not retain source outputs.
+    /// source lookup so queued views do not retain source outputs. Parameter
+    /// derivation and invalidation registration happen before admission, so
+    /// `forget_window`, `invalidate` and `clear` also cover waiting views.
     pub async fn get_with<T>(
         &self,
         caller: &Caller,
@@ -687,6 +716,20 @@ impl<O: Operation, V: View<O>> ViewHandle<O, V> {
                 Ok(time)
             }
         };
+        remaining()?;
+        let params = self.view.source(&request);
+        let scope = match self.source.entry.scope {
+            ScopeRule::Shared => ScopeKey::Shared,
+            ScopeRule::PerWindow => ScopeKey::Window(caller.window_key()),
+        };
+        // Register invalidation identity before waiting, but retain no source
+        // output until projection admission. Closing a window or clearing the
+        // runtime during the wait must also invalidate this queued call.
+        let prepared = self
+            .source
+            .entry
+            .service
+            .prepare_call((scope, params.clone()));
         let projection_wait = remaining()?;
         // Waiting for a slot ends at the caller's deadline or when the
         // shutdown grace ends, whichever comes first.
@@ -702,15 +745,15 @@ impl<O: Operation, V: View<O>> ViewHandle<O, V> {
             return Err(ViewCallError::Source(CallError::ShuttingDown));
         }
         remaining()?;
-        let params = self.view.source(&request);
         let output = self
             .source
-            .get(
+            .get_prepared(
                 caller,
                 params,
                 CallOptions {
                     deadline: Some(remaining()?),
                 },
+                Some(prepared),
             )
             .await
             .map_err(ViewCallError::Source)?;

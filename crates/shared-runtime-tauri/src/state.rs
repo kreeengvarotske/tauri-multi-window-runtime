@@ -159,7 +159,7 @@ mod tests {
         release: Mutex<Option<mpsc::Receiver<()>>>,
     }
 
-    struct Strings;
+    struct Strings(ScopeRule);
 
     impl Operation for Strings {
         const NAME: &'static str = "test.strings";
@@ -169,6 +169,10 @@ mod tests {
 
         fn policy(&self) -> CachePolicy {
             CachePolicy::Forever
+        }
+
+        fn scope(&self) -> ScopeRule {
+            self.0
         }
 
         fn weight(&self, output: &Vec<String>) -> usize {
@@ -244,10 +248,14 @@ mod tests {
     }
 
     fn shared(projections: usize, gate: Arc<Gate>) -> SharedRuntime {
+        scoped(projections, gate, ScopeRule::Shared)
+    }
+
+    fn scoped(projections: usize, gate: Arc<Gate>, scope: ScopeRule) -> SharedRuntime {
         let runtime = Runtime::builder(config(projections, Duration::from_millis(50)))
             .unwrap()
             .register(
-                Strings,
+                Strings(scope),
                 OperationConfig {
                     cache_budget_bytes: 1 << 20,
                 },
@@ -337,6 +345,77 @@ mod tests {
                 .view::<Strings, All>(&Caller::window("w1"), 10, 1 << 20, CallOptions::default())
                 .await
                 .is_ok()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn closing_a_window_while_its_view_is_queued_does_not_recache_through_the_adapter() {
+        use std::{
+            future::Future,
+            task::{Context, Waker},
+        };
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let state = Arc::new(scoped(
+            1,
+            Arc::new(Gate {
+                entered: Mutex::new(Some(entered_tx)),
+                release: Mutex::new(Some(release_rx)),
+            }),
+            ScopeRule::PerWindow,
+        ));
+        let first = tokio::spawn({
+            let state = Arc::clone(&state);
+            async move {
+                state
+                    .view::<Strings, All>(
+                        &Caller::window("main"),
+                        10,
+                        1 << 20,
+                        CallOptions::default(),
+                    )
+                    .await
+            }
+        });
+        tokio::task::spawn_blocking(move || entered_rx.recv().unwrap())
+            .await
+            .unwrap();
+        let closing = Caller::window("closing");
+        let mut queued =
+            Box::pin(state.view::<Strings, All>(&closing, 20, 1 << 20, CallOptions::default()));
+        assert!(
+            queued
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+        );
+        assert_eq!(
+            state
+                .runtime()
+                .stats()
+                .operation(Strings::NAME)
+                .unwrap()
+                .requests,
+            1
+        );
+        assert_eq!(state.forget_window("closing"), 0);
+        release_tx.send(()).unwrap();
+        assert!(first.await.unwrap().is_ok());
+        let response = tokio::time::timeout(Duration::from_secs(5), queued)
+            .await
+            .unwrap()
+            .unwrap();
+        let strings: Vec<String> = serde_json::from_slice(response.as_bytes()).unwrap();
+        assert_eq!(strings, vec!["x".repeat(20); 4]);
+        assert_eq!(
+            state
+                .runtime()
+                .stats()
+                .operation(Strings::NAME)
+                .unwrap()
+                .cache_entries,
+            1,
+            "the adapter's queued call repopulated the closed window's cache"
         );
     }
 

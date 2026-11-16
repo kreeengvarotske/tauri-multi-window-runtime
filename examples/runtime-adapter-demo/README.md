@@ -15,6 +15,12 @@ $demo = Join-Path $PWD 'target\release\runtime-adapter-demo.exe'
 
 Close the demo before running its self-test. Two real WebViews request different pages over IPC. The report records one catalog execution and one cached catalog entry, and checks window-specific access, cleanup, and shutdown. Use a new report path for each attempt.
 
+The lifecycle check also keeps an old window's view queued while the real
+window is destroyed and reopened under the same label. A passing report
+requires `queuedViewSeparated` and `queuedViewCacheStable`: the old call
+must not read or replace the reopened window's cached note. This is a
+functional check, not a measurement of application memory.
+
 ```powershell
 $report = Join-Path ([IO.Path]::GetTempPath()) "runtime-adapter-demo-$([guid]::NewGuid()).json"
 $run = Start-Process -FilePath $demo -ArgumentList @('--self-test', ('"{0}"' -f $report)) -PassThru -WindowStyle Hidden
@@ -33,6 +39,15 @@ $report
 See the [adapter guide](../../crates/shared-runtime-tauri/README.md), the [Rust integration](src/lib.rs), and the [frontend example](ui/main.js).
 
 ### Use the preview from another project
+
+The `v0.1.0-preview.1` tag has not been published as of 13 November 2026.
+The tag-based dependency example below is the intended release form, not a
+currently available remote tag. To evaluate the source before publication,
+use a reviewed checkout and the build/self-test commands above. The
+[release review](../../docs/windows-preview-review.md) lists remaining
+checks, including the queued-window lifecycle fix in #66. Do not substitute
+an unverified candidate into release instructions or assume earlier native
+results cover a newer SHA.
 
 Add both crates to the Cargo manifest that builds your Tauri backend. Pin both to the same release tag. Cargo records the tag's commit SHA in your `Cargo.lock`. Check that SHA against the one stated in the GitHub Release for the tag.
 

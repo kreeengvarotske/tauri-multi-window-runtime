@@ -213,7 +213,34 @@ impl Operation for WindowNote {
     }
 }
 
-/// Builds the runtime with both operations and the view.
+/// A bounded Rust-side note view used by the native lifecycle self-test.
+/// It is not exposed as an additional IPC command.
+struct NoteValue;
+
+impl View<WindowNote> for NoteValue {
+    const NAME: &'static str = "demo.window-note.value";
+    type Request = ();
+    type Response = Note;
+    fn source(&self, _: &()) {}
+    fn max_items(&self) -> usize {
+        1
+    }
+    fn max_response_bytes(&self) -> usize {
+        std::mem::size_of::<Note>()
+    }
+    fn project(&self, note: &Note, _: (), budget: &mut ResponseBudget) -> Result<Note, ViewError> {
+        budget.take(std::mem::size_of::<Note>())?;
+        Ok(*note)
+    }
+    fn items(_: &Note) -> usize {
+        1
+    }
+    fn response_bytes(_: &Note) -> usize {
+        std::mem::size_of::<Note>()
+    }
+}
+
+/// Builds the runtime with both operations and bounded views.
 pub fn runtime(config: DemoConfig) -> Result<Runtime, RegistryError> {
     Ok(Runtime::builder(config.runtime)?
         .register(
@@ -233,6 +260,7 @@ pub fn runtime(config: DemoConfig) -> Result<Runtime, RegistryError> {
             },
         )?
         .view::<Catalog, _>(CatalogPage)?
+        .view::<WindowNote, _>(NoteValue)?
         .build())
 }
 
@@ -323,7 +351,7 @@ fn demo_stats(shared: State<'_, SharedRuntime>) -> Result<JsonBytes, AdapterErro
 /// shut the runtime down) it checks that calls are refused and writes the
 /// report.
 pub mod self_test {
-    use super::{Catalog, WindowNote};
+    use super::{Catalog, CatalogPage, NoteValue, PageRequest, WindowNote};
     use serde::Serialize;
     use shared_runtime::{CallError, CallOptions, Caller};
     use shared_runtime_tauri::SharedRuntime;
@@ -349,6 +377,9 @@ pub mod self_test {
         pub entries_after_destroy: Option<usize>,
         pub forget_ms: Option<u128>,
         pub reopened_w1_note: u64,
+        pub queued_view_old_note: Option<u64>,
+        pub queued_view_separated: bool,
+        pub queued_view_cache_stable: bool,
         pub refused_after_exit: bool,
         pub caches_empty_after_exit: bool,
         pub error: Option<String>,
@@ -524,6 +555,80 @@ pub mod self_test {
         if before != 2 || main_note == first {
             return Err("the two windows did not have separate cached notes".into());
         }
+        // Occupy every projection slot without blocking the window/event loop.
+        // Dropping `releases` also releases the holders on any early return.
+        let mut releases = Vec::new();
+        let mut holders = Vec::new();
+        for _ in 0..shared.runtime().config().max_concurrent_projections {
+            let view = shared
+                .runtime()
+                .view::<Catalog, CatalogPage>()
+                .map_err(|e| e.to_string())?;
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+            releases.push(release_tx);
+            let executor = tauri::async_runtime::handle();
+            holders.push(tauri::async_runtime::spawn_blocking(move || {
+                executor.block_on(view.get_with(
+                    &Caller::window("main"),
+                    PageRequest {
+                        offset: 0,
+                        limit: 1,
+                    },
+                    CallOptions::default(),
+                    move |page| {
+                        let _ = entered_tx.send(());
+                        let _ = release_rx.recv();
+                        page.items.len()
+                    },
+                ))
+            }));
+            tokio::time::timeout(Duration::from_secs(5), entered_rx)
+                .await
+                .map_err(|_| "projection holder did not acquire a slot")?
+                .map_err(|_| "projection holder ended before entering")?;
+        }
+        let view = shared
+            .runtime()
+            .view::<WindowNote, NoteValue>()
+            .map_err(|e| e.to_string())?;
+        let old_caller = shared_runtime_tauri::caller(&w1);
+        let requests = shared
+            .runtime()
+            .operation::<WindowNote>()
+            .map_err(|e| e.to_string())?
+            .stats()
+            .requests;
+        let mut queued = Box::pin(view.get(
+            &old_caller,
+            (),
+            CallOptions {
+                deadline: Some(Duration::from_secs(30)),
+            },
+        ));
+        {
+            use std::{
+                future::Future,
+                task::{Context, Waker},
+            };
+            if !queued
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_pending()
+            {
+                return Err("old window view did not wait behind the occupied slots".into());
+            }
+        }
+        if shared
+            .runtime()
+            .operation::<WindowNote>()
+            .map_err(|e| e.to_string())?
+            .stats()
+            .requests
+            != requests
+        {
+            return Err("queued window view fetched its source before admission".into());
+        }
         w1.destroy().map_err(|e| e.to_string())?;
         let started = Instant::now();
         while note_entries(app) != before - 1 {
@@ -539,11 +644,31 @@ pub mod self_test {
         open(app, "")?;
         let reopened = note(app, "w1").await?;
         let main_again = note(app, "main").await?;
+        releases.clear();
+        for holder in holders {
+            tokio::time::timeout(Duration::from_secs(5), holder)
+                .await
+                .map_err(|_| "projection holder did not finish after release")?
+                .map_err(|e| e.to_string())?
+                .map_err(|e| format!("projection holder failed: {e:?}"))?;
+        }
+        let old_note = tokio::time::timeout(Duration::from_secs(5), queued)
+            .await
+            .map_err(|_| "old queued window view did not finish")?
+            .map_err(|e| format!("old queued window view failed: {e:?}"))?;
+        let separated = old_note.execution != reopened;
+        let cache_stable = note(app, "w1").await? == reopened && note_entries(app) == before;
         let progress = app.state::<Progress>();
         let mut report = progress.0.lock().unwrap();
         report.entries_after_destroy = Some(before - 1);
         report.forget_ms = Some(forget_ms);
         report.reopened_w1_note = reopened;
+        report.queued_view_old_note = Some(old_note.execution);
+        report.queued_view_separated = separated;
+        report.queued_view_cache_stable = cache_stable;
+        if !separated || !cache_stable {
+            return Err("old queued view read or replaced the reopened window's cache".into());
+        }
         if main_again != main_note {
             return Err("main's note changed when w1 was destroyed".into());
         }
@@ -583,6 +708,8 @@ pub mod self_test {
         report.caches_empty_after_exit = shared.runtime().stats().cache_weight_bytes() == 0;
         report.passed = report.error.is_none()
             && report.entries_after_destroy.is_some()
+            && report.queued_view_separated
+            && report.queued_view_cache_stable
             && report.refused_after_exit
             && report.caches_empty_after_exit;
         let text = serde_json::to_string_pretty(&*report).expect("report serializes");

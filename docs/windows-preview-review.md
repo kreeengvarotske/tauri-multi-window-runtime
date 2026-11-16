@@ -10,9 +10,27 @@ The release tag and GitHub Release are pending.
 
 ## Current release evidence
 
-- Hosted Windows and Ubuntu checks passed for the integrated #49 head `f5c5301`. The merge commit `089effe` has the same source tree. A separate hosted run for that merge SHA was not listed at the last check.
+- Hosted Windows and Ubuntu checks passed on the exact merge SHA `089effe` in [push run 42701484542](https://github.com/kreeengvarotske/tauri-multi-window-runtime/actions/runs/42701484542). They also passed on current main `7244a5cbccbe37a96ac67c69f374d9de383eb2d5` in [push run 43090268756](https://github.com/kreeengvarotske/tauri-multi-window-runtime/actions/runs/43090268756). Both matrix jobs were checked directly; a PR-only run listing must not be used to infer that push CI is absent.
 - A clean external consumer built in Release mode from Git revision `089effe` on Windows build 26200 with Rust 1.99.1 and Tauri 2.12.5. The self-test verified one catalog execution, one cache entry, refusal after shutdown and empty caches. [Recorded evidence](https://github.com/kreeengvarotske/tauri-multi-window-runtime/pull/49#issuecomment-6751799764).
 - The tag-aware consumer script at `0db99ac` passed missing-tag and mismatched-tag refusals in PowerShell 5.1 and 7. An isolated local annotated test tag resolved all three runtime packages to the same commit and passed the native Release self-test. This validates the tag installation path before testing the final remote release tag.
+- Main `7244a5c` passed 140 Windows Release unit/integration tests and three doctests, workspace formatting and Release Clippy with warnings denied. A clean external consumer also passed the native Release self-test on that SHA. [Exact-SHA evidence and hashes](https://github.com/kreeengvarotske/tauri-multi-window-runtime/pull/56#issuecomment-6806361909). These results do not validate later source changes.
+
+## Remaining gates for the Git preview
+
+The queued-view lifecycle bug was reproduced after the checks above. [Fix #66](https://github.com/kreeengvarotske/tauri-multi-window-runtime/pull/66) is a separate candidate based on `7244a5c`; the fix has not landed on main. Its [review record](window-view-lifecycle-review.md) documents the failed pre-fix regression, behavior, compatibility notes and local checks. Treat it as a release issue requiring review and verification rather than reusing earlier main results.
+
+| Gate | State / required evidence |
+|---|---|
+| Shared data, bounded views, adapter and typed capabilities | Implemented on main; earlier exact-SHA integration evidence above |
+| Queued-window cleanup | #66 in review; local core/runtime tests pass; inspect generation separation and `View::source` timing |
+| Final candidate verification | After review, record the chosen SHA and run full Release workspace tests/Clippy, native close/reopen with queued views, and a clean external consumer on that SHA |
+| Hosted CI for final candidate | Must actually pass. #66 run 43507493106 never started job steps; its Windows annotation reports account payment/spending-limit problems |
+| Tag and GitHub Release | Pending a separate publication decision after candidate checks; then verify remote peeled SHA, tag consumer and tag CI |
+| Distribution access | Repository remains private; Git consumers need read access. Changing visibility is a separate decision |
+| Memory/CPU claims | No general saving claim. The descriptive pilot is in #64; new daytime diagnostics were under competing game load and cannot validate a performance effect |
+| Registry and cross-app work | Separate later tracks; neither is required to finish this Git developer preview |
+
+Initial #66 checks were limited to library tests while the operator was gaming. After CS2 was confirmed closed, the expanded Debug native queued close/reopen self-test passed on `11f2a31`; see the linked lifecycle record for exact evidence and the retained Chromium teardown diagnostic. This is functional evidence, not a performance comparison. The full Release and clean Git-consumer gates still require their own candidate evidence. Do not repeatedly dispatch CI while the known account restriction prevents jobs from starting.
 
 ## Verification
 

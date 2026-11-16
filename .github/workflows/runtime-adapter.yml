@@ -58,7 +58,7 @@ jobs:
         run: |
           timeout 120 xvfb-run -a target/debug/runtime-adapter-demo --self-test self-test.json
           cat self-test.json
-          jq -e '.passed == true and .catalogExecutions == 1 and .catalogCacheEntries == 1 and .refusedAfterExit == true and .cachesEmptyAfterExit == true' self-test.json
+          jq -e '.passed == true and .catalogExecutions == 1 and .catalogCacheEntries == 1 and .queuedViewSeparated == true and .queuedViewCacheStable == true and .refusedAfterExit == true and .cachesEmptyAfterExit == true' self-test.json
       - name: Self-test on Windows
         if: runner.os == 'Windows'
         shell: pwsh
@@ -72,6 +72,7 @@ jobs:
           $result = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
           if ($app.ExitCode -ne 0 -or $result.passed -ne $true -or
               $result.catalogExecutions -ne 1 -or $result.catalogCacheEntries -ne 1 -or
+              $result.queuedViewSeparated -ne $true -or $result.queuedViewCacheStable -ne $true -or
               $result.refusedAfterExit -ne $true -or $result.cachesEmptyAfterExit -ne $true) {
             throw 'Self-test did not produce the required catalog and shutdown evidence.'
           }

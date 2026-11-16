@@ -1243,6 +1243,162 @@ async fn result_of_a_forgotten_window_in_flight_is_not_cached() {
 
 // ------------------------------------------------------ projection limit
 
+struct LoadLength;
+
+impl View<Load> for LoadLength {
+    const NAME: &'static str = "test.load.length";
+    type Request = u32;
+    type Response = usize;
+    fn source(&self, request: &u32) -> u32 {
+        *request
+    }
+    fn max_items(&self) -> usize {
+        1
+    }
+    fn max_response_bytes(&self) -> usize {
+        size_of::<usize>()
+    }
+    fn project(
+        &self,
+        output: &Vec<u8>,
+        _: u32,
+        budget: &mut ResponseBudget,
+    ) -> Result<usize, ViewError> {
+        budget.take(size_of::<usize>())?;
+        Ok(output.len())
+    }
+    fn items(_: &usize) -> usize {
+        1
+    }
+    fn response_bytes(_: &usize) -> usize {
+        size_of::<usize>()
+    }
+}
+
+#[tokio::test]
+async fn forgotten_window_queued_view_cannot_repopulate_its_cache() {
+    use std::{
+        future::Future,
+        task::{Context, Waker},
+    };
+    let (op, gate) = Load::gated(ScopeRule::PerWindow);
+    let runtime = Runtime::builder(RuntimeConfig {
+        max_concurrent_projections: 1,
+        ..config()
+    })
+    .unwrap()
+    .register(op.clone(), budget(1024))
+    .unwrap()
+    .view::<Load, _>(LoadLength)
+    .unwrap()
+    .build();
+    let view = runtime.view::<Load, LoadLength>().unwrap();
+    let holder = window("holder");
+    let closing = window("closing");
+    let mut first = std::pin::pin!(view.get(&holder, 1, NO_OPTIONS));
+    let mut queued = std::pin::pin!(view.get(&closing, 2, NO_OPTIONS));
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(first.as_mut().poll(&mut cx).is_pending());
+    assert!(queued.as_mut().poll(&mut cx).is_pending());
+    assert_eq!(op.executions(), 1, "queued view must not load its source");
+    assert_eq!(runtime.forget_window(&closing), 0);
+    gate.add_permits(2);
+    assert_eq!(first.await.unwrap(), 1);
+    assert_eq!(queued.await.unwrap(), 2, "old call still gets its result");
+    assert_eq!(
+        stats(&runtime).cache_entries,
+        1,
+        "closed window repopulated its cache after admission"
+    );
+    assert_balanced(&stats(&runtime));
+}
+
+#[tokio::test]
+async fn old_queued_view_cannot_read_or_replace_a_reopened_windows_cache() {
+    use std::{
+        future::Future,
+        task::{Context, Waker},
+    };
+    let (op, gate) = Load::gated(ScopeRule::PerWindow);
+    let runtime = Runtime::builder(RuntimeConfig {
+        max_concurrent_projections: 1,
+        ..config()
+    })
+    .unwrap()
+    .register(op.clone(), budget(1024))
+    .unwrap()
+    .view::<Load, _>(LoadLength)
+    .unwrap()
+    .build();
+    let view = runtime.view::<Load, LoadLength>().unwrap();
+    let holder = window("holder");
+    let closing = window("closing");
+    let mut first = std::pin::pin!(view.get(&holder, 1, NO_OPTIONS));
+    let mut old = std::pin::pin!(view.get(&closing, 2, NO_OPTIONS));
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(first.as_mut().poll(&mut cx).is_pending());
+    assert!(old.as_mut().poll(&mut cx).is_pending());
+    runtime.forget_window(&closing);
+    // A new window reuses the label while its predecessor is still queued.
+    let source = runtime.operation::<Load>().unwrap();
+    let reopened = window("closing");
+    let mut fresh = std::pin::pin!(source.get(&reopened, 2, NO_OPTIONS));
+    assert!(fresh.as_mut().poll(&mut cx).is_pending());
+    gate.add_permits(3);
+    let new_output = fresh.await.unwrap();
+    assert_eq!(first.await.unwrap(), 1);
+    assert_eq!(old.await.unwrap(), 2);
+    assert_eq!(
+        op.executions(),
+        3,
+        "old view consumed the reopened window's cache"
+    );
+    let current = source.get(&reopened, 2, NO_OPTIONS).await.unwrap();
+    assert!(
+        Arc::ptr_eq(&new_output, &current),
+        "old view replaced the new cache"
+    );
+    assert_eq!(stats(&runtime).cache_entries, 2);
+    assert_balanced(&stats(&runtime));
+}
+
+#[tokio::test]
+async fn clear_covers_shared_views_waiting_for_projection_admission() {
+    use std::{
+        future::Future,
+        task::{Context, Waker},
+    };
+    let (op, gate) = Load::gated(ScopeRule::Shared);
+    let runtime = Runtime::builder(RuntimeConfig {
+        max_concurrent_projections: 1,
+        ..config()
+    })
+    .unwrap()
+    .register(op, budget(1024))
+    .unwrap()
+    .view::<Load, _>(LoadLength)
+    .unwrap()
+    .build();
+    let view = runtime.view::<Load, LoadLength>().unwrap();
+    let a = window("a");
+    let b = window("b");
+    let mut first = std::pin::pin!(view.get(&a, 1, NO_OPTIONS));
+    let mut queued = std::pin::pin!(view.get(&b, 2, NO_OPTIONS));
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(first.as_mut().poll(&mut cx).is_pending());
+    assert!(queued.as_mut().poll(&mut cx).is_pending());
+    runtime.clear();
+    gate.add_permits(2);
+    assert_eq!(first.await.unwrap(), 1);
+    assert_eq!(queued.await.unwrap(), 2);
+    assert_eq!(
+        stats(&runtime).cache_entries,
+        0,
+        "queued view repopulated a cleared cache"
+    );
+    assert_balanced(&stats(&runtime));
+}
+
 /// A large shared blob; each response copies `params` bytes of it.
 struct Blob;
 

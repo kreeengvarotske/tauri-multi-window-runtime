@@ -1,0 +1,125 @@
+# Queued view invalidation: preview fix review
+
+## Problem
+
+On main `7244a5cbccbe37a96ac67c69f374d9de383eb2d5`, a view waiting
+for projection admission has not yet registered a source service call.
+`forget_window` therefore cannot invalidate that queued source. After the
+window closes and a slot becomes available, the old view can load and cache
+data for the closed window. The same gap affects `clear` and can let an old
+queued view consume a reopened window's cache under the reused label.
+
+The new `forgotten_window_queued_view_cannot_repopulate_its_cache` test was
+first run against the unchanged main implementation. It failed with two
+cache entries instead of one. The test polls the queued future explicitly;
+it uses no wall-clock sleep to guess whether admission has happened.
+
+## Change
+
+`CachedService::prepare_call` captures the existing invalidation generations
+without looking up or holding an output. Its single-use `PreparedServiceCall`
+keeps key registration alive until it is run or dropped. A current prepared
+call can still read a current cache entry or coalesce with ordinary calls.
+An invalidated one cannot read a newer cached entry, join a newer generation,
+or insert its own result into the cache. It may finish and return its own
+result to its original caller, preserving existing invalidation semantics.
+
+Views derive source parameters and prepare this registration before waiting
+for their projection slot. Cache lookup and operation execution still occur
+after admission. Ordinary operation calls retain their original registration
+and cache lookup path. Both paths share the existing execution/publication
+logic; no new error variant or IPC error code is introduced.
+
+| Scenario | Required behavior |
+|---|---|
+| Close a window with a queued view | Old call may finish; closed window's output is not cached |
+| Reopen a window under the same label | Old call cannot consume or replace the new generation's cache |
+| Clear while a shared view waits | Old output cannot repopulate the cleared cache |
+| Cancel before or after admission | Registration and coalescer state are released |
+| Wait behind a slot with a cached source | Registration retains no source output |
+| Admit without invalidation | Normal cache hit and coalescing behavior remain available |
+
+## Limits and compatibility
+
+`View::source` now runs before admission and must be cheap parameter
+derivation. It must not load data or perform expensive work. Its time is
+subtracted before starting the projection wait. Like other synchronous
+application code, it cannot be preempted by an async timeout.
+
+Queued registrations retain keys/parameters and generation metadata, not
+operation outputs or response buffers. Metadata entries disappear when the
+last associated call is dropped. This does not impose a new bound on the
+number or size of incoming requests and does not claim an OS RAM limit.
+Existing adapter input limits and response/projection bounds still apply.
+
+The core API addition is additive. Custom implementations of `View::source`
+must be reviewed for their earlier execution point. This change is not yet
+a tagged release and does not modify the frozen benchmark or its framework
+pin. It is a cache/lifecycle correctness fix, not a measurement of RAM/CPU
+savings.
+
+## Verification and remaining checks
+
+On the collection Windows machine, the normal debug suites passed:
+
+- `runtime-core`: 76 unit tests, including six prepared-call regressions.
+- `shared-runtime`: 35 integration tests, including queued window close,
+  same-label reopen and clear regressions.
+- Clippy with `--all-targets -- -D warnings` for both crates passed.
+- The public prepared-call doctest passes; Rustdoc for both crates builds
+  with warnings denied. The cancellation regression also invalidates while
+  two prepared callers share work, then cancels the initializer: the waiter
+  restarts but still cannot cache its old-generation result.
+- Adapter verification now also passes: 23 unit tests (including queued
+  window close through `SharedRuntime::view` and serialization), three adapter
+  doctests, and adapter Clippy with warnings denied. The nine demo IPC tests
+  pass on Tauri's mock runtime, including capabilities and forged caller input.
+- Workspace formatting passed. No Tauri application or WebView was launched.
+
+Commands (offline, locked):
+
+```text
+cargo test --offline --locked -p runtime-core -p shared-runtime
+cargo clippy --offline --locked -p runtime-core -p shared-runtime --all-targets -- -D warnings
+cargo fmt --all --check
+# With RUSTDOCFLAGS="-D warnings":
+cargo doc --offline --locked -p runtime-core -p shared-runtime --no-deps
+```
+
+The combined test log is retained locally under this checkout's
+`target/lifecycle-tests.log`; adapter and mock-IPC logs are alongside it.
+These checks establish behavior and state cleanup, not comparative performance.
+
+## Native queued close/reopen evidence
+
+After a read-only process check confirmed that CS2 was no longer running,
+the expanded Debug self-test passed on source `11f2a310006577df481b3930d4f13fec38978069`,
+Windows build 26200 and WebView2 `157.0.4341.46`. This was a functional test,
+not a memory or CPU comparison. The app ran in its own kill-on-close Job
+Object with a new WebView2 profile; exit code was zero, no timeout or forced
+termination occurred, and zero processes remained in its job.
+
+The test occupies all projection slots, registers an old window's view,
+and verifies no source request happens before admission. It destroys the
+real `w1`, observes cache entries dropping from 2 to 1 through the plugin,
+then reopens `w1` and populates its new cache before releasing the slots.
+The old queued view returned note 4; the new window retained note 3.
+Both `queuedViewSeparated` and `queuedViewCacheStable` were true. Two WebViews
+still shared one catalog execution and cache entry; shutdown refused later
+calls and cleared the caches. Slot holders release on early returns too.
+
+Evidence: `target/native-queued-view-bbcf31ee/{inputs.json,runner.json,self-test.json}`.
+Debug executable SHA-256:
+`78bf41e421998dfdb15902760b1b7907df213aba68a6f10a351fda61afed9c05`.
+Chromium emitted `Failed to unregister class Chrome_WidgetWin_0. Error = 1412`
+during teardown. This diagnostic is retained; it did not prevent the stated
+checks or process cleanup. It is not a memory-leak measurement and should be
+checked again during final Release/native verification.
+
+A full Windows Release workspace check and a clean Git external consumer
+on the selected candidate remain pending. Subsequent evidence is recorded
+in PR #66 without implying that earlier native results cover a different
+code revision. Hosted CI also needs a successful run:
+the initial #66 run `43507493106` failed before any Ubuntu or Windows job
+steps. Its Windows annotation reports an account payment/spending-limit
+problem. Local checks do not replace CI.
