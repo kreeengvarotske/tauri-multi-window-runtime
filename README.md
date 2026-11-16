@@ -8,6 +8,9 @@ can reuse that infrastructure.
 Start with the [two-window demo and backend quick start](examples/runtime-adapter-demo/README.md).
 The optional [JavaScript/TypeScript command client](packages/runtime-client/README.md)
 handles the adapter's JSON-byte IPC protocol without frontend framework bindings.
+The [runnable recipes](docs/recipes.md) cover shared data, window isolation and
+coalesced file IO. The [release packet](docs/windows-preview-release-packet.md)
+tracks verification and the remaining publication decisions.
 
 The first developer preview targets Windows. General RAM/CPU savings are not
 claimed or required to ship this preview. Chromium-process deduplication and

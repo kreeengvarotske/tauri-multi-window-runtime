@@ -71,6 +71,7 @@ $evidence = [ordered]@{
     dependencyRepository = $source
     dependencyTag = $Tag
     offline = [bool]$Offline
+    webViewProfile = Join-Path $output 'webview-profile'
 }
 $evidence | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $output 'revisions.json') -Encoding UTF8
 Push-Location -LiteralPath $output
@@ -94,7 +95,16 @@ try {
 
     $exe = Join-Path $targetDir 'release/runtime-adapter-demo.exe'
     $report = Join-Path $output 'self-test.json'
-    $process = Start-Process -FilePath $exe -ArgumentList @('--self-test', ('"{0}"' -f $report)) -PassThru -WindowStyle Hidden
+    $previousProfile = $env:WEBVIEW2_USER_DATA_FOLDER
+    try {
+        $env:WEBVIEW2_USER_DATA_FOLDER = $evidence.webViewProfile
+        $process = Start-Process -FilePath $exe -ArgumentList @('--self-test', ('"{0}"' -f $report)) -PassThru -WindowStyle Hidden
+        # Retain a process handle even if the self-test exits before WaitForExit.
+        $null = $process.Handle
+    }
+    finally {
+        $env:WEBVIEW2_USER_DATA_FOLDER = $previousProfile
+    }
     if (-not $process.WaitForExit(120000)) {
         Stop-Process -Id $process.Id -ErrorAction SilentlyContinue
         throw 'Consumer self-test timed out.'

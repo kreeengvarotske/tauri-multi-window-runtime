@@ -1,6 +1,7 @@
 # Developer preview completion scope
-Date: 2026-11-15. Supersedes the first-release priorities in the November 14
-completion plan; historical findings and measurement evidence stay unchanged.
+Date: 2026-11-15; ownership and release-status update 2026-11-16. Supersedes the
+first-release priorities in the November 14 completion plan; historical
+findings and measurement evidence stay unchanged.
 
 ## Product decision
 
@@ -16,23 +17,49 @@ evidence on its recorded framework SHA. Do not revise its protocol or findings.
 
 ## Finite release path
 
-1. Review SDK fixes #66/#67/#68/#70 and fix confirmed release-blocking defects.
+1. The dependent SDK/client stack #66 → #67 → #68 → #70 → #72 → #73 → #74 → #75
+   has a qualified candidate. Candidate `3e132fa` is superseded
+   by the confirmed P2 in `NoStore` and overweight-result key `Drop` under
+   generation state. Runtime-core fix `0267a775679f4f554151ca4997520d55dfb74082`
+   is recorded in [#74](https://github.com/kreeengvarotske/tauri-multi-window-runtime/pull/74)
+   and qualified in `e0c09b0db5788a83bc89881b0df3682f36dac1fa` (#75).
+   Integration and the final release identity remain pending execution.
    Avoid further unbounded audit rounds without new evidence.
-2. Verify one fresh external consumer at the selected SDK revision: anonymous
+2. The fresh external consumer at `e0c09b0` verifies anonymous
    source access, independent project/target/profile, matching lock identity,
-   native assertions and complete owned-job cleanup/accounting. Preserve the
+   native assertions and strict application Job cleanup/accounting. Preserve the
    historical unknown-process failure without guessing its identity.
-3. Provide a small optional JS/TypeScript client for the existing JSON-byte
-   command protocol. Inject Tauri invoke; retain command-specific capabilities
-   and Rust validation. Support typed requests/responses and stable framework
-   errors without retries, frontend caching or cancellation claims.
-4. Finish installation instructions and three runnable recipes: shared source,
+   The consumer includes the key-drop fix. Build success, build-environment
+   cleanup and strict application cleanup are recorded separately. On November
+   16, under the user's delegation of remaining decisions/actions, the release
+   owner adopted the measured MSVC VCTIP build-only cleanup exception. This
+   explicitly changes the original combined-cleanup acceptance requirement.
+   Both raw combined observations remain FAIL; the same-artifact application
+   Job passes without leftovers or forced cleanup.
+3. The small optional JS/TypeScript client supports the existing JSON-byte
+   command protocol. The application injects Tauri invoke; command-specific
+   capabilities and Rust validation remain required. Typed requests/responses and stable
+   framework errors add no retries, frontend caching or cancellation claims.
+4. Installation instructions and three runnable recipes are verified: shared source,
    per-window state/cleanup and coalesced IO with bounded admission. Retain
    explicit resource limits; no unmeasured universal presets or new macros.
-5. Assemble a release packet at one final SHA: CI, native/consumer evidence,
+5. The release packet records the qualified candidate: CI, native/consumer evidence,
    license/version/support matrix, quick start and honest release notes.
-6. Merge, tag and publish only after the separate release decisions. Git-based
-   distribution is sufficient for this preview; registry publication is optional.
+   Use [the current packet](../windows-preview-release-packet.md); results from
+   the superseded candidate remain historical rather than final qualification.
+   The integrated/tagged identity and release receipts remain pending.
+6. Execute the delegated dependency-ordered merge, preview tag and GitHub
+   prerelease actions. They are authorized; completion is pending execution.
+   Git-based distribution from the public repository is sufficient; registry publication
+   is outside this preview. Merge dependencies in order. After each parent
+   lands, retarget the next child to `main` before merging it and recheck its
+   expected head, remaining diff and actual required CI. Include the separate
+   key-drop fix and the recipe/release-doc changes before choosing the final SHA.
+   After final-main CI passes, create the immutable annotated preview tag at
+   that exact SHA. One fresh anonymous `-Tag` consumer with a matching resolved
+   SHA qualifies both main source and the remote tag; no second consumer build
+   is required. Publish the prerelease after tag CI, that consumer and strict
+   same-artifact application cleanup pass.
 
 Deferred: Blink/CSS/GC optimization, new performance pilots, cross-app production
 broker, mobile/macOS support claims, Rust-to-TypeScript code generation, UI
@@ -41,10 +68,27 @@ remain actionable even when memory research is deferred.
 
 ## Ownership and verification
 
-The active implementation owns `packages/runtime-client`, its CI and this scope
-document. The second group owns independent SDK review, fresh consumer evidence,
-recipes and the release packet. Coordinate shared docs before editing them.
+The original split gave the active implementation `packages/runtime-client`,
+its CI and this scope document, and gave the second group independent SDK
+review, fresh consumer evidence, recipes and the release packet. On November 16
+the active session took over the remaining work while the second group is
+unavailable for the next four days. Work proceeds without waiting for its return.
+The active session coordinates runtime fixes, recipe/CI work and release-doc
+ownership so concurrent edits do not overlap.
 The large Russian work package is #70 comment 6893982670.
+
+Observed checks at the qualified candidate: both key-drop regressions failed
+before the fix; 82 core tests and one doctest passed after it. Debug and Release
+each passed 171 workspace unit/integration tests and four doctests. Both Clippy
+profiles, formatting and Rustdoc with warnings denied passed. All 12 JS tests,
+strict TypeScript, demo-sync, offline packed installation/import/call and all
+three recipes passed. Exact-head Windows/Ubuntu CI and the fresh consumer
+including #74 passed under the adopted policy. The combined consumer remains
+FAIL with 553 NEW / 552 EXIT and one compiler helper forcibly cleaned; its
+unchanged app/lock passed a new strict Job with 9 NEW / 9 EXIT / active-zero 1
+and no leftovers or forced cleanup. The [#75 evidence receipt](https://github.com/kreeengvarotske/tauri-multi-window-runtime/pull/75#issuecomment-6931159120)
+records exact source and checks. Final integrated/tagged identities and their
+required CI/release receipts remain pending execution.
 
 Frontend-client acceptance: JSON-object requests compatible with custom IPC and
 postMessage fallback; ArrayBuffer and byte
@@ -54,6 +98,9 @@ and void request typing; clean package installation and browser-safe imports.
 Use Node's built-in test runner, strict TypeScript consumer fixtures and a packed
 package check. Rust sources remain unchanged by this client work.
 
-Preview acceptance: installation and the three recipes are reproducible; all
-required checks pass; no known unresolved P1/P2 defect remains; one reviewable
-release packet is ready. No new features are required merely to keep working.
+Preview acceptance: installation and the three recipes are reproducible; the
+candidate's required checks pass under the adopted build/runtime policy; no
+known unresolved P1/P2 remains in its review; one reviewable release packet is
+ready. The key-drop defect is fixed and qualified. Integration, tag verification
+and prerelease publication remain distinct authorized actions, pending their
+completion receipts. No new features or further RAM research are required.

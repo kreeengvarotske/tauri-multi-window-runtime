@@ -1,43 +1,198 @@
 # shared-runtime-tauri
 
-The Tauri v2 adapter for `shared-runtime` (stage R3 of the runtime API proposal, PR #32). `shared-runtime` and `runtime-core` have no Tauri dependency; this crate is the only place where the two meet. `examples/runtime-adapter-demo` is a minimal app that uses it.
+The Tauri v2 adapter for `shared-runtime`. It stores one runtime as application
+state, connects window destruction and application exit to runtime cleanup, and
+provides typed helpers for bounded command requests and responses.
+`shared-runtime` and `runtime-core` have no Tauri dependency.
 
 ## Using it
 
-Follow the [Windows demo quick start](../../examples/runtime-adapter-demo/README.md) to build the example and run its native self-test.
+Follow the [Windows demo quick start](../../examples/runtime-adapter-demo/README.md)
+to build the real two-window example, run its native self-test with a fresh owned
+WebView profile, and retain its evidence. The manual self-test checks functional
+behavior; ordinary `Start-Process` does not prove ownership or cleanup of the
+WebView process tree. Release process accounting requires a launcher that owns
+that tree through a Windows Job Object.
+
+For application use, prefer a verified published Git preview release. Once the
+[Windows preview release](https://github.com/kreeengvarotske/tauri-multi-window-runtime/releases/tag/v0.1.0-preview.1)
+is published, verify its tag against the qualified full commit SHA stated in
+the Release text. Then use the same tag for both backend dependencies:
+
+```toml
+shared-runtime = { git = "https://github.com/kreeengvarotske/tauri-multi-window-runtime.git", tag = "v0.1.0-preview.1" }
+shared-runtime-tauri = { git = "https://github.com/kreeengvarotske/tauri-multi-window-runtime.git", tag = "v0.1.0-preview.1" }
+```
+
+Check the remote identity before installing:
+
+```powershell
+git ls-remote https://github.com/kreeengvarotske/tauri-multi-window-runtime.git 'refs/tags/v0.1.0-preview.1' 'refs/tags/v0.1.0-preview.1^{}'
+```
+
+For an annotated tag, its peeled `^{}` line must match the Release's qualified
+commit SHA; for a lightweight tag, compare the tag line. If the release or tag
+is missing, use reviewed source for evaluation instead. Verify that both
+dependencies resolve to the qualified commit in your application's `Cargo.lock`.
+
+For development, or evaluation before publication, use a reviewed Git commit
+available from the repository. From that checkout, print the dependency entries
+for its exact SHA:
+
+```powershell
+$sdkRevision = (& git rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or $sdkRevision -notmatch '\A[0-9a-fA-F]{40}\z') { throw 'Could not resolve the reviewed SDK revision' }
+@"
+shared-runtime = { git = "https://github.com/kreeengvarotske/tauri-multi-window-runtime.git", rev = "$sdkRevision" }
+shared-runtime-tauri = { git = "https://github.com/kreeengvarotske/tauri-multi-window-runtime.git", rev = "$sdkRevision" }
+"@
+```
+
+Place both entries under `[dependencies]` in your Tauri backend's manifest. Keep
+your application's existing Tauri v2 dependency and build setup. Both runtime
+dependencies must use the same full SHA. Commit the application's resolved
+`Cargo.lock`, verify the runtime Git sources point to that SHA, and use
+`cargo build --locked` afterwards. A Git revision includes committed source;
+local uncommitted changes are not part of the dependency.
+
+### Register operations, a view, and a command
+
+Declare your Rust operation, validated request, response, and view types first.
+The [runnable runtime recipes](../../docs/recipes.md) cover shared caches,
+per-window state, and concurrent IO. For a Tauri catalog command, use the
+[demo's Catalog, CatalogPage, and PageRequest definitions](../../examples/runtime-adapter-demo/src/lib.rs)
+as a starting point. The following startup code assumes those types are in scope
+and runs inside your application's startup function:
 
 ```rust
-// One runtime for the whole application, built and registered in Rust.
-let runtime = Runtime::builder(config)?
-    .register(Catalog { .. }, OperationConfig { cache_budget_bytes: 8 << 20 })?
+use shared_runtime::{OperationConfig, Runtime, RuntimeConfig};
+use shared_runtime_tauri::AdapterConfig;
+use std::time::Duration;
+
+// Sample application limits; measure and choose your own.
+let runtime = Runtime::builder(RuntimeConfig {
+    max_concurrent_operations: 4,
+    max_queued_operations: 64,
+    max_concurrent_projections: 4,
+    max_queued_projections: 32,
+    default_deadline: Duration::from_secs(10),
+    shutdown_grace: Duration::from_secs(2),
+    cache_budget_bytes: 16 << 20,
+})?
+    .register(Catalog { items: 10_000 }, OperationConfig { cache_budget_bytes: 8 << 20 })?
     .view::<Catalog, _>(CatalogPage)?
     .build();
 
 tauri::Builder::default()
     .plugin(shared_runtime_tauri::init(runtime, AdapterConfig { abort_wait: Duration::from_secs(1) }))
     .invoke_handler(tauri::generate_handler![catalog_page])
+    .run(tauri::generate_context!())?;
+```
 
-// One hand-written command per operation or view, granted by a capability.
+Write one command for each operation or view you expose. The demo request type
+rejects unknown fields and validates the page size. The command derives identity
+from Tauri's injected `WebviewWindow`, checks request bytes before typed decoding,
+and caps the serialized response:
+
+```rust
+use shared_runtime::CallOptions;
+use shared_runtime_tauri::{AdapterError, JsonBytes, SharedRuntime, caller, decode};
+use tauri::{State, WebviewWindow, ipc::Request};
+
 #[tauri::command]
 async fn catalog_page<R: tauri::Runtime>(
     window: WebviewWindow<R>,
     request: Request<'_>,
     shared: State<'_, SharedRuntime>,
 ) -> Result<JsonBytes, AdapterError> {
-    let page: PageRequest = decode(&request, 256)?;                 // bytes checked before parsing
+    let page: PageRequest = decode(&request, 256)?;
     shared
         .view::<Catalog, CatalogPage>(&caller(&window), page, 64 << 10, CallOptions::default())
-        .await                                                     // serialized inside the projection slot
+        .await
 }
 ```
 
-The frontend sends the request as UTF-8 JSON bytes and decodes the bytes it gets back (`examples/runtime-adapter-demo/ui/main.js`):
+Never accept a frontend-supplied caller, window label, scope, or operation name
+as authority. `PerWindow` separates data; capabilities authorize command access.
+Set view item and byte limits, and charge `ResponseBudget` before cloning each
+item. The demo's page limits are 100 items and 32 KiB of charged response data;
+the command above separately allows 256 request bytes and 64 KiB of serialized
+response bytes. Queue counts, cache weights, and IPC byte limits measure
+different parts of the workload; none is a whole-application OS RAM cap.
 
-```js
-const bytes = await invoke("catalog_page", new TextEncoder().encode(JSON.stringify({ offset: 0, limit: 100 })));
-const page = JSON.parse(new TextDecoder().decode(bytes));
-// errors: { code: "REQUEST_TOO_LARGE" | …, message }
+### Register and grant the application command
+
+In your Tauri backend's `build.rs`, include application commands in its existing
+`tauri_build` setup so Tauri generates their permissions:
+
+```rust
+const COMMANDS: &[&str] = &["catalog_page"];
+
+fn main() {
+    let attributes = tauri_build::Attributes::new()
+        .app_manifest(tauri_build::AppManifest::new().commands(COMMANDS));
+    tauri_build::try_build(attributes).expect("build Tauri application manifest");
+}
 ```
+
+Grant that permission only to intended windows. For example,
+`capabilities/catalog.json` can contain:
+
+```json
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "catalog",
+  "description": "Main window may read catalog pages",
+  "windows": ["main"],
+  "permissions": ["core:default", "allow-catalog-page"]
+}
+```
+
+Include `"catalog"` in `app.security.capabilities` if your `tauri.conf.json`
+explicitly selects capabilities. Keep other application commands and grants
+in place. See the demo's [build script](../../examples/runtime-adapter-demo/build.rs),
+[capabilities](../../examples/runtime-adapter-demo/capabilities/default.json), and
+[configuration](../../examples/runtime-adapter-demo/tauri.conf.json).
+
+### Optional JavaScript/TypeScript client
+
+Install the private client directory from your reviewed checkout into your
+frontend project, or install a tarball created by running `npm pack` in that
+directory. Registry publication is not assumed:
+
+```powershell
+npm install 'C:/path/to/reviewed-checkout/packages/runtime-client'
+```
+
+The application supplies `invoke` and manually declares its TypeScript shapes:
+
+```ts
+import { invoke } from '@tauri-apps/api/core';
+import { createCommand, RuntimeCommandError } from 'tmwr-runtime-client';
+
+interface PageRequest { offset: number; limit: number }
+interface Page { total: number; items: { id: number; name: string }[] }
+
+const catalogPage = createCommand<PageRequest, Page>(invoke, 'catalog_page');
+try {
+  const page = await catalogPage({ offset: 0, limit: 10 });
+  console.log(page.items);
+} catch (error) {
+  if (error instanceof RuntimeCommandError && error.code === 'OVERLOADED') {
+    console.log('Catalog is busy; try again later.');
+  } else {
+    throw error;
+  }
+}
+```
+
+`createCommand` sends a JSON object and decodes the JSON-byte response. Object
+requests work through custom-protocol IPC and the desktop `postMessage` fallback.
+The client adds no automatic retries, cache, or cancellation layer. TypeScript
+types are declarations, with no generated bindings or runtime response schema
+validation. See the [client guide](../../packages/runtime-client/README.md).
+The [real demo frontend](../../examples/runtime-adapter-demo/ui/main.js) imports
+a distributed client copy and needs no npm installation or frontend bundler.
 
 ## What the adapter guarantees
 
@@ -72,10 +227,10 @@ Codes: `INVALID_ARGUMENT`, `REQUEST_TOO_LARGE`, `RESPONSE_TOO_LARGE`, `DEADLINE_
 - **Cache budgets account for the weights reported by operations.** The budget tracks values retained by the cache. Values still held by callers, allocator overhead, Tauri, and WebView memory contribute separately to process memory.
 - **Shutdown uses a cooperative timeout.** At exit the adapter waits with a `shutdown_grace + abort_wait` timeout. Keep runtime work cooperative so the timeout can be observed. Synchronous code already running may continue until the process exits.
 - **Response memory is bounded only for views that charge their budget.** The runtime refuses an over-limit response either way, but a view that builds before charging has already allocated it.
-- **Measured memory effect: none claimed.** This PR adds the adapter; memory comes from the reviewed scenario runs.
+- **Whole-application memory or CPU savings are not claimed.** The adapter bounds specific work and data; workload benchmarks are needed to measure their application effect. WebView process deduplication and cross-application sharing are outside this preview.
 
 ## Tests
 
 - `cargo test -p shared-runtime-tauri`: decoding, encoding, error envelopes, the projection limit during serialization, and shutdown.
 - `cargo test -p runtime-adapter-demo`: the demo's commands through Tauri's IPC with the mock runtime, including the ACL from its `capabilities/`.
-- `runtime-adapter-demo --self-test report.json`: on a real window system, w1's page calls the commands over the real IPC (raw bytes in and out, capabilities, CSP), then the test destroys and reopens w1 and exits; the report lists every check and `passed`.
+- `runtime-adapter-demo --self-test report.json`: on a real window system, the pages call commands over real IPC (JSON-object requests, JSON-byte responses, capabilities, CSP), with a separate oversized raw-byte request to check rejection. The test destroys and reopens w1 and exits; the report lists every check and `passed`. Use the quick start's fresh profile, bounded wait, and retained evidence. This functional report alone does not establish process-tree cleanup.
