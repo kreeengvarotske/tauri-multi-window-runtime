@@ -1,0 +1,11 @@
+[workspace]
+
+[package]
+name = "tmwr-window-notes-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+shared-runtime = { git = "https://github.com/kreeengvarotske/tauri-multi-window-runtime.git", rev = "bf6b66c2241a10fa92f402b07d4ab86b1f3dede9" }
+tokio = { version = "1", features = ["macros", "rt"] }

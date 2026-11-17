@@ -11,6 +11,7 @@ on:
   pull_request:
     paths:
       - "crates/**"
+      - "tests/consumers/**"
       - "examples/runtime-adapter-demo/**"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -46,6 +47,9 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --locked --all-targets -- -D warnings
       - run: cargo test --workspace --locked
+      - name: Independent notes backend consumer at the PR source revision
+        shell: pwsh
+        run: ./tests/consumers/Test-WindowNotes.ps1 -Revision '${{ github.event.pull_request.head.sha || github.sha }}'
       - name: Run the SDK recipes
         shell: bash
         run: |
