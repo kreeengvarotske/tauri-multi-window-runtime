@@ -5,7 +5,8 @@ notes, per-window isolation, invalid-input errors, reopen cleanup and shutdown
 through public exports. It is a backend integration check, not a second native
 Tauri/WebView application or an IPC authorization test.
 
-From the repository root, run `./tests/consumers/Test-WindowNotes.ps1 -Revision <full-SHA>`.
+Install PowerShell 7 or newer (`pwsh`). From the repository root, run
+`pwsh -NoProfile -File ./tests/consumers/Test-WindowNotes.ps1 -Revision <full-SHA>`.
 The script copies only the source and manifest to a new temporary directory,
 pins the selected revision, generates and verifies its own lock, builds/runs
 there and retains the evidence. Download caches may be reused. CI selects the

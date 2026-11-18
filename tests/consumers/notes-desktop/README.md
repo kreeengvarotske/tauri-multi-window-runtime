@@ -6,10 +6,10 @@ WebView exercises two cached note requests, invalid lengths and a forged caller
 field. Rust derives identity from the injected window, bounds request/response
 bytes, and checks cache cleanup plus refusal of calls on application exit.
 
-From the repository root run:
+Install PowerShell 7 or newer (`pwsh`). From the repository root run:
 
 ```powershell
-./tests/consumers/Test-WindowNotes.ps1 -Revision <full-SHA> -Desktop
+pwsh -NoProfile -File ./tests/consumers/Test-WindowNotes.ps1 -Revision <full-SHA> -Desktop
 ```
 
 The harness creates a fresh external project/target/profile, verifies all three

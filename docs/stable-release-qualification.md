@@ -39,11 +39,12 @@ is established by the preview's newer compiler.
 | Final source and tag | Green exact-source main and tag CI; immutable annotated stable tag; matching-SHA external consumer and strict native cleanup |
 | Distribution | Review release text, publish the stable release with verified downloadable evidence and checksums, then record completion |
 
-The two churn tests run through the public API. One performs 1,000 reopen cycles,
+The three churn tests run through the public API. One performs 1,000 reopen cycles,
 checks that Weak references to removed outputs expire, preserves another window's
 cached source, and verifies cache/counter bounds. Another cancels and retries
 256 initializers with deterministic gates, checking capacity reuse, released
-outputs and exact outcomes. They run in normal wall-clock time with a bounded
+outputs and exact outcomes. The third closes 1,000 distinct windows and checks
+that caller labels and outputs are released. They run in normal wall-clock time with a bounded
 cancellation test. These are repetition tests, not hours of uptime or an OS RAM
 benchmark; do not describe their duration as a long-running soak.
 
@@ -61,14 +62,19 @@ generated bindings and registry publication are not stable-release gates.
 - The independent notes backend consumer passed from a fresh temporary project,
   target and lock at `bf6b66c2241a10fa92f402b07d4ab86b1f3dede9`. Both Git package
   identities were checked. CI repeats it at the actual PR/push source revision.
-  It is not a second native Tauri application and does not close that coverage gap.
+  This backend-only fixture is supplemented by the separate desktop fixture below.
 - A separate native desktop notes consumer now checks real WebView IPC, invalid
   inputs/forged fields, cache reuse and plugin shutdown. Its initial Debug run
   passed all assertions and strict owned-Job cleanup (7 NEW / 7 EXIT, no forced
   termination). It also emitted Chromium diagnostic 1412 on exit; cause is not
   established. Release and an async-exit control also passed with the same
   diagnostic. The harness supports
-  fresh external desktop builds with `-Desktop`; final-source CI is still needed.
+  fresh external desktop builds with `-Desktop`. Both Windows and Ubuntu CI passed
+  the backend and desktop consumers at candidate `572fd4a` in
+  [run 44395027803](https://github.com/kreeengvarotske/tauri-multi-window-runtime/actions/runs/44395027803).
+  Client CI also passed in
+  [run 44395027537](https://github.com/kreeengvarotske/tauri-multi-window-runtime/actions/runs/44395027537).
+  Final integration/tag receipts remain required.
 - A 600-second native IPC soak passed: 50,453 successful calls, 2 executions,
   50,451 cache hits, cache empty after exit and calls refused after shutdown.
   Owned Job accounting reconciled 17 NEW / 17 EXIT with no timeout, leftovers
