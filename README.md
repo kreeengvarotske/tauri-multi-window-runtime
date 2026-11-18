@@ -1,6 +1,6 @@
 # tauri-multi-window-runtime
 
-Windows Git releases: [verified release notes and source tags](https://github.com/kreeengvarotske/tauri-multi-window-runtime/releases).
+Windows Git release: [stable 0.1.0](https://github.com/kreeengvarotske/tauri-multi-window-runtime/releases/tag/v0.1.0).
 
 Build Tauri v2 applications with shared Rust data, cached/coalesced operations,
 bounded responses and window lifecycle cleanup. The runtime provides explicit
@@ -13,7 +13,8 @@ the compatibility contract and the tested support baseline.
 The optional [JavaScript/TypeScript command client](packages/runtime-client/README.md)
 handles the adapter's JSON-byte IPC protocol without frontend framework bindings.
 The [runnable recipes](docs/recipes.md) cover shared data, window isolation and
-coalesced file IO. The [published preview completion record](docs/windows-preview-release-record.md)
+coalesced file IO. The [stable completion record](docs/stable-release-record.md)
+records final qualification and verified public downloads. The [published preview completion record](docs/windows-preview-release-record.md)
 records the immutable tag, final source, verification and release receipts.
 The [release packet](docs/windows-preview-release-packet.md) preserves the earlier review.
 

@@ -55,7 +55,10 @@ cleanup must pass. A different or application leftover is not covered.
 RAM/CPU benefit research, Chromium deduplication, a production cross-app broker,
 generated bindings and registry publication are not stable-release gates.
 
-## Current execution record
+## Candidate execution snapshot
+
+Stable `v0.1.0` is now published. The [completion record](stable-release-record.md)
+supersedes pending status below; these notes preserve the earlier candidate snapshot.
 
 - All three churn checks passed in Debug and Release: repeated reopen,
   1,000 distinct window labels and cancellation/retry.
@@ -81,5 +84,6 @@ generated bindings and registry publication are not stable-release gates.
   or forced termination. Raw records are retained in
   `target/notes-desktop-a65502c8`; the SDK dependency was the preview baseline
   `bf6b66c`, so final stable-source identity/CI still requires its own receipt.
-- Remaining stable gates are pending; this document does not declare `0.1.0`
-  qualified or published. Exact receipts replace pending status as work finishes.
+- At this candidate snapshot, final integration/tag and publication gates were
+  pending. They are closed in the linked published completion record; the
+  immutable release evidence preserves their actual results.
