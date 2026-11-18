@@ -147,6 +147,30 @@ const NO_OPTIONS: CallOptions = CallOptions { deadline: None };
 
 // Deterministic churn checks, not elapsed-time or OS-memory benchmarks.
 #[tokio::test]
+async fn stability_unique_closed_windows_release_caller_labels() {
+    let runtime = runtime_with(Load::new(ScopeRule::PerWindow), 1024);
+    let load = runtime.operation::<Load>().unwrap();
+    for index in 0..1_000 {
+        let label: Arc<str> = Arc::from(format!("temporary-{index}"));
+        let weak_label = Arc::downgrade(&label);
+        let caller = Caller::window(label);
+        let output = load.get(&caller, 128, NO_OPTIONS).await.unwrap();
+        let weak_output = Arc::downgrade(&output);
+        assert_eq!(runtime.forget_window(&caller), 1);
+        drop((output, caller));
+        assert!(
+            weak_label.upgrade().is_none(),
+            "caller label retained: {index}"
+        );
+        assert!(weak_output.upgrade().is_none(), "output retained: {index}");
+        let snapshot = stats(&runtime);
+        assert_eq!(snapshot.cache_entries, 0);
+        assert_balanced(&snapshot);
+    }
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
 async fn stability_repeated_reopen_releases_outputs_and_preserves_other_window() {
     let operation = Load::new(ScopeRule::PerWindow);
     let runtime = runtime_with(operation.clone(), 1024);

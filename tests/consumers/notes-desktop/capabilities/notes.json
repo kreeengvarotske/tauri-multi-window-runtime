@@ -1,0 +1,6 @@
+{
+  "identifier": "notes",
+  "description": "Local qualification page can read its own note and finish the test",
+  "windows": ["main"],
+  "permissions": ["core:default", "allow-note", "allow-finish", "allow-qualification"]
+}

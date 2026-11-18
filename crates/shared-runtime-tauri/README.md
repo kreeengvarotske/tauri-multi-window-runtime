@@ -14,20 +14,20 @@ behavior; ordinary `Start-Process` does not prove ownership or cleanup of the
 WebView process tree. Release process accounting requires a launcher that owns
 that tree through a Windows Job Object.
 
-For application use, prefer a verified published Git preview release. Once the
-[Windows preview release](https://github.com/kreeengvarotske/tauri-multi-window-runtime/releases/tag/v0.1.0-preview.1)
+For application use, prefer a verified published Git release. Once the
+[Windows release](https://github.com/kreeengvarotske/tauri-multi-window-runtime/releases/tag/v0.1.0)
 is published, verify its tag against the qualified full commit SHA stated in
 the Release text. Then use the same tag for both backend dependencies:
 
 ```toml
-shared-runtime = { git = "https://github.com/kreeengvarotske/tauri-multi-window-runtime.git", tag = "v0.1.0-preview.1" }
-shared-runtime-tauri = { git = "https://github.com/kreeengvarotske/tauri-multi-window-runtime.git", tag = "v0.1.0-preview.1" }
+shared-runtime = { git = "https://github.com/kreeengvarotske/tauri-multi-window-runtime.git", tag = "v0.1.0" }
+shared-runtime-tauri = { git = "https://github.com/kreeengvarotske/tauri-multi-window-runtime.git", tag = "v0.1.0" }
 ```
 
 Check the remote identity before installing:
 
 ```powershell
-git ls-remote https://github.com/kreeengvarotske/tauri-multi-window-runtime.git 'refs/tags/v0.1.0-preview.1' 'refs/tags/v0.1.0-preview.1^{}'
+git ls-remote https://github.com/kreeengvarotske/tauri-multi-window-runtime.git 'refs/tags/v0.1.0' 'refs/tags/v0.1.0^{}'
 ```
 
 For an annotated tag, its peeled `^{}` line must match the Release's qualified
@@ -227,7 +227,7 @@ Codes: `INVALID_ARGUMENT`, `REQUEST_TOO_LARGE`, `RESPONSE_TOO_LARGE`, `DEADLINE_
 - **Cache budgets account for the weights reported by operations.** The budget tracks values retained by the cache. Values still held by callers, allocator overhead, Tauri, and WebView memory contribute separately to process memory.
 - **Shutdown uses a cooperative timeout.** At exit the adapter waits with a `shutdown_grace + abort_wait` timeout. Keep runtime work cooperative so the timeout can be observed. Synchronous code already running may continue until the process exits.
 - **Response memory is bounded only for views that charge their budget.** The runtime refuses an over-limit response either way, but a view that builds before charging has already allocated it.
-- **Whole-application memory or CPU savings are not claimed.** The adapter bounds specific work and data; workload benchmarks are needed to measure their application effect. WebView process deduplication and cross-application sharing are outside this preview.
+- **Whole-application memory or CPU savings are not claimed.** The adapter bounds specific work and data; workload benchmarks are needed to measure their application effect. WebView process deduplication and cross-application sharing are outside this release.
 
 ## Tests
 

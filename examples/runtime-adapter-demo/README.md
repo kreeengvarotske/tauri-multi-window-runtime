@@ -1,4 +1,4 @@
-# Tauri shared runtime preview
+# Tauri shared runtime for Windows
 
 This example shows two Tauri windows reading from one Rust catalog. Each window requests a bounded page over IPC. The runtime keeps the catalog in Rust, and each window receives only its requested page. The example also exercises per-window state and cleanup when a window closes.
 
@@ -67,7 +67,7 @@ The timeout stops only the launched demo; it does not kill processes by name.
 Retain the report and profile for inspection. Release verification also needs
 process accounting and cleanup evidence from a launcher that owns the process
 tree through a Windows Job Object; see the
-[release review](../../docs/windows-preview-review.md).
+[release review](../../docs/stable-release-qualification.md).
 
 ## Integrate the pattern
 
@@ -97,27 +97,27 @@ page has at most 100 items and 32 KiB of charged response data; its command acce
 at most 256 request bytes and serializes at most 64 KiB. These are demo choices,
 not global defaults. Set and measure limits for your application's workload.
 
-The preview configuration now requires `max_queued_projections` in every
+Runtime configuration requires `max_queued_projections` in every
 `RuntimeConfig` literal. Pick an application-specific limit; the demo's
 32 positions are an example, not a framework default. The [queue guide](../../docs/projection-queue-review.md)
 describes overload handling, counters and the limits of this protection.
 
-### Use the preview from another project
+### Use the runtime from another project
 
-For application use, prefer a verified published Git preview release. Once the
-[Windows preview release](https://github.com/kreeengvarotske/tauri-multi-window-runtime/releases/tag/v0.1.0-preview.1)
+For application use, prefer a verified published Git release. Once the
+[Windows release](https://github.com/kreeengvarotske/tauri-multi-window-runtime/releases/tag/v0.1.0)
 is published, verify that its tag resolves to the qualified commit stated in the
 Release text before using these entries under `[dependencies]`:
 
 ```toml
-shared-runtime = { git = "https://github.com/kreeengvarotske/tauri-multi-window-runtime.git", tag = "v0.1.0-preview.1" }
-shared-runtime-tauri = { git = "https://github.com/kreeengvarotske/tauri-multi-window-runtime.git", tag = "v0.1.0-preview.1" }
+shared-runtime = { git = "https://github.com/kreeengvarotske/tauri-multi-window-runtime.git", tag = "v0.1.0" }
+shared-runtime-tauri = { git = "https://github.com/kreeengvarotske/tauri-multi-window-runtime.git", tag = "v0.1.0" }
 ```
 
 Check the remote tag identity with:
 
 ```powershell
-git ls-remote https://github.com/kreeengvarotske/tauri-multi-window-runtime.git 'refs/tags/v0.1.0-preview.1' 'refs/tags/v0.1.0-preview.1^{}'
+git ls-remote https://github.com/kreeengvarotske/tauri-multi-window-runtime.git 'refs/tags/v0.1.0' 'refs/tags/v0.1.0^{}'
 ```
 
 For an annotated tag, compare the SHA on the `^{}` line; for a lightweight tag,
@@ -146,9 +146,9 @@ that the runtime Git sources resolve to the reviewed SHA, and use
 `cargo build --locked` for subsequent builds. The first fetch needs repository
 access. Uncommitted checkout changes are not included in a Git revision.
 
-The [release review](../../docs/windows-preview-review.md) records verification
+The [release review](../../docs/stable-release-qualification.md) records verification
 requirements. Evidence for one SHA does not cover a newer commit. No crates.io
-or npm registry publication is required for this Git preview.
+or npm registry publication is required for this Git source release.
 
 ### Optional frontend command client
 
@@ -199,7 +199,7 @@ a release tag is published, check out its qualified commit and verify the tag
 installation with:
 
 ```powershell
-& ./examples/runtime-adapter-demo/Test-GitConsumer.ps1 -Revision (git rev-parse HEAD) -Tag v0.1.0-preview.1 -RequireMatchingRevision
+& ./examples/runtime-adapter-demo/Test-GitConsumer.ps1 -Revision (git rev-parse HEAD) -Tag v0.1.0 -RequireMatchingRevision
 ```
 
 The script checks that the remote tag resolves to the expected commit and that
@@ -208,4 +208,4 @@ all three runtime Git packages in the consumer lockfile use that tag and SHA.
 These checks cover integration behavior, including IPC and window lifecycle.
 They do not set a whole-application OS RAM cap or establish RAM/CPU savings.
 Types and commands are manually declared. WebView process deduplication,
-cross-application sharing, and generated bindings are outside this preview.
+cross-application sharing, and generated bindings are outside this release.

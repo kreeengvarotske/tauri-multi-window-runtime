@@ -2480,7 +2480,7 @@ dependencies = [
 
 [[package]]
 name = "runtime-core"
-version = "0.1.0-preview.1"
+version = "0.1.0"
 dependencies = [
  "tokio",
 ]
@@ -2783,7 +2783,7 @@ dependencies = [
 
 [[package]]
 name = "shared-runtime"
-version = "0.1.0-preview.1"
+version = "0.1.0"
 dependencies = [
  "runtime-core",
  "tokio",
@@ -2791,7 +2791,7 @@ dependencies = [
 
 [[package]]
 name = "shared-runtime-tauri"
-version = "0.1.0-preview.1"
+version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",

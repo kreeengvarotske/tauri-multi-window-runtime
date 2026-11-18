@@ -6,7 +6,7 @@ Vue, Svelte or Node runtime dependency and does not replace Tauri permissions.
 
 ## Install from a reviewed checkout
 
-Registry publication is not required for this Git preview. From your frontend
+Registry publication is not required for this Git release. From your frontend
 project, install the package directory from a reviewed repository checkout:
 
 ```sh

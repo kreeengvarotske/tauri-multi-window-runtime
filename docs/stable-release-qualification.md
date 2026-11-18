@@ -2,6 +2,8 @@
 
 The published `v0.1.0-preview.1` remains unchanged. Stable `0.1.0` requires its
 own source revision, evidence and release tag; the preview is not relabelled.
+Candidate versions, conservative Rust minimum and patch compatibility policy
+are recorded in the [stable candidate guide](stable-release.md).
 
 ## Supported contract
 
@@ -54,11 +56,24 @@ generated bindings and registry publication are not stable-release gates.
 
 ## Current execution record
 
-- Reopen/cancellation churn: both tests passed locally against the preview
-  runtime source (no production-code change).
+- All three churn checks passed in Debug and Release: repeated reopen,
+  1,000 distinct window labels and cancellation/retry.
 - The independent notes backend consumer passed from a fresh temporary project,
   target and lock at `bf6b66c2241a10fa92f402b07d4ab86b1f3dede9`. Both Git package
   identities were checked. CI repeats it at the actual PR/push source revision.
   It is not a second native Tauri application and does not close that coverage gap.
+- A separate native desktop notes consumer now checks real WebView IPC, invalid
+  inputs/forged fields, cache reuse and plugin shutdown. Its initial Debug run
+  passed all assertions and strict owned-Job cleanup (7 NEW / 7 EXIT, no forced
+  termination). It also emitted Chromium diagnostic 1412 on exit; cause is not
+  established. Release and an async-exit control also passed with the same
+  diagnostic. The harness supports
+  fresh external desktop builds with `-Desktop`; final-source CI is still needed.
+- A 600-second native IPC soak passed: 50,453 successful calls, 2 executions,
+  50,451 cache hits, cache empty after exit and calls refused after shutdown.
+  Owned Job accounting reconciled 17 NEW / 17 EXIT with no timeout, leftovers
+  or forced termination. Raw records are retained in
+  `target/notes-desktop-a65502c8`; the SDK dependency was the preview baseline
+  `bf6b66c`, so final stable-source identity/CI still requires its own receipt.
 - Remaining stable gates are pending; this document does not declare `0.1.0`
   qualified or published. Exact receipts replace pending status as work finishes.

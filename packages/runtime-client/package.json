@@ -1,8 +1,8 @@
 {
   "name": "tmwr-runtime-client",
-  "version": "0.1.0-preview.1",
+  "version": "0.1.0",
   "private": true,
-  "description": "Optional JSON command client for the Tauri shared runtime preview",
+  "description": "Optional JSON command client for the Tauri shared runtime",
   "type": "module",
   "license": "MIT OR Apache-2.0",
   "exports": {
