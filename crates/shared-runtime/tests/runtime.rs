@@ -145,6 +145,107 @@ fn window(label: &str) -> Caller {
 
 const NO_OPTIONS: CallOptions = CallOptions { deadline: None };
 
+// Deterministic churn checks, not elapsed-time or OS-memory benchmarks.
+#[tokio::test]
+async fn stability_unique_closed_windows_release_caller_labels() {
+    let runtime = runtime_with(Load::new(ScopeRule::PerWindow), 1024);
+    let load = runtime.operation::<Load>().unwrap();
+    for index in 0..1_000 {
+        let label: Arc<str> = Arc::from(format!("temporary-{index}"));
+        let weak_label = Arc::downgrade(&label);
+        let caller = Caller::window(label);
+        let output = load.get(&caller, 128, NO_OPTIONS).await.unwrap();
+        let weak_output = Arc::downgrade(&output);
+        assert_eq!(runtime.forget_window(&caller), 1);
+        drop((output, caller));
+        assert!(
+            weak_label.upgrade().is_none(),
+            "caller label retained: {index}"
+        );
+        assert!(weak_output.upgrade().is_none(), "output retained: {index}");
+        let snapshot = stats(&runtime);
+        assert_eq!(snapshot.cache_entries, 0);
+        assert_balanced(&snapshot);
+    }
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
+async fn stability_repeated_reopen_releases_outputs_and_preserves_other_window() {
+    let operation = Load::new(ScopeRule::PerWindow);
+    let runtime = runtime_with(operation.clone(), 1024);
+    let load = runtime.operation::<Load>().unwrap();
+    let persistent = window("persistent");
+    let reused = window("reused");
+    let control = load.get(&persistent, 128, NO_OPTIONS).await.unwrap();
+    for cycle in 0..1_000 {
+        let old = load.get(&reused, 128, NO_OPTIONS).await.unwrap();
+        let old_weak = Arc::downgrade(&old);
+        assert_eq!(runtime.forget_window(&reused), 1, "cycle {cycle}");
+        let reopened = load.get(&reused, 128, NO_OPTIONS).await.unwrap();
+        assert!(!Arc::ptr_eq(&old, &reopened), "cycle {cycle}");
+        drop(old);
+        assert!(old_weak.upgrade().is_none(), "old output retained: {cycle}");
+        let reopened_weak = Arc::downgrade(&reopened);
+        assert_eq!(runtime.forget_window(&reused), 1);
+        drop(reopened);
+        assert!(reopened_weak.upgrade().is_none());
+        let snapshot = stats(&runtime);
+        assert_eq!(snapshot.cache_entries, 1);
+        assert_eq!(snapshot.cache_weight_bytes, 128);
+        assert_eq!(snapshot.evictions, 0);
+        assert_balanced(&snapshot);
+    }
+    let retained = load.get(&persistent, 128, NO_OPTIONS).await.unwrap();
+    assert!(Arc::ptr_eq(&control, &retained));
+    assert_eq!(operation.executions(), 2_001);
+    drop((retained, control));
+    runtime.shutdown().await;
+    assert_eq!(stats(&runtime).cache_entries, 0);
+    assert_balanced(&stats(&runtime));
+}
+
+#[tokio::test]
+async fn stability_repeated_initializer_cancellation_keeps_capacity_reusable() {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let (operation, gate) = Load::gated(ScopeRule::Shared);
+        let runtime = runtime_with(operation.clone(), 1024);
+        let load = runtime.operation::<Load>().unwrap();
+        for cycle in 0..256 {
+            let cancelled = {
+                let load = load.clone();
+                tokio::spawn(async move { load.get(&window("cancelled"), 128, NO_OPTIONS).await })
+            };
+            wait_until(|| operation.executions() == cycle * 2 + 1, "initializer").await;
+            cancelled.abort();
+            assert!(cancelled.await.unwrap_err().is_cancelled());
+            assert_balanced(&stats(&runtime));
+            let retry = {
+                let load = load.clone();
+                tokio::spawn(async move { load.get(&window("retry"), 128, NO_OPTIONS).await })
+            };
+            wait_until(|| operation.executions() == cycle * 2 + 2, "retry").await;
+            gate.add_permits(1);
+            let value = retry.await.unwrap().unwrap();
+            let weak = Arc::downgrade(&value);
+            load.clear();
+            drop(value);
+            assert!(weak.upgrade().is_none(), "retry output retained: {cycle}");
+            let snapshot = stats(&runtime);
+            assert_eq!(snapshot.cancelled, (cycle + 1) as u64);
+            assert_eq!(snapshot.executed, (cycle + 1) as u64);
+            assert_eq!(snapshot.overloaded, 0);
+            assert_eq!(snapshot.cache_entries, 0);
+            assert_balanced(&snapshot);
+        }
+        runtime.shutdown().await;
+        assert_eq!(runtime.stats().active_projections, 0);
+        assert_eq!(runtime.stats().queued_projections, 0);
+    })
+    .await
+    .expect("cancellation churn must finish within 30 seconds");
+}
+
 // ---------------------------------------------------------------- budget
 
 struct Empty;

@@ -1,0 +1,15 @@
+{
+  "productName": "Notes consumer qualification",
+  "version": "0.0.0",
+  "identifier": "dev.tmwr.notesconsumer",
+  "build": { "frontendDist": "ui" },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [{ "label": "main", "title": "Notes consumer", "visible": false }],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; connect-src ipc: http://ipc.localhost; object-src 'none'; base-uri 'self'",
+      "capabilities": ["notes"]
+    }
+  },
+  "bundle": { "active": false, "icon": ["icons/32x32.png", "icons/icon.ico"] }
+}

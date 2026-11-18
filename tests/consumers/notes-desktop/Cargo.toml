@@ -1,0 +1,14 @@
+[workspace]
+[package]
+name = "tmwr-notes-desktop-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+[build-dependencies]
+tauri-build = "2"
+[dependencies]
+shared-runtime = { git = "https://github.com/kreeengvarotske/tauri-multi-window-runtime.git", rev = "bf6b66c2241a10fa92f402b07d4ab86b1f3dede9" }
+shared-runtime-tauri = { git = "https://github.com/kreeengvarotske/tauri-multi-window-runtime.git", rev = "bf6b66c2241a10fa92f402b07d4ab86b1f3dede9" }
+tauri = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
